@@ -199,6 +199,10 @@ escapes, and comment obfuscation do not change the verdict.
 Red team — `shared.sql` green: stacked statements, `WITH x AS (DELETE ... RETURNING *) SELECT * FROM x`,
 comment-smuggled payloads, recursive-CTE bombs. Each line asserts both *rejection* and the
 *expected `DenyReason`*.
+Plus a **corpus-loaded assertion**: the parsed corpus must be non-empty and every declared
+file must exist. An empty corpus collects zero tests and reports a green tick, which is the
+characteristic silent failure of file-driven suites — the most valuable security signal in
+the repo must not be able to disappear quietly.
 
 **Exit:** shared corpus fully green. No database involved.
 
