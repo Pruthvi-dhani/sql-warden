@@ -1,0 +1,47 @@
+# Two Postgres instances, deliberately separate.
+#
+# `target` is the database an agent queries through sql-warden. `audit` is where every
+# admission decision is recorded. They share no credentials and no role: if a policy bug
+# or parser bypass ever reaches the target, the evidence of what happened must not sit
+# inside the blast radius. See plan.md §4.9 and decision 7.
+#
+# Ports are 5433/5434 rather than 5432 so a locally installed Postgres does not clash.
+
+services:
+  target:
+    image: postgres:16
+    container_name: sql-warden-target
+    environment:
+      POSTGRES_DB: warden_target
+      POSTGRES_USER: target_admin
+      POSTGRES_PASSWORD: ${TARGET_DB_PASSWORD:-target_dev_password}
+    ports:
+      - "5433:5432"
+    volumes:
+      - target_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U target_admin -d warden_target"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  audit:
+    image: postgres:16
+    container_name: sql-warden-audit
+    environment:
+      POSTGRES_DB: warden_audit
+      POSTGRES_USER: audit_admin
+      POSTGRES_PASSWORD: ${AUDIT_DB_PASSWORD:-audit_dev_password}
+    ports:
+      - "5434:5432"
+    volumes:
+      - audit_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audit_admin -d warden_audit"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  target_data:
+  audit_data:
