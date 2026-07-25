@@ -47,6 +47,10 @@ packages = ["src/sql_warden"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# ruff formats Python embedded in Markdown. plan.md and implementation-plan.md are design
+# documents whose snippets are illustrative -- reformatting them would rewrite the design
+# docs on every lint run.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = [
@@ -91,6 +95,9 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers --strict-config"
+# Deprecations become failures. A guardrail project cannot afford to discover that a
+# security-relevant API changed behaviour by reading warning spam it had learned to skip.
+filterwarnings = ["error"]
 markers = [
     "integration: requires a live Postgres via Testcontainers or docker compose",
     "snowflake: requires a live Snowflake account and credentials",
