@@ -1,0 +1,97 @@
+[project]
+name = "sql-warden"
+version = "0.1.0"
+description = "A governed SQL gateway for AI agents, exposed over MCP."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+dependencies = [
+    "sqlglot>=27",
+    "pydantic>=2.9",
+    "psycopg[binary,pool]>=3.2",
+    # Pinned below 2.0 deliberately. The 2026-07-28 spec moves MCP from a stateful
+    # bidirectional protocol to stateless request/response, and rewrites the low-level
+    # Server interface. v1.x is the maintainer-recommended production line. See
+    # implementation-plan.md finding #1 — all mcp imports stay confined to server.py so
+    # the migration is one file.
+    "mcp>=1.28,<2",
+    "prometheus-client>=0.21",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+sql-warden = "sql_warden.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "testcontainers[postgres]>=4.8",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-pyyaml>=6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sql_warden"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "B",         # bugbear
+    "UP",        # pyupgrade
+    "ANN",       # flake8-annotations
+    "ASYNC",     # flake8-async
+    "S",         # bandit
+    "RUF",       # ruff-specific
+]
+ignore = [
+    "S101",  # assert is how pytest works
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Red-team fixtures contain deliberately hostile SQL as string literals.
+"tests/**" = ["S105", "S106", "S608"]
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = true
+show_error_codes = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# testcontainers ships no py.typed marker.
+module = ["testcontainers.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "integration: requires a live Postgres via Testcontainers or docker compose",
+    "snowflake: requires a live Snowflake account and credentials",
+]
