@@ -1,0 +1,101 @@
+# CI mirrors the split documented in plan.md §8. Policy correctness is unit-testable and
+# gated on every push. Postgres is hermetically testable via Testcontainers, so its
+# conformance and red-team suites also run on every push. Snowflake enforcement needs a
+# live account, so it runs on demand and on a schedule -- stated openly rather than hidden.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, so the Snowflake suites do not silently rot between manual runs.
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.32"
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+
+  typecheck:
+    name: Typecheck (mypy --strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run mypy
+
+  unit:
+    name: Unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked
+      # Red-team corpora (shared + Postgres) are parser-level and need no database, so
+      # they live here and gate every push.
+      - run: uv run pytest tests/unit tests/redteam -m "not integration and not snowflake"
+
+  integration:
+    name: Integration (Postgres via Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked
+      # ubuntu-latest ships a running Docker daemon, which is all Testcontainers needs.
+      - run: uv run pytest -m integration
+
+  snowflake:
+    name: Snowflake (live account)
+    runs-on: ubuntu-latest
+    # Never on push. A live-account suite that runs on every commit is a bill, not a gate.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    environment: snowflake
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Run Snowflake suites
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+        # Exit code 5 is "no tests collected". Tolerated until Stage 14 adds the
+        # Snowflake engine; remove this guard then, so an empty run fails loudly
+        # instead of reporting a green tick for a suite that never ran.
+        run: uv run pytest -m snowflake || [ $? -eq 5 ]
