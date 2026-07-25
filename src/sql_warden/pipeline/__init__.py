@@ -1,6 +1,6 @@
 """The query admission pipeline: PARSE, SHAPE, RESOLVE, POLICY, COST, EXECUTE, RECORD.
 
-Orchestration only. Nothing in this package may reference a specific engine by name --
-if a stage needs to branch on the engine, that capability belongs on the `Engine`
-protocol instead. Enforced by `tests/unit/test_engine_isolation.py`.
+Orchestration only. Nothing here should reference a specific engine by name -- if a stage
+finds itself branching on which engine is in use, that is a signal the capability belongs
+on the `Engine` protocol instead, declared by the engine and read by the pipeline.
 """

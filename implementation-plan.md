@@ -98,9 +98,11 @@ Applied from Stage 0 and enforced in CI:
 
 1. `ruff check` and `mypy --strict` are gates, not suggestions. No `# type: ignore` without
    a comment naming the reason.
-2. **No engine name appears outside `engines/`.** A grep for `"snowflake"` or `"postgres"`
-   under `pipeline/` or `policy/` fails CI. This mechanically enforces `plan.md` §3's
-   rationale — if a stage needs to branch on engine, the capability belongs on the protocol.
+2. **No engine name appears outside `engines/`.** A design principle held in review, not a
+   mechanical gate. If a stage finds itself branching on which engine is in use, the
+   capability belongs on the `Engine` protocol — declared by the engine, read by the
+   pipeline. Config refers to engines through an `EngineName` enum exported from
+   `engines/` rather than by writing the literal strings.
 3. Every stage ends green. No stage leaves a failing test for the next one to fix.
 4. Every new `DenyReason` arrives with a test that provokes it.
 5. Integration tests are marked (`@pytest.mark.integration`, `@pytest.mark.snowflake`) so
@@ -136,8 +138,12 @@ and in CI. `docker compose up` yields two reachable, independent databases.
 
 ### Stage 1 — Decisions, deny reasons, config
 
-Files: `pipeline/decisions.py`, `config.py`
+Files: `pipeline/decisions.py`, `config.py`, `engines/base.py` (partial)
 
+- `EngineName` as a `StrEnum` in `engines/base.py` — just the enum, the rest of the
+  protocol lands in Stage 2. It has to exist here because `config.py` types `cost_gate`
+  keys against it, which is what turns a typo'd `postgrez:` section into a load-time
+  error rather than a silently absent cost gate.
 - `Stage` and `DenyReason` as `StrEnum`. `Decision = Allow | Deny(reason, message, stage)`.
 - `DenyReason` carries a **disclosure level** (`VERBATIM` | `COARSE`), resolving §12's
   second open question in the type system rather than at call sites: shape and cost
@@ -159,7 +165,10 @@ without one fails); coarse reasons never emit the raw message.
 Files: `engines/base.py`, `catalog.py`
 
 - `CostUnit`, `CostEstimate`, `Enforced`, `EnforcementModel`, `Guard`, `Session`, `Engine`
-  Protocol exactly as `plan.md` §4.3.
+  Protocol exactly as `plan.md` §4.3, joining the `EngineName` enum added in Stage 1.
+- `engines/registry.py`: `EngineName -> factory` dict and `build_engine(cfg)`. This is the
+  single site where engine identity is consulted, once at startup — the Strategy selection
+  point. Nothing downstream branches on which engine is in use.
 - `CostEstimate` gains an optional `context: str | None` field for finding #2 (which
   warehouse the estimate is relative to).
 - `Catalog` / `Table` / `Column` dataclasses and `Catalog.to_sqlglot_schema() -> MappingSchema`.
@@ -365,7 +374,7 @@ Files: `server.py`
 - The five tools from §4.1. `explain_query` runs stages 1–5 and stops.
 - Tool descriptions written **for a model**: explicitly instructing disclosure of
   `truncated`, and that returned rows are untrusted content.
-- All `mcp` imports confined to this file (CI-enforced from Stage 0).
+- All `mcp` imports confined to this file, so a v2 migration stays local (finding #1).
 
 **Tests:** integration — an in-process MCP client drives all five tools; `describe_table`
 reports policy-restricted columns; `list_schemas`/`list_tables` omit what policy denies;
