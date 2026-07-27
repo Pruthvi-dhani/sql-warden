@@ -1,8 +1,7 @@
 """The engine seam.
 
-Stage 1 lands only the vocabulary that `config.py` needs to validate itself: which engines
-exist, and what units they can express a cost estimate in. The `Engine` protocol itself,
-along with `CostEstimate`, `EnforcementModel`, `Guard` and `Session`, arrives in Stage 2.
+Everything that differs between databases is declared here and implemented in a sibling
+module. The pipeline reads these declarations; it never asks which engine it is talking to.
 
 Design note (plan.md §4.3): a cost estimate is meaningless without its unit. A Postgres
 planner cost of 50,000 and 4 GB scanned in Snowflake are not comparable, so there is no
@@ -15,6 +14,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Final
+
+from pydantic import Field
+
+from sql_warden.models import FrozenModel
 
 
 class EngineName(StrEnum):
@@ -63,3 +66,76 @@ SUPPORTED_COST_UNITS: Final[Mapping[EngineName, frozenset[CostUnit]]] = {
     EngineName.POSTGRES: frozenset({CostUnit.PLANNER_COST}),
     EngineName.SNOWFLAKE: frozenset({CostUnit.BYTES_SCANNED, CostUnit.PARTITIONS_SCANNED}),
 }
+
+
+class UnitMismatch(TypeError):
+    """Raised when two costs in different units are compared.
+
+    A programming error, never a user-facing one. If this escapes, a threshold was checked
+    against a number that does not mean what the threshold means -- which is precisely the
+    failure the whole unit-carrying design exists to make impossible.
+    """
+
+
+class CostEstimate(FrozenModel):
+    """What a query is predicted to cost, in the engine's own terms."""
+
+    unit: CostUnit
+    value: float = Field(ge=0)
+
+    #: Whether this was obtained without spending the resource being measured. Postgres
+    #: EXPLAIN and Snowflake EXPLAIN are both pre-execution; a post-hoc figure read after
+    #: the fact is not a gate, it is a receipt.
+    is_pre_execution: bool
+
+    #: What the estimate is relative to, when that matters. Snowflake builds an EXPLAIN
+    #: plan against the current warehouse and falls back to XSMALL when there is none, so
+    #: the same query yields different numbers under different warehouses. Recording it is
+    #: the difference between a reproducible threshold and a number nobody can reconstruct.
+    context: str | None = None
+
+    def exceeds(self, threshold: float, unit: CostUnit) -> bool:
+        """Compare against a threshold, refusing to compare across units.
+
+        The unit argument is not redundant. Passing it forces every comparison site to say
+        which unit it believes it is working in, so a Postgres planner cost can never be
+        silently measured against a byte count.
+        """
+        if self.unit is not unit:
+            raise UnitMismatch(
+                f"cannot compare a cost in {self.unit.value!r} against a threshold in "
+                f"{unit.value!r}; these units are not convertible"
+            )
+        return self.value > threshold
+
+
+class Enforced(StrEnum):
+    """Where a control is actually applied."""
+
+    #: The engine enforces it, including for queries that never pass through sql-warden.
+    NATIVE = "native"
+
+    #: sql-warden enforces it -- an AST rewrite, an injected clause, a wrapper.
+    SERVER = "server"
+
+    #: Not enforced. Present so that a gap is stated rather than implied by omission.
+    NONE = "none"
+
+
+class EnforcementModel(FrozenModel):
+    """Where each control is enforced, for this engine.
+
+    Not decoration. The audit entry records this alongside every query, so a reviewer can
+    see that masking on Postgres came from an AST rewrite while masking on Snowflake came
+    from a policy attached to the column. "A control applied" and "this specific mechanism
+    applied" are different claims, and only the second one is evidence.
+
+    It is also what lets the pipeline branch on capability instead of on engine identity:
+    the POLICY stage rewrites when masking is SERVER and steps aside when it is NATIVE,
+    without ever knowing which database it is talking to.
+    """
+
+    readonly: Enforced
+    masking: Enforced
+    row_limit: Enforced
+    timeout: Enforced

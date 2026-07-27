@@ -16,16 +16,10 @@ from typing import Annotated, Final, Self
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import (
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-    ValidationError,
-    model_validator,
-)
+from pydantic import BeforeValidator, Field, ValidationError, model_validator
 
 from sql_warden.engines.base import SUPPORTED_COST_UNITS, CostUnit, EngineName
+from sql_warden.models import FrozenModel
 
 _DURATION = re.compile(r"^(?P<value>\d+)(?P<unit>ms|s|m|h)$")
 _DURATION_FACTORS: Final[dict[str, float]] = {
@@ -63,23 +57,12 @@ def _parse_duration(value: object) -> object:
 Duration = Annotated[timedelta, BeforeValidator(_parse_duration)]
 
 
-class _Frozen(BaseModel):
-    """Immutable, and unknown keys are errors.
-
-    `extra="forbid"` is the load-bearing setting. A mistyped key that is silently ignored
-    means the limit you believed you set was never set at all -- and you would only find
-    out from the size of the bill, or from the row that left the building.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class ServerConfig(_Frozen):
+class ServerConfig(FrozenModel):
     engine: EngineName
     policy_file: Path
 
 
-class TargetConfig(_Frozen):
+class TargetConfig(FrozenModel):
     """Connection to the database the agent queries.
 
     plan.md §5 does not include this section -- an omission, since the server cannot
@@ -90,36 +73,36 @@ class TargetConfig(_Frozen):
     dsn: str
 
 
-class AuditConfig(_Frozen):
+class AuditConfig(FrozenModel):
     dsn: str
 
 
-class LimitsConfig(_Frozen):
+class LimitsConfig(FrozenModel):
     max_rows: int = Field(gt=0)
     statement_timeout: Duration
 
 
-class CostGate(_Frozen):
+class CostGate(FrozenModel):
     unit: CostUnit
     max: float = Field(gt=0)
 
 
-class RateLimit(_Frozen):
+class RateLimit(FrozenModel):
     per_fingerprint: int = Field(gt=0)
     window: Duration
 
 
-class BudgetConfig(_Frozen):
+class BudgetConfig(FrozenModel):
     max_queries_per_session: int = Field(gt=0)
     max_cost_per_session: float = Field(gt=0)
     rate_limit: RateLimit
 
 
-class CatalogConfig(_Frozen):
+class CatalogConfig(FrozenModel):
     cache_ttl: Duration
 
 
-class Config(_Frozen):
+class Config(FrozenModel):
     """The whole server configuration."""
 
     server: ServerConfig
