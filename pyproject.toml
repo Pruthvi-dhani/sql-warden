@@ -9,7 +9,7 @@ license = { text = "MIT" }
 dependencies = [
     "sqlglot>=27",
     "pydantic>=2.9",
-    "psycopg[binary,pool]>=3.2",
+    "psycopg[binary,pool]>=3.3.4",
     # Pinned below 2.0 deliberately. The 2026-07-28 spec moves MCP from a stateful
     # bidirectional protocol to stateless request/response, and rewrites the low-level
     # Server interface. v1.x is the maintainer-recommended production line. See
