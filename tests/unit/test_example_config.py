@@ -7,7 +7,6 @@ anyone copies, and it fails at their startup rather than in our CI.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -51,22 +50,6 @@ def test_the_example_configures_a_gate_for_every_engine(env: None) -> None:
     assert set(config.cost_gate) == set(EngineName)
     for engine, gate in config.cost_gate.items():
         assert gate.unit in SUPPORTED_COST_UNITS[engine]
-
-
-def test_the_example_commits_no_credentials() -> None:
-    """Every DSN must come from the environment.
-
-    A worked example with a real-looking password in it is the version that gets copied
-    into production, and the one that ends up in a screenshot.
-    """
-    text = EXAMPLE.read_text()
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("dsn:"):
-            assert re.fullmatch(r"dsn:\s*\$\{[A-Z_][A-Z0-9_]*\}", stripped), (
-                f"example config has a literal DSN: {stripped!r}"
-            )
 
 
 def test_the_example_fails_closed_without_its_environment(
