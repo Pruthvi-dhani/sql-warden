@@ -48,8 +48,18 @@ def test_the_example_configures_a_gate_for_every_engine(env: None) -> None:
     config = Config.from_yaml(EXAMPLE)
 
     assert set(config.cost_gate) == set(EngineName)
-    for engine, gate in config.cost_gate.items():
-        assert gate.unit in SUPPORTED_COST_UNITS[engine]
+    for engine, gates in config.cost_gate.items():
+        assert gates, f"{engine} has an empty gate map"
+        assert set(gates) <= SUPPORTED_COST_UNITS[engine]
+
+
+def test_the_example_gates_snowflake_on_both_of_its_units(env: None) -> None:
+    """Snowflake reports bytes and partitions from a single EXPLAIN, so gating on both is
+    free and catches strictly more. An example showing only one teaches the weaker setup.
+    """
+    config = Config.from_yaml(EXAMPLE)
+
+    assert set(config.cost_gate[EngineName.SNOWFLAKE]) == SUPPORTED_COST_UNITS[EngineName.SNOWFLAKE]
 
 
 def test_the_example_fails_closed_without_its_environment(

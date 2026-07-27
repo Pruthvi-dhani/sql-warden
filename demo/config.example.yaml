@@ -30,15 +30,18 @@ limits:
 # Nested per engine because the units are not interchangeable. A Postgres planner cost of
 # 250,000 and 5 GB scanned in Snowflake are not comparable, and a single top-level
 # max_cost would be meaningless on at least one engine.
+#
+# One limit per unit. A query exceeding any of them is rejected.
 cost_gate:
   postgres:
-    unit: planner_cost
-    max: 250000
+    planner_cost: 250000
   snowflake:
-    # Either bytes_scanned or partitions_scanned; Snowflake reports both. Partitions are
-    # the better signal for whether pruning actually worked, which is what drives spend.
-    unit: bytes_scanned
-    max: 5_000_000_000 # 5 GB
+    # Snowflake reports both from a single EXPLAIN, and they catch different problems.
+    # Bytes bounds how much data a query touches. Partitions reveal whether pruning worked
+    # at all -- a badly filtered scan over a well-clustered table can read modest bytes
+    # while sweeping most of the table, and only the partition count shows it.
+    bytes_scanned: 5_000_000_000 # 5 GB
+    partitions_scanned: 1000
 
 # Agents loop. On Postgres a runaway agent wastes CPU; on Snowflake it spends money.
 budget:

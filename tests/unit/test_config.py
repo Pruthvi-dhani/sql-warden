@@ -22,8 +22,8 @@ VALID = {
     "audit": {"dsn": "postgresql://audit_writer@localhost:5434/warden_audit"},
     "limits": {"max_rows": 500, "statement_timeout": "30s"},
     "cost_gate": {
-        "postgres": {"unit": "planner_cost", "max": 250000},
-        "snowflake": {"unit": "bytes_scanned", "max": 5_000_000_000},
+        "postgres": {"planner_cost": 250000},
+        "snowflake": {"bytes_scanned": 5_000_000_000, "partitions_scanned": 1000},
     },
     "budget": {
         "max_queries_per_session": 50,
@@ -57,13 +57,15 @@ def test_the_documented_config_shape_loads(tmp_path: Path) -> None:
     assert config.catalog.cache_ttl == timedelta(minutes=5)
 
 
-def test_active_cost_gate_selects_the_configured_engine(tmp_path: Path) -> None:
+def test_active_cost_gates_select_the_configured_engine(tmp_path: Path) -> None:
     config = load(tmp_path)
-    assert config.active_cost_gate.unit is CostUnit.PLANNER_COST
-    assert config.active_cost_gate.max == 250000
+    assert config.active_cost_gates == {CostUnit.PLANNER_COST: 250000}
 
     snowflake = load(tmp_path, server={"engine": "snowflake", "policy_file": "./p.yaml"})
-    assert snowflake.active_cost_gate.unit is CostUnit.BYTES_SCANNED
+    assert snowflake.active_cost_gates == {
+        CostUnit.BYTES_SCANNED: 5_000_000_000,
+        CostUnit.PARTITIONS_SCANNED: 1000,
+    }
 
 
 def test_yaml_underscore_separated_numbers_parse_as_numbers(tmp_path: Path) -> None:
@@ -108,7 +110,7 @@ def test_unparseable_durations_are_rejected(tmp_path: Path, text: str) -> None:
 
 def test_missing_cost_gate_for_the_selected_engine_is_fatal(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no cost_gate configured"):
-        load(tmp_path, cost_gate={"snowflake": {"unit": "bytes_scanned", "max": 1}})
+        load(tmp_path, cost_gate={"snowflake": {"bytes_scanned": 1}})
 
 
 def test_cost_gate_in_a_unit_the_engine_cannot_report_is_fatal(tmp_path: Path) -> None:
@@ -116,29 +118,65 @@ def test_cost_gate_in_a_unit_the_engine_cannot_report_is_fatal(tmp_path: Path) -
     cleanly, look configured, and never fire.
     """
     with pytest.raises(ValueError, match="cannot report cost in"):
-        load(tmp_path, cost_gate={"postgres": {"unit": "bytes_scanned", "max": 5}})
+        load(tmp_path, cost_gate={"postgres": {"bytes_scanned": 5}})
 
 
-def test_snowflake_accepts_either_of_its_two_units(tmp_path: Path) -> None:
+def test_snowflake_accepts_either_of_its_two_units_alone(tmp_path: Path) -> None:
     for unit in ("bytes_scanned", "partitions_scanned"):
         config = load(
             tmp_path,
             server={"engine": "snowflake", "policy_file": "./p.yaml"},
-            cost_gate={"snowflake": {"unit": unit, "max": 100}},
+            cost_gate={"snowflake": {unit: 100}},
         )
-        assert config.active_cost_gate.unit == unit
+        assert set(config.active_cost_gates) == {CostUnit(unit)}
+
+
+def test_an_engine_can_gate_on_several_units_at_once(tmp_path: Path) -> None:
+    """Bytes and partitions catch different problems, and Snowflake reports both from one
+    EXPLAIN. A badly filtered scan over a well-clustered table reads modest bytes while
+    defeating pruning entirely -- only the partition count shows it, so gating on both
+    rejects queries that either alone would wave through.
+    """
+    config = load(
+        tmp_path,
+        server={"engine": "snowflake", "policy_file": "./p.yaml"},
+        cost_gate={"snowflake": {"bytes_scanned": 5_000_000_000, "partitions_scanned": 1000}},
+    )
+
+    assert config.active_cost_gates == {
+        CostUnit.BYTES_SCANNED: 5_000_000_000,
+        CostUnit.PARTITIONS_SCANNED: 1000,
+    }
+
+
+def test_an_empty_gate_map_for_the_selected_engine_is_fatal(tmp_path: Path) -> None:
+    """`postgres: {}` parses as valid YAML and leaves the engine entirely ungated -- the
+    same outcome as omitting it, so it fails the same way.
+    """
+    with pytest.raises(ValueError, match="no cost_gate configured"):
+        load(tmp_path, cost_gate={"postgres": {}})
+
+
+def test_one_bad_unit_among_several_is_still_fatal(tmp_path: Path) -> None:
+    """A valid gate alongside an invalid one must not make the invalid one acceptable."""
+    with pytest.raises(ValueError, match="cannot report cost in"):
+        load(
+            tmp_path,
+            server={"engine": "snowflake", "policy_file": "./p.yaml"},
+            cost_gate={"snowflake": {"bytes_scanned": 1, "planner_cost": 1}},
+        )
 
 
 def test_unknown_engine_key_is_rejected(tmp_path: Path) -> None:
     """A typo must not conjure an engine nobody threat-modelled (plan.md decision 10)."""
     with pytest.raises(ValueError):
-        load(tmp_path, cost_gate={"postgrez": {"unit": "planner_cost", "max": 1}})
+        load(tmp_path, cost_gate={"postgrez": {"planner_cost": 1}})
 
 
 @pytest.mark.parametrize("bad", [0, -1])
 def test_non_positive_thresholds_are_rejected(tmp_path: Path, bad: int) -> None:
     with pytest.raises(ValueError):
-        load(tmp_path, cost_gate={"postgres": {"unit": "planner_cost", "max": bad}})
+        load(tmp_path, cost_gate={"postgres": {"planner_cost": bad}})
 
 
 # -- audit separation ----------------------------------------------------------------
@@ -243,7 +281,7 @@ def test_every_config_failure_is_a_single_exception_type(tmp_path: Path) -> None
         load(tmp_path, limits={"max_rows": -5, "statement_timeout": "30s"})
 
     with pytest.raises(ConfigError):
-        load(tmp_path, cost_gate={"postgres": {"unit": "bytes_scanned", "max": 1}})
+        load(tmp_path, cost_gate={"postgres": {"bytes_scanned": 1}})
 
 
 def test_errors_name_the_offending_field(tmp_path: Path) -> None:

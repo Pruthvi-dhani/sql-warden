@@ -82,9 +82,16 @@ class LimitsConfig(FrozenModel):
     statement_timeout: Duration
 
 
-class CostGate(FrozenModel):
-    unit: CostUnit
-    max: float = Field(gt=0)
+#: Thresholds for one engine: a limit per unit, any one of which can reject a query.
+#:
+#: An engine may report several units, and they measure genuinely different things. On
+#: Snowflake `EXPLAIN USING JSON` returns partitions and bytes in one call: bytes tells you
+#: how much data the query touches, partitions tells you whether pruning worked at all. A
+#: query can be modest in one and alarming in the other -- a poorly filtered scan over a
+#: well-clustered table reads few bytes while defeating pruning entirely -- so gating on
+#: both catches queries that either alone would wave through. Configuring both is free,
+#: because the engine produces them from the same call.
+CostGates = dict[CostUnit, Annotated[float, Field(gt=0)]]
 
 
 class RateLimit(FrozenModel):
@@ -111,17 +118,18 @@ class Config(FrozenModel):
     limits: LimitsConfig
     #: Thresholds are nested per engine because the units are not interchangeable. A
     #: single top-level `max_cost` would be a design error (plan.md §5).
-    cost_gate: dict[EngineName, CostGate]
+    cost_gate: dict[EngineName, CostGates]
     budget: BudgetConfig
     catalog: CatalogConfig
 
     @property
-    def active_cost_gate(self) -> CostGate:
+    def active_cost_gates(self) -> CostGates:
+        """Every threshold for the selected engine. A query exceeding any one is rejected."""
         return self.cost_gate[self.server.engine]
 
     @model_validator(mode="after")
     def _selected_engine_has_a_cost_gate(self) -> Self:
-        if self.server.engine not in self.cost_gate:
+        if not self.cost_gate.get(self.server.engine):
             raise ConfigError(
                 f"no cost_gate configured for engine {self.server.engine!r}; without one "
                 f"the cost gate would never fire and expensive queries would run unchecked"
@@ -130,15 +138,16 @@ class Config(FrozenModel):
 
     @model_validator(mode="after")
     def _cost_gate_units_are_reportable_by_their_engine(self) -> Self:
-        for engine, gate in self.cost_gate.items():
+        for engine, gates in self.cost_gate.items():
             supported = SUPPORTED_COST_UNITS[engine]
-            if gate.unit not in supported:
-                readable = ", ".join(sorted(u.value for u in supported))
-                raise ConfigError(
-                    f"engine {engine!r} cannot report cost in {gate.unit.value!r}; "
-                    f"it reports {readable}. A threshold in a unit the engine never "
-                    f"produces is a gate that never fires."
-                )
+            for unit in gates:
+                if unit not in supported:
+                    readable = ", ".join(sorted(u.value for u in supported))
+                    raise ConfigError(
+                        f"engine {engine!r} cannot report cost in {unit.value!r}; "
+                        f"it reports {readable}. A threshold in a unit the engine never "
+                        f"produces is a gate that never fires."
+                    )
         return self
 
     @model_validator(mode="after")
