@@ -1,0 +1,209 @@
+"""Server configuration -- the schema for plan.md §5.
+
+Everything here is validated at load time. A guardrail whose configuration is wrong in a
+way nobody notices is worse than no guardrail, because it still looks like one, so this
+module prefers loud startup failures over anything that could silently leave a control
+disengaged.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from datetime import timedelta
+from pathlib import Path
+from typing import Annotated, Final, Self
+from urllib.parse import urlsplit
+
+import yaml
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+
+from sql_warden.engines.base import SUPPORTED_COST_UNITS, CostUnit, EngineName
+
+_DURATION = re.compile(r"^(?P<value>\d+)(?P<unit>ms|s|m|h)$")
+_DURATION_FACTORS: Final[dict[str, float]] = {
+    "ms": 0.001,
+    "s": 1.0,
+    "m": 60.0,
+    "h": 3600.0,
+}
+
+_ENV_REF = re.compile(r"^\$\{(?P<name>[A-Z_][A-Z0-9_]*)\}$")
+
+
+class ConfigError(ValueError):
+    """Raised when configuration is unusable. Always fatal -- never a warning."""
+
+
+def _parse_duration(value: object) -> object:
+    """Accept `30s`, `5m`, `500ms`, or a bare number of seconds."""
+    if isinstance(value, timedelta):
+        return value
+    if isinstance(value, int | float):
+        return timedelta(seconds=float(value))
+    if not isinstance(value, str):
+        return value
+
+    match = _DURATION.match(value.strip())
+    if match is None:
+        raise ConfigError(
+            f"invalid duration {value!r}; expected a number of seconds or a value "
+            f"suffixed with ms, s, m, or h (for example '30s' or '5m')"
+        )
+    return timedelta(seconds=int(match["value"]) * _DURATION_FACTORS[match["unit"]])
+
+
+Duration = Annotated[timedelta, BeforeValidator(_parse_duration)]
+
+
+class _Frozen(BaseModel):
+    """Immutable, and unknown keys are errors.
+
+    `extra="forbid"` is the load-bearing setting. A mistyped key that is silently ignored
+    means the limit you believed you set was never set at all -- and you would only find
+    out from the size of the bill, or from the row that left the building.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ServerConfig(_Frozen):
+    engine: EngineName
+    policy_file: Path
+
+
+class TargetConfig(_Frozen):
+    """Connection to the database the agent queries.
+
+    plan.md §5 does not include this section -- an omission, since the server cannot
+    connect without it. Added here so that the audit/target separation in §4.9 can be
+    checked at load time rather than assumed.
+    """
+
+    dsn: str
+
+
+class AuditConfig(_Frozen):
+    dsn: str
+
+
+class LimitsConfig(_Frozen):
+    max_rows: int = Field(gt=0)
+    statement_timeout: Duration
+
+
+class CostGate(_Frozen):
+    unit: CostUnit
+    max: float = Field(gt=0)
+
+
+class RateLimit(_Frozen):
+    per_fingerprint: int = Field(gt=0)
+    window: Duration
+
+
+class BudgetConfig(_Frozen):
+    max_queries_per_session: int = Field(gt=0)
+    max_cost_per_session: float = Field(gt=0)
+    rate_limit: RateLimit
+
+
+class CatalogConfig(_Frozen):
+    cache_ttl: Duration
+
+
+class Config(_Frozen):
+    """The whole server configuration."""
+
+    server: ServerConfig
+    target: TargetConfig
+    audit: AuditConfig
+    limits: LimitsConfig
+    #: Thresholds are nested per engine because the units are not interchangeable. A
+    #: single top-level `max_cost` would be a design error (plan.md §5).
+    cost_gate: dict[EngineName, CostGate]
+    budget: BudgetConfig
+    catalog: CatalogConfig
+
+    @property
+    def active_cost_gate(self) -> CostGate:
+        return self.cost_gate[self.server.engine]
+
+    @model_validator(mode="after")
+    def _selected_engine_has_a_cost_gate(self) -> Self:
+        if self.server.engine not in self.cost_gate:
+            raise ConfigError(
+                f"no cost_gate configured for engine {self.server.engine!r}; without one "
+                f"the cost gate would never fire and expensive queries would run unchecked"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _cost_gate_units_are_reportable_by_their_engine(self) -> Self:
+        for engine, gate in self.cost_gate.items():
+            supported = SUPPORTED_COST_UNITS[engine]
+            if gate.unit not in supported:
+                readable = ", ".join(sorted(u.value for u in supported))
+                raise ConfigError(
+                    f"engine {engine!r} cannot report cost in {gate.unit.value!r}; "
+                    f"it reports {readable}. A threshold in a unit the engine never "
+                    f"produces is a gate that never fires."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _audit_is_not_the_database_being_queried(self) -> Self:
+        """plan.md §4.9, enforced rather than trusted.
+
+        If a policy bug or parser bypass ever reaches the target, the evidence of what
+        happened must not sit inside the blast radius. A config that points both at the
+        same database defeats the entire audit design, and does so invisibly.
+        """
+        if _same_database(self.target.dsn, self.audit.dsn):
+            raise ConfigError(
+                "audit.dsn and target.dsn point at the same database; the audit trail "
+                "must live outside the blast radius of the database being queried"
+            )
+        return self
+
+    @classmethod
+    def from_yaml(cls, path: Path | str) -> Config:
+        """Load, expand `${ENV_VAR}` references, and validate."""
+        text = Path(path).read_text()
+        raw: object = yaml.safe_load(text)
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{path}: expected a YAML mapping at the top level")
+        return cls.model_validate(_expand_env(raw))
+
+
+def _expand_env(node: object) -> object:
+    """Replace `${VAR}` strings with their environment values, anywhere in the tree.
+
+    An unset variable is fatal. The alternative -- substituting an empty string -- would
+    turn a missing audit DSN into a server that starts up and writes its audit trail
+    nowhere.
+    """
+    if isinstance(node, dict):
+        return {key: _expand_env(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_expand_env(item) for item in node]
+    if isinstance(node, str):
+        match = _ENV_REF.match(node.strip())
+        if match is None:
+            return node
+        name = match["name"]
+        value = os.environ.get(name)
+        if value is None:
+            raise ConfigError(f"environment variable {name} is referenced by config but not set")
+        return value
+    return node
+
+
+def _same_database(left: str, right: str) -> bool:
+    """Compare two DSNs by what they actually address, ignoring credentials.
+
+    String equality is not enough: the same database reached with two different passwords
+    is still one blast radius.
+    """
+    a, b = urlsplit(left), urlsplit(right)
+    return (a.hostname, a.port, a.path) == (b.hostname, b.port, b.path)
