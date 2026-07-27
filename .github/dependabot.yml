@@ -1,0 +1,37 @@
+# Dependency and action updates.
+#
+# Everything sql-warden depends on sits in the trust path: sqlglot decides what a query
+# *is*, psycopg carries it to the database, and the MCP SDK is the front door. A CVE in any
+# of them is a CVE in the security boundary.
+
+version: 2
+
+updates:
+  # Dependabot updates uv.lock but not pyproject.toml. That suits this repo: pyproject.toml
+  # holds deliberate constraints -- notably `mcp>=1.28,<2`, which must survive the v2
+  # release -- and the lockfile holds resolved versions. Bumps stay inside the constraints
+  # we chose.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the dev toolchain instead of five. Security-relevant runtime deps stay
+      # ungrouped so each arrives with its own diff to read.
+      dev-tooling:
+        dependency-type: development
+        patterns: ["*"]
+    commit-message:
+      prefix: "bumps"
+
+  # Actions are pinned by major version, so a compromised or abandoned action would
+  # otherwise go unnoticed. This includes the security tooling itself.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "bumps"

@@ -1,0 +1,50 @@
+# Static analysis with dataflow, which is the part ruff's `S` rules structurally cannot do.
+#
+# ruff already runs the Bandit ruleset on every push, but those are single-expression
+# pattern matches: they can spot `eval(x)` and they cannot spot untrusted input reaching a
+# sink three functions away. That second thing is the interesting failure mode here --
+# sql-warden builds SQL (the masking rewrite, the row-limit injection) and writes hostile
+# strings to the audit database. CodeQL traces those paths.
+#
+# Free on public repositories.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly. New queries ship regularly, so a clean scan today is not a clean scan in a
+    # month, and nobody re-runs analysis on untouched code without a nudge.
+    - cron: "0 7 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write # upload findings to the Security tab
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # `security-extended` over the default set: more rules, more false positives,
+          # and on a project whose entire purpose is a security boundary that is the right
+          # side of the trade.
+          queries: security-extended
+
+      # No build step -- CodeQL analyses Python directly from source.
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

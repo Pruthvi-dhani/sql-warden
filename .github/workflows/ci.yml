@@ -22,6 +22,22 @@ env:
   UV_VERSION: "0.11.32"
 
 jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history. A credential that was committed and later "removed" is still in
+          # the log, still reachable, and still has to be rotated -- scanning only the tip
+          # would report clean on a repository that is not.
+          fetch-depth: 0
+      # Free for public repositories and personal accounts; GITLEAKS_LICENSE is required
+      # only for organisation-owned repos.
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
