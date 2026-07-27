@@ -2,6 +2,7 @@
 
 | File | Stage | Purpose |
 |---|---|---|
+| `config.example.yaml` | 1 | The server config of plan.md §5. Loaded by a test, so it cannot drift out of sync with the schema. DSNs come from the environment — no credentials in the repo. |
 | `roles.sql` | 4 | `warden_ro`: `USAGE` + `SELECT` only, `default_transaction_read_only = on`, no `CREATE` anywhere. The security boundary — the parser is not it. |
 | `policy.example.yaml` | 8 | Table denial on `kyc_documents`, column masking on `customers.email`, `date_of_birth`, `account_number` |
 | `audit_schema.sql` | 10 | Audit table DDL, applied to the *separate* audit database |

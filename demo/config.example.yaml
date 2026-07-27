@@ -1,0 +1,54 @@
+# sql-warden server configuration -- see plan.md §5.
+#
+# Copy alongside your deployment and point the server at it. Every value here is validated
+# at startup; nothing is defaulted silently, and an unknown key is an error rather than a
+# shrug.
+
+server:
+  engine: postgres
+  policy_file: ./demo/policy.example.yaml
+
+# The database the agent queries, via a role holding USAGE + SELECT and nothing else.
+# Credentials come from the environment -- never committed.
+target:
+  dsn: ${TARGET_DATABASE_URL}
+
+# Deliberately NOT the target database (plan.md §4.9). If a policy bug or parser bypass
+# ever reaches the target, the evidence of what happened must not sit inside the blast
+# radius. Pointing both at the same database is a startup error, not a warning.
+audit:
+  dsn: ${AUDIT_DATABASE_URL}
+
+limits:
+  # Results are capped and the cap is reported. A model told nothing about truncation will
+  # state as fact that there are 500 customers.
+  max_rows: 500
+  # A backstop, not the control -- a timeout only fires once the I/O is already spent.
+  # The cost gate below is what rejects an expensive scan before it starts.
+  statement_timeout: 30s
+
+# Nested per engine because the units are not interchangeable. A Postgres planner cost of
+# 250,000 and 5 GB scanned in Snowflake are not comparable, and a single top-level
+# max_cost would be meaningless on at least one engine.
+cost_gate:
+  postgres:
+    unit: planner_cost
+    max: 250000
+  snowflake:
+    # Either bytes_scanned or partitions_scanned; Snowflake reports both. Partitions are
+    # the better signal for whether pruning actually worked, which is what drives spend.
+    unit: bytes_scanned
+    max: 5_000_000_000 # 5 GB
+
+# Agents loop. On Postgres a runaway agent wastes CPU; on Snowflake it spends money.
+budget:
+  max_queries_per_session: 50
+  max_cost_per_session: 50_000_000_000
+  rate_limit:
+    # Fingerprints normalise literals out, so the same query with a rolling date counts as
+    # one pattern rather than fifty.
+    per_fingerprint: 5
+    window: 60s
+
+catalog:
+  cache_ttl: 5m

@@ -229,3 +229,42 @@ def test_non_mapping_yaml_is_rejected(tmp_path: Path) -> None:
     path.write_text("- just\n- a list\n")
     with pytest.raises(ConfigError, match="mapping"):
         Config.from_yaml(path)
+
+
+# -- error reporting -----------------------------------------------------------------
+
+
+def test_every_config_failure_is_a_single_exception_type(tmp_path: Path) -> None:
+    """Field errors surface through Pydantic and cross-field rules through our own
+    validators. Both must arrive as `ConfigError`, or a caller has to catch two types
+    depending on which check happened to fail first.
+    """
+    with pytest.raises(ConfigError):
+        load(tmp_path, limits={"max_rows": -5, "statement_timeout": "30s"})
+
+    with pytest.raises(ConfigError):
+        load(tmp_path, cost_gate={"postgres": {"unit": "bytes_scanned", "max": 1}})
+
+
+def test_errors_name_the_offending_field(tmp_path: Path) -> None:
+    """An operator fixing a config needs the path to the problem, not a traceback."""
+    with pytest.raises(ConfigError, match=r"limits\.max_rows: .*greater than 0"):
+        load(tmp_path, limits={"max_rows": -5, "statement_timeout": "30s"})
+
+
+def test_multiple_field_errors_are_reported_together(tmp_path: Path) -> None:
+    """Fixing config one error per run is a bad afternoon."""
+    with pytest.raises(ConfigError) as caught:
+        load(
+            tmp_path,
+            limits={"max_rows": -5, "statement_timeout": "30s"},
+            budget={
+                "max_queries_per_session": 0,
+                "max_cost_per_session": 1,
+                "rate_limit": {"per_fingerprint": 5, "window": "60s"},
+            },
+        )
+
+    message = str(caught.value)
+    assert "limits.max_rows" in message
+    assert "budget.max_queries_per_session" in message

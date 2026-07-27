@@ -16,7 +16,14 @@ from typing import Annotated, Final, Self
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from sql_warden.engines.base import SUPPORTED_COST_UNITS, CostUnit, EngineName
 
@@ -168,12 +175,36 @@ class Config(_Frozen):
 
     @classmethod
     def from_yaml(cls, path: Path | str) -> Config:
-        """Load, expand `${ENV_VAR}` references, and validate."""
+        """Load, expand `${ENV_VAR}` references, and validate.
+
+        Raises `ConfigError` for anything wrong with the configuration -- a missing file,
+        an unset environment variable, a bad type, or a failed cross-field rule. Pydantic
+        wraps validator exceptions in its own `ValidationError`, so without this a caller
+        would have to catch two exception types depending on *which* check failed, and
+        would print a stack trace where an operator needs one readable line.
+        """
         text = Path(path).read_text()
         raw: object = yaml.safe_load(text)
         if not isinstance(raw, dict):
             raise ConfigError(f"{path}: expected a YAML mapping at the top level")
-        return cls.model_validate(_expand_env(raw))
+        try:
+            return cls.model_validate(_expand_env(raw))
+        except ValidationError as exc:
+            raise ConfigError(f"{path} is invalid:\n{_format_errors(exc)}") from exc
+
+
+def _format_errors(exc: ValidationError) -> str:
+    """Render Pydantic's errors as one line per problem, keyed by where it is in the file.
+
+    An operator fixing a config wants `limits.max_rows: input should be greater than 0`,
+    not a traceback.
+    """
+    lines: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"]) or "<root>"
+        message = error["msg"].removeprefix("Value error, ")
+        lines.append(f"  {location}: {message}")
+    return "\n".join(lines)
 
 
 def _expand_env(node: object) -> object:
