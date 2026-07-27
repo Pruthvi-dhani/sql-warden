@@ -79,9 +79,15 @@ ignore = [
 python_version = "3.12"
 strict = true
 warn_unreachable = true
-disallow_any_explicit = true
 show_error_codes = true
 files = ["src", "tests"]
+# Checks Pydantic's synthesised __init__ signatures and field types, which plain strict
+# mode cannot see.
+#
+# `disallow_any_explicit` is deliberately NOT set: every BaseModel subclass synthesises an
+# `__init__(**data: Any)`, so it flags each model class and cannot be satisfied in a
+# Pydantic project. Keeping Any out of the Engine protocol is a design rule, not a flag.
+plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 # testcontainers ships no py.typed marker.
