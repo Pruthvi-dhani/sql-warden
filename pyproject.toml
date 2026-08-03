@@ -15,7 +15,7 @@ dependencies = [
     # Server interface. v1.x is the maintainer-recommended production line. See
     # implementation-plan.md finding #1 — all mcp imports stay confined to server.py so
     # the migration is one file.
-    "mcp>=1.28,<2",
+    "mcp>=2.0.0,<3",
     "prometheus-client>=0.21",
     "pyyaml>=6",
 ]
