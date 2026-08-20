@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 
 dependencies = [
-    "sqlglot>=27",
+    "sqlglot>=30.17.0",
     "pydantic>=2.9",
     "psycopg[binary,pool]>=3.2",
     # Pinned below 2.0 deliberately. The 2026-07-28 spec moves MCP from a stateful
