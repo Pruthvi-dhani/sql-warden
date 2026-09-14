@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 
 dependencies = [
-    "sqlglot>=27",
+    "sqlglot>=30.17.0",
     "pydantic>=2.9",
     "psycopg[binary,pool]>=3.2",
     # Pinned below 2.0 deliberately. The 2026-07-28 spec moves MCP from a stateful
@@ -15,7 +15,7 @@ dependencies = [
     # Server interface. v1.x is the maintainer-recommended production line. See
     # implementation-plan.md finding #1 — all mcp imports stay confined to server.py so
     # the migration is one file.
-    "mcp>=1.28,<2",
+    "mcp>=2.0.0,<3",
     "prometheus-client>=0.21",
     "pyyaml>=6",
 ]
@@ -27,8 +27,8 @@ sql-warden = "sql_warden.server:main"
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "testcontainers[postgres]>=4.8",
-    "ruff>=0.8",
+    "testcontainers[postgres]>=4.15.0",
+    "ruff>=0.16.1",
     "mypy>=1.13",
     "types-pyyaml>=6",
 ]
