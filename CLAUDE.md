@@ -11,9 +11,10 @@ by construction — no writes, no NL-to-SQL.
 The project is **built in numbered stages**. [plan.md](plan.md) is the design, threat model,
 and decision log; [implementation-plan.md](implementation-plan.md) is the stage-by-stage build
 order with a binary exit criterion per stage. Both are normative — code comments cite them by
-section (`plan.md §4.3`, `decision 10`), and new code should keep doing that. Stages 0–1 are
-complete and Stage 2 (`engines/base.py`, `catalog.py`) is partially landed; most modules named
-in `plan.md` §3 do not exist yet.
+section (`plan.md §4.3`, `decision 10`), and new code should keep doing that. **Stages 0–2 are
+complete; Stage 3 (PARSE and SHAPE, `pipeline/stages.py` + `tests/redteam/shared.sql`) is next.**
+No engine implementation exists yet — `build_engine` raises `EngineNotImplemented` for both
+names, by design, until Stage 4 (Postgres) and Stage 14 (Snowflake).
 
 ## Commands
 
@@ -64,14 +65,32 @@ Three invariants the existing code exists to protect, each with tests that pin i
   enumerate). All coarse denials return one identical code and message, deliberately: differing
   text would let an agent map the policy by diffing rejections.
 
+**The catalog** ([catalog.py](src/sql_warden/catalog.py)) bridges introspection to RESOLVE.
+`Catalog.to_sqlglot_schema()` produces the `MappingSchema` that `qualify()` resolves against —
+unknown objects raise `OptimizeError`, which *is* the RESOLVE rejection (finding #3). Every
+identifier is folded through the engine's own dialect rules (`fold()`), so `Catalog.table()` and
+the schema given to `qualify()` cannot disagree about what the same table is; if they could, a
+column could resolve under one spelling and be policy-matched under another. `normalize=True`
+means a quoted mixed-case column becomes unresolvable — a documented fail-closed trade-off with
+a test that says why not to "fix" it.
+
+Two deliberate departures from `plan.md` §4.3's illustrative `Engine` signature, both documented
+in [engines/base.py](src/sql_warden/engines/base.py): the engine **owns its connection pool** (no
+method takes a `conn`, which is what buys Stage 2's "no `Any` in the protocol" — psycopg and
+Snowflake connections share no supertype), and `estimate` therefore lives on `Session` beside
+`fetch`, so COST and EXECUTE share one read-only, timeout-bounded transaction rather than
+estimating under different settings than the query runs under.
+
 **Config** (`config.py`) is validated at load with cross-field `model_validator`s, expands
 `${ENV_VAR}` references (an unset variable is fatal), and raises `ConfigError` for everything —
 callers should never have to catch `ValidationError` too. `demo/config.example.yaml` is loaded
 by a test so it cannot drift from the schema.
 
-`server.py` is the **only** module permitted to import from `mcp`. The dependency is pinned
-`<2` because the 2026-07-28 spec rewrites the low-level `Server` interface; confining it keeps
-that migration to one file.
+`server.py` is the **only** module permitted to import from `mcp`, so that the v1→v2 migration
+stays in one file (implementation-plan.md finding #1). Note the dependency is now `mcp>=2.0.0,<3`
+via a merged Dependabot bump, while the comment above it in `pyproject.toml` still describes the
+deliberate `<2` pin — no `mcp` import exists yet, so Stage 12 should be written against v2's
+stateless request/response interface or the pin restored, consciously either way.
 
 ## Conventions
 
@@ -80,7 +99,14 @@ that migration to one file.
 - `StrEnum` for anything that reaches YAML, JSON, or an audit row.
 - Enum-total maps (`DISCLOSURE`, `SUPPORTED_COST_UNITS`) are tested with `@pytest.mark.parametrize`
   over the enum plus a set-equality check, so adding a member without an entry fails immediately.
-  Keep that pattern when adding one.
+  Keep that pattern when adding one. Tests parametrised over `EngineName` in `test_registry.py`
+  branch on `implemented_engines()` so they follow the implementation instead of needing a rewrite
+  when an engine lands.
+- Protocol conformance is a **static** assertion, not a runtime one: `tests/unit/test_engine_protocol.py`
+  assigns a complete stub to `Engine` (fails to typecheck if a method is added without updating it)
+  and an incomplete one under `# type: ignore[assignment]`. Strict mode's `warn_unused_ignores`
+  makes that second line enforce the negative case — if the incomplete engine ever satisfied the
+  protocol, the now-unused ignore fails the build. Both directions verified.
 - Every new `DenyReason` arrives with a test that provokes it.
 - `filterwarnings = ["error"]` and `--strict-markers`: a deprecation is a failure.
 - No `# type: ignore` without a comment naming the reason. `mypy --strict` and `ruff check`
