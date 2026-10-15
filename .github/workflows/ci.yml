@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
       # Free for public repositories and personal accounts; GITLEAKS_LICENSE is required
       # only for organisation-owned repos.
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
