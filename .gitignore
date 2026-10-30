@@ -1,2 +1,19 @@
 __pycache__/
 *.py[cod]
+
+# Environments and secrets
+.venv/
+.env
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Local config (copy warden.example.yaml to warden.yaml)
+warden.yaml
