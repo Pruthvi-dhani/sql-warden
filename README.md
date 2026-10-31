@@ -30,3 +30,26 @@ uv run mypy                               # strict
 uv run pytest                             # unit + integration tests
 uv run pytest -m "not integration"        # skip tests that need Docker
 ```
+
+### Demo stack
+
+```bash
+docker compose -f dev/docker-compose.yml up -d
+```
+
+| Service     | Port | Database    | Purpose                                         |
+|-------------|------|-------------|-------------------------------------------------|
+| `warehouse` | 5433 | `warehouse` | the data agents query, seeded on first start    |
+| `audit`     | 5434 | `audit`     | sql-warden's audit log, on a separate instance  |
+
+The warehouse is seeded from [dev/warehouse_seed.sql](dev/warehouse_seed.sql) with deterministic
+demo data: `products` (200), `customers` (10k, with `email`, `phone` and `ssn`), `orders` (1M) and
+`employee_salaries` (50, meant to stay off-limits). sql-warden connects as `warden_reader`, which
+can only `SELECT`.
+
+```bash
+psql postgresql://warden_reader:warden_reader@localhost:5433/warehouse
+```
+
+Integration tests start their own throwaway containers from the same seed, so they don't need
+this stack running.

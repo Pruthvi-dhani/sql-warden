@@ -1,0 +1,46 @@
+# Local demo stack. Credentials here are for local development only.
+#
+#   warehouse  :5433  the database agents query, seeded from warehouse_seed.sql
+#   audit      :5434  sql-warden's own audit log, kept on a separate instance
+#
+# The seed runs only when the warehouse volume is empty. To reseed:
+#   docker compose -f dev/docker-compose.yml down -v && docker compose -f dev/docker-compose.yml up -d
+name: sql-warden
+
+services:
+  warehouse:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: warehouse
+      POSTGRES_USER: warehouse_admin
+      POSTGRES_PASSWORD: warehouse_admin
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./warehouse_seed.sql:/docker-entrypoint-initdb.d/01_warehouse_seed.sql:ro
+      - warehouse_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warehouse_admin -d warehouse"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  audit:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: audit
+      POSTGRES_USER: warden_audit
+      POSTGRES_PASSWORD: warden_audit
+    ports:
+      - "5434:5432"
+    volumes:
+      - audit_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warden_audit -d audit"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  warehouse_data:
+  audit_data:

@@ -5,13 +5,16 @@ description = "A governed SQL gateway that lets AI agents query real databases w
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "psycopg[binary]>=3.2",
+]
 
 [dependency-groups]
 dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "ruff>=0.8",
+    "testcontainers[postgres]>=4.15",
 ]
 
 [build-system]
@@ -24,7 +27,7 @@ packages = ["src/sql_warden"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "."]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PT"]
