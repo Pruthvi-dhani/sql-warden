@@ -6,8 +6,12 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "click>=8.1",
     "psycopg[binary]>=3.2",
 ]
+
+[project.scripts]
+sql-warden = "sql_warden.cli:cli"
 
 [dependency-groups]
 dev = [

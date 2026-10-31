@@ -53,3 +53,14 @@ psql postgresql://warden_reader:warden_reader@localhost:5433/warehouse
 
 Integration tests start their own throwaway containers from the same seed, so they don't need
 this stack running.
+
+### Try it
+
+```bash
+uv run sql-warden query "select id, name, price_cents from products order by id" --max-rows 5
+uv run sql-warden query "select pg_sleep(3)" --timeout-ms 500     # cancelled by the timeout
+```
+
+`query` connects to the demo warehouse as `warden_reader` by default. Point it elsewhere with
+`--dsn` or `SQL_WARDEN_DSN`. Every query runs in a read-only transaction with a statement
+timeout and a row cap. There are no policy checks yet.
