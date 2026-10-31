@@ -64,6 +64,25 @@ uv run sql-warden query "select pg_sleep(3)" --timeout-ms 500     # cancelled by
 ```
 
 `check` runs the checks without touching the database. `query` runs the same checks and, if
-they all pass, executes the SQL. Both connect to the demo warehouse as `warden_reader` by
-default; point them elsewhere with `--dsn` or `SQL_WARDEN_DSN`. Every query runs in a read-only
-transaction with a statement timeout and a row cap. So far the only check is `parse`.
+they all pass, executes the SQL. Every query runs in a read-only transaction with a statement
+timeout and a row cap. So far the only check is `parse`.
+
+## Configuration
+
+sql-warden reads its policy from `warden.yaml`. Start from the example:
+
+```bash
+cp warden.example.yaml warden.yaml
+uv run sql-warden config validate          # checks the file without connecting
+```
+
+Which config is used, highest priority first:
+
+1. command-line flags (`--dsn`, `--max-rows`, `--timeout-ms`) and `SQL_WARDEN_DSN`
+2. the file given by `--config PATH` or `SQL_WARDEN_CONFIG`
+3. `./warden.yaml`, if it exists
+4. built-in defaults for the local demo stack
+
+Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
+stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
+enforces it.

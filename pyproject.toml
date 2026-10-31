@@ -8,6 +8,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "click>=8.1",
     "psycopg[binary]>=3.2",
+    "pydantic>=2.9",
+    "pyyaml>=6",
     "sqlglot>=30.17",
 ]
 
@@ -20,6 +22,7 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.8",
     "testcontainers[postgres]>=4.15",
+    "types-pyyaml>=6",
 ]
 
 [build-system]
@@ -43,6 +46,12 @@ strict = true
 files = ["src", "tests"]
 mypy_path = "src"
 explicit_package_bases = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

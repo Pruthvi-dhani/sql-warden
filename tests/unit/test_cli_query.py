@@ -2,7 +2,8 @@ import pytest
 from click.testing import CliRunner
 
 from sql_warden import cli as cli_module
-from sql_warden.cli import DEFAULT_DSN, cli
+from sql_warden.cli import cli
+from sql_warden.config import DEFAULT_DSN
 from sql_warden.engines import QueryTimeout
 from tests.unit.conftest import FakeEngine
 
@@ -53,7 +54,7 @@ def test_refused_query_shows_the_reason_and_never_executes(engines: list[FakeEng
 
 
 def test_engine_errors_become_a_clean_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    def failing(dsn: str, *, statement_timeout_ms: int, max_rows: int) -> FakeEngine:
+    def failing(dsn: str, **settings: int) -> FakeEngine:
         return FakeEngine(error=QueryTimeout("query cancelled"))
 
     monkeypatch.setattr(cli_module, "PostgresEngine", failing)

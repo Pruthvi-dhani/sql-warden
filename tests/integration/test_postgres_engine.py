@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -103,3 +104,19 @@ def test_warden_runs_allowed_queries_and_stops_malformed_ones(warehouse: Warehou
     refused_by = refused.decision.refused_by
     assert refused_by is not None
     assert refused_by.check == "parse"
+
+
+def test_cli_query_reads_settings_from_a_config_file(
+    warehouse: Warehouse, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TEST_READER_DSN", warehouse.reader_dsn)
+    monkeypatch.delenv("SQL_WARDEN_DSN", raising=False)
+    config = tmp_path / "warden.yaml"
+    config.write_text("version: 1\nwarehouse:\n  dsn: ${TEST_READER_DSN}\n  max_rows: 3\n")
+    outcome = CliRunner().invoke(
+        cli, ["--config", str(config), "query", "SELECT id FROM orders ORDER BY id"]
+    )
+    assert outcome.exit_code == 0, outcome.output
+    lines = outcome.output.splitlines()
+    assert lines[2:5] == ["1", "2", "3"]
+    assert lines[5].startswith("(3 rows, truncated at the row cap, ")

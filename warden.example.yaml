@@ -1,0 +1,18 @@
+# sql-warden policy file. Copy to warden.yaml (git-ignored) and adjust:
+#
+#   cp warden.example.yaml warden.yaml
+#   uv run sql-warden config validate
+#
+# Strings may reference environment variables as ${NAME} or ${NAME:-default}, so secrets can
+# stay out of the file. Unknown keys are errors: a section appears here once sql-warden
+# enforces it.
+
+version: 1
+
+warehouse:
+  engine: postgres
+  # The read-only role from dev/docker-compose.yml.
+  dsn: postgresql://warden_reader:${WARDEN_READER_PASSWORD:-warden_reader}@localhost:5433/warehouse
+  statement_timeout_ms: 5000   # queries running longer are cancelled
+  max_rows: 100                # rows returned per query; more are cut off and flagged
+  connect_timeout_s: 5
