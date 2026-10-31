@@ -57,10 +57,13 @@ this stack running.
 ### Try it
 
 ```bash
+uv run sql-warden check "select id, name from products"          # dry run: one line per check
+uv run sql-warden check "select (1"                              # ✗ parse  PARSE_ERROR: Expecting ) ...
 uv run sql-warden query "select id, name, price_cents from products order by id" --max-rows 5
 uv run sql-warden query "select pg_sleep(3)" --timeout-ms 500     # cancelled by the timeout
 ```
 
-`query` connects to the demo warehouse as `warden_reader` by default. Point it elsewhere with
-`--dsn` or `SQL_WARDEN_DSN`. Every query runs in a read-only transaction with a statement
-timeout and a row cap. There are no policy checks yet.
+`check` runs the checks without touching the database. `query` runs the same checks and, if
+they all pass, executes the SQL. Both connect to the demo warehouse as `warden_reader` by
+default; point them elsewhere with `--dsn` or `SQL_WARDEN_DSN`. Every query runs in a read-only
+transaction with a statement timeout and a row cap. So far the only check is `parse`.

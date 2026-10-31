@@ -1,6 +1,27 @@
 """Plain-text output for the CLI."""
 
 from sql_warden.engines import Result
+from sql_warden.models import Decision
+
+
+def format_decision(decision: Decision, *, dry_run: bool) -> str:
+    """One line per check that ran, then the verdict."""
+    width = max(len(entry.check) for entry in decision.trace)
+    lines = []
+    for entry in decision.trace:
+        if entry.refusal is None:
+            lines.append(f"✓ {entry.check.ljust(width)}  {entry.duration_ms:.1f} ms")
+        else:
+            refusal = entry.refusal
+            lines.append(f"✗ {entry.check.ljust(width)}  {refusal.code}: {refusal.reason}")
+    refused_by = decision.refused_by
+    if refused_by is not None:
+        lines.append(f"→ refused by {refused_by.check}")
+    elif dry_run:
+        lines.append("→ allowed (dry run, nothing was executed)")
+    else:
+        lines.append("→ allowed")
+    return "\n".join(lines)
 
 
 def format_value(value: object) -> str:

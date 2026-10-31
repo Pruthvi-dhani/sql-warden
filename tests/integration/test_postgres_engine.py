@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from sql_warden.cli import cli
 from sql_warden.engines import EngineUnavailable, QueryFailed, QueryTimeout
 from sql_warden.engines.postgres import PostgresEngine
+from sql_warden.warden import Warden
 from tests.integration.conftest import Warehouse
 
 pytestmark = pytest.mark.integration
@@ -90,3 +91,15 @@ def test_cli_query_end_to_end(warehouse: Warehouse) -> None:
     lines = outcome.output.splitlines()
     assert lines[:4] == ["id | name", "---+----------", "1  | Product 1", "2  | Product 2"]
     assert lines[4].startswith("(2 rows, truncated at the row cap, ")
+
+
+def test_warden_runs_allowed_queries_and_stops_malformed_ones(warehouse: Warehouse) -> None:
+    warden = Warden(PostgresEngine(warehouse.reader_dsn))
+    allowed = warden.run("SELECT count(*) FROM products")
+    assert allowed.result is not None
+    assert allowed.result.rows == ((200,),)
+    refused = warden.run("SELECT count(* FROM products")
+    assert refused.result is None
+    refused_by = refused.decision.refused_by
+    assert refused_by is not None
+    assert refused_by.check == "parse"
