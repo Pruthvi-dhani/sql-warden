@@ -5,7 +5,9 @@
 #
 # The seed runs only when the warehouse volume is empty. To reseed:
 #   docker compose -f dev/docker-compose.yml down -v && docker compose -f dev/docker-compose.yml up -d
-name: sql-warden
+#
+# The project name is distinct so the stack never adopts other containers or volumes.
+name: sql-warden-demo
 
 services:
   warehouse:

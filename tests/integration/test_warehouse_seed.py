@@ -47,7 +47,7 @@ def test_order_totals_match_product_prices(warehouse: Warehouse) -> None:
 
 
 def test_planner_statistics_are_collected(warehouse: Warehouse) -> None:
-    # The cost check (Phase 5) relies on realistic estimates from the first query.
+    # The cost check relies on realistic planner estimates from the first query.
     estimated = _scalar(
         warehouse.admin_dsn, "SELECT reltuples::bigint FROM pg_class WHERE relname = 'orders'"
     )

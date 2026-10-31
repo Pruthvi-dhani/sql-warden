@@ -17,7 +17,7 @@ a separate audit database.
 
 Agents connect over MCP. Humans can use the `sql-warden` CLI.
 
-> **Status:** under construction (Phase 0: scaffolding).
+> **Status:** under construction. Parse check, read-only engine and CLI work today; the MCP server and a browser test portal are next.
 
 ## Development
 
