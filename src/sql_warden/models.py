@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sql_warden.engines import Result
+from sql_warden.engines import EngineError, Result
 
 
 class RefusalCode(StrEnum):
@@ -62,4 +62,6 @@ class Decision:
 class QueryOutcome:
     decision: Decision
     result: Result | None
-    """None when the query was refused."""
+    """None when the query was refused or failed."""
+    error: EngineError | None = None
+    """Why an allowed query did not produce a result."""

@@ -13,6 +13,19 @@ class Result:
     duration_ms: float
 
 
+@dataclass(frozen=True)
+class Column:
+    name: str
+    type: str
+
+
+@dataclass(frozen=True)
+class Table:
+    schema: str
+    name: str
+    columns: tuple[Column, ...]
+
+
 class EngineError(Exception):
     """A query could not be run. The message is safe to show to the caller."""
 
@@ -39,4 +52,8 @@ class Engine(Protocol):
 
     def execute(self, sql: str) -> Result:
         """Run one read-only query, returning at most the engine's row cap."""
+        ...
+
+    def tables(self) -> tuple[Table, ...]:
+        """The tables and views the engine's role can read, with their columns."""
         ...

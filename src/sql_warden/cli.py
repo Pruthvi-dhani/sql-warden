@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+import uvicorn
 
 from sql_warden import __version__
 from sql_warden.config import (
@@ -14,9 +15,9 @@ from sql_warden.config import (
     describe_dsn,
     load_config,
 )
-from sql_warden.engines import EngineError
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.render import format_decision, format_rewrites, format_table
+from sql_warden.server import create_http_app, create_server
 from sql_warden.warden import Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
@@ -122,16 +123,52 @@ def query(
 ) -> None:
     """Run SQL through the checks and, if allowed, against the warehouse."""
     warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
-    try:
-        outcome = warden.run(sql)
-    except EngineError as exc:
-        raise click.ClickException(str(exc)) from exc
+    outcome = warden.run(sql)
+    if outcome.error is not None:
+        raise click.ClickException(str(outcome.error)) from outcome.error
     if outcome.result is None:
         click.echo(format_decision(outcome.decision, dry_run=False))
         raise SystemExit(1)
     click.echo(format_table(outcome.result))
     for note in format_rewrites(outcome.decision):
         click.echo(note)
+
+
+@cli.command()
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "http"]),
+    default="stdio",
+    show_default=True,
+    help="stdio for an agent that launches sql-warden; http for local tools like the portal.",
+)
+@click.option(
+    "--host", default="127.0.0.1", show_default=True, help="HTTP only. Loopback addresses only."
+)
+@click.option("--port", type=click.IntRange(1, 65535), default=8000, show_default=True)
+@engine_options
+@click.pass_obj
+def serve(
+    state: CliState,
+    transport: str,
+    host: str,
+    port: int,
+    dsn: str | None,
+    max_rows: int | None,
+    timeout_ms: int | None,
+) -> None:
+    """Serve the MCP tools: run_query, check_query and list_tables."""
+    warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
+    if transport == "stdio":
+        create_server(warden).run("stdio")
+        return
+    try:
+        app = create_http_app(warden, host=host)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    url_host = f"[{host}]" if ":" in host else host
+    click.echo(f"sql-warden MCP server on http://{url_host}:{port}/mcp (Ctrl+C stops it)", err=True)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 @cli.group()

@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 from sql_warden.config import ShapeConfig
-from sql_warden.engines import Engine
+from sql_warden.engines import Engine, EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
 from sql_warden.pipeline import Check, CheckContext, ParseCheck, Pipeline, ShapeCheck
 
@@ -35,7 +35,16 @@ class Warden:
         return replace(decision, sql=final_sql, rewrites=tuple(ctx.rewrites))
 
     def run(self, sql: str) -> QueryOutcome:
+        """Check the query and, if allowed, execute it. Engine errors are reported in the
+        outcome, not raised, so the decision is never lost."""
         decision = self.check(sql)
         if decision.sql is None:
             return QueryOutcome(decision, result=None)
-        return QueryOutcome(decision, result=self.engine.execute(decision.sql))
+        try:
+            return QueryOutcome(decision, result=self.engine.execute(decision.sql))
+        except EngineError as exc:
+            return QueryOutcome(decision, result=None, error=exc)
+
+    def tables(self) -> tuple[Table, ...]:
+        """What callers can see of the catalog."""
+        return self.engine.tables()

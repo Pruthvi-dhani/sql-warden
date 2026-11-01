@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 
 from sql_warden.config import ShapeConfig
+from sql_warden.engines import QueryTimeout
 from sql_warden.models import Refusal, RefusalCode
 from sql_warden.pipeline import CheckContext
 from sql_warden.warden import Warden
-from tests.unit.conftest import ONE_ROW, FakeEngine
+from tests.unit.conftest import ONE_ROW, PRODUCTS, FakeEngine
 
 
 @dataclass
@@ -75,3 +76,16 @@ def test_unparseable_query_never_reaches_the_engine() -> None:
     outcome = Warden(engine).run("select (1")
     assert outcome.result is None
     assert engine.executed == []
+
+
+def test_engine_errors_are_reported_with_the_decision() -> None:
+    error = QueryTimeout("query cancelled")
+    outcome = Warden(FakeEngine(error=error)).run("select 1")
+    assert outcome.error is error
+    assert outcome.result is None
+    assert outcome.decision.allowed
+    assert outcome.decision.sql == "SELECT 1 LIMIT 101"
+
+
+def test_tables_come_from_the_engine() -> None:
+    assert Warden(FakeEngine()).tables() == (PRODUCTS,)

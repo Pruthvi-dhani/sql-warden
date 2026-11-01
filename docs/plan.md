@@ -39,11 +39,12 @@ src/sql_warden/
     parse.py         # ParseCheck: parses once with sqlglot, readable errors
     shape.py         # ShapeCheck: structural rules + LIMIT rewrite
   engines/
-    base.py          # Engine protocol (max_rows, execute(sql) -> Result), engine errors
+    base.py          # Engine protocol (max_rows, execute(sql) -> Result, tables()), engine errors
     postgres.py      # read-only transaction, statement timeout, row cap via server-side cursor
   warden.py          # Warden facade: parse -> checks -> regenerate SQL -> execute
+  server.py          # MCP tools (run_query, check_query, list_tables); stdio + loopback HTTP
   render.py          # CLI text output
-  cli.py             # click: query / check / config validate
+  cli.py             # click: query / check / serve / config validate
 dev/  docker-compose.yml (project sql-warden-demo), warehouse_seed.sql
 warden.example.yaml
 tests/unit/  tests/integration/ (marker: integration)
@@ -52,11 +53,10 @@ Still to come:
 ```
 src/sql_warden/
   pipeline/  access.py  cost.py  budget.py  masking.py  lineage.py
-  engines/   snowflake.py          # plus catalog() and explain() on the Engine protocol
+  engines/   snowflake.py          # plus explain() on the Engine protocol
   catalog.py                       # introspected schema -> sqlglot schema mapping
   audit/     schema.sql, sink.py   # AuditSink protocol, PostgresAuditSink, MemoryAuditSink
   sessions.py                      # session + budget store
-  server.py                        # MCP tools
 tests/portal/  tests/snowflake/ (marker: snowflake)
 ```
 The SQL is parsed once with sqlglot, and every check reads that same AST. EXPLAIN runs only
@@ -142,7 +142,7 @@ portal, or Claude.
   rewrite SQL. Integration: regenerated SQL for Postgres-specific syntax still runs, truncation
   survives the rewrite, and shape refusals stop writes even for the admin role.
 
-**1.4 MCP server (stdio + local HTTP)**
+**1.4 MCP server (stdio + local HTTP)** ✅ done
 - `server.py` uses `MCPServer` with these tools: `run_query(sql)`, `check_query(sql)` (dry
   run), and `list_tables()`. A refusal comes back as a structured result
   (`{refused: true, check, code, reason, trace}`) rather than an opaque error, so the agent can
@@ -153,9 +153,18 @@ portal, or Claude.
   Phase 9).
 - `server.py` exposes a factory for the MCP HTTP ASGI app (`create_http_app(warden)`), so other
   code can mount it. The test portal in 1.5 does this.
-- Tests: an in-process MCP client session against a fake engine checks the tool list, an
-  allowed result, and a refusal payload, over both transports. A test checks that the HTTP
-  server won't start on a non-loopback host.
+- `list_tables` reads `information_schema` through a new `Engine.tables()`, which only shows
+  what the warehouse role can read. 2.1 builds the cached catalog on top of it.
+- `Warden.run` reports engine errors in the outcome instead of raising, so the decision and
+  trace survive a database failure (and 3.2 can audit it). `run_query` goes through it.
+- `run_query` marks refusals and database errors as tool errors; `check_query` returns a
+  refusal as a normal answer. Database values become JSON: numerics as exact strings, times as
+  ISO 8601.
+- Tests: an in-process MCP client checks the tool list, allowed results, refusal and error
+  payloads. Over real transports: an MCP client against uvicorn on a free port, the plain
+  JSON-RPC `initialize` a browser sends, foreign `Origin` (403) and `Host` (421) rejected, and
+  `python -m sql_warden serve` over stdio in a subprocess. The server refuses non-loopback
+  hosts. Integration: `tables()` and `run_query` against the seeded warehouse.
 
 **1.5 Test portal (`tests/portal/`)**
 - A browser page for manual testing. It's a testing tool, so it lives in the tests tree and is
@@ -200,8 +209,8 @@ portal, or Claude.
 
 ## Phase 2 — Table & column access control
 **2.1 Catalog introspection**
-- `catalog.py` and `engine.catalog()` read `information_schema`, cache the result, and turn it
-  into a sqlglot schema.
+- `catalog.py` builds on `Engine.tables()` (from 1.4): caches the result and turns it into a
+  sqlglot schema.
 - Tests: unit tests with a fake catalog, an integration test against the seeded DB.
 
 **2.2 Access check**

@@ -17,7 +17,7 @@ a separate audit database.
 
 Agents connect over MCP. Humans can use the `sql-warden` CLI.
 
-> **Status:** under construction. The parse and shape checks, read-only engine and CLI work today; the MCP server and a browser test portal are next. See the [plan](docs/plan.md) for the roadmap.
+> **Status:** under construction. The parse and shape checks, read-only engine, CLI and MCP server work today; a browser test portal and the Claude Code hookup are next. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -104,6 +104,36 @@ database.
     note: added LIMIT 101 (row cap 100 + 1 to detect truncation)
     would run: SELECT id FROM orders LIMIT 101
   ```
+
+### MCP server
+
+```bash
+uv run sql-warden serve                      # stdio: for an agent that launches sql-warden itself
+uv run sql-warden serve --transport http     # Streamable HTTP at http://127.0.0.1:8000/mcp
+```
+
+| Tool          | What it does                                                                 |
+|---------------|------------------------------------------------------------------------------|
+| `run_query`   | checks the SQL and, if allowed, runs it and returns the rows                 |
+| `check_query` | dry run: the decision and the exact SQL that would run, nothing executed     |
+| `list_tables` | the tables and views the warehouse role can read, with column types          |
+
+Results are structured, so an agent can tell why a query was refused and fix it:
+
+```json
+{"refused": true, "check": "shape", "code": "NOT_A_SELECT",
+ "reason": "only SELECT queries are allowed, not DELETE",
+ "trace": [{"check": "parse", "passed": true, ...}, {"check": "shape", "passed": false, ...}]}
+```
+
+An allowed query comes back with `sql` (what ran), `rewrites`, the `trace` and a `result`
+(`columns`, `rows`, `row_count`, `truncated`). Exact numbers come back as strings and times as
+ISO 8601. `run_query` flags refusals and database errors as tool errors; `check_query` treats a
+refusal as an answer.
+
+The HTTP transport has no authentication yet, so it only listens on loopback (`127.0.0.1`,
+`::1`, `localhost`) and rejects requests whose `Host` or `Origin` isn't local, which stops web
+pages from reaching it through your browser.
 
 ## Configuration
 
