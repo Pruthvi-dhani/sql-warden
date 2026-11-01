@@ -17,7 +17,7 @@ a separate audit database.
 
 Agents connect over MCP. Humans can use the `sql-warden` CLI.
 
-> **Status:** under construction. The parse and shape checks, read-only engine, CLI and MCP server work today; a browser test portal and the Claude Code hookup are next. See the [plan](docs/plan.md) for the roadmap.
+> **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server and a browser test portal work today; the Claude Code hookup is next. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -134,6 +134,17 @@ refusal as an answer.
 The HTTP transport has no authentication yet, so it only listens on loopback (`127.0.0.1`,
 `::1`, `localhost`) and rejects requests whose `Host` or `Origin` isn't local, which stops web
 pages from reaching it through your browser.
+
+### Test portal
+
+A browser page for trying queries by hand, talking real MCP to the server:
+
+```bash
+uv run python -m tests.portal          # opens http://127.0.0.1:8765/
+```
+
+It shows each check's verdict, the SQL that ran, the rows, the tables you can query, your
+history, and the raw JSON-RPC traffic. See [tests/portal/README.md](tests/portal/README.md).
 
 ## Configuration
 

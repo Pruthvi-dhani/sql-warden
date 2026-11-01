@@ -142,7 +142,7 @@ portal, or Claude.
   rewrite SQL. Integration: regenerated SQL for Postgres-specific syntax still runs, truncation
   survives the rewrite, and shape refusals stop writes even for the admin role.
 
-**1.4 MCP server (stdio + local HTTP)** ✅ done
+**1.4 MCP server (stdio + local HTTP)** ✅ done (`fd769d4`)
 - `server.py` uses `MCPServer` with these tools: `run_query(sql)`, `check_query(sql)` (dry
   run), and `list_tables()`. A refusal comes back as a structured result
   (`{refused: true, check, code, reason, trace}`) rather than an opaque error, so the agent can
@@ -166,13 +166,14 @@ portal, or Claude.
   `python -m sql_warden serve` over stdio in a subprocess. The server refuses non-loopback
   hosts. Integration: `tables()` and `run_query` against the seeded warehouse.
 
-**1.5 Test portal (`tests/portal/`)**
+**1.5 Test portal (`tests/portal/`)** ✅ done
 - A browser page for manual testing. It's a testing tool, so it lives in the tests tree and is
   **not shipped** in the `sql_warden` package:
   ```
   tests/portal/
     index.html       # the page: one file, vanilla JS, no build step
-    __main__.py      # launcher: mounts create_http_app() at /mcp and serves index.html at /
+    app.py           # create_portal_app(): create_http_app() at /mcp, index.html at /
+    __main__.py      # launcher (click), same config and flags as sql-warden
     test_portal.py   # automated tests for the launcher + the page's JSON-RPC sequence
     README.md        # how to run it, what each panel shows
   ```
@@ -187,10 +188,14 @@ portal, or Claude.
   - a console panel with the raw request and response JSON for every call.
   Later phases add panels as features arrive: masked columns, cost estimates, budgets, audit
   tail.
-- Tests: HTTP tests serve the page and run one check/run round trip through `/mcp` the way the
-  page does it (same JSON-RPC sequence). A small integration test runs the portal app against
-  the Testcontainer. The page's JS stays deliberately thin and is checked by hand; browser
-  automation can come later if it grows.
+- Also: example queries for each kind of refusal, and `?sql=…&tool=run|check` to bookmark a
+  test query. An expired session (404) makes the page reconnect on its own.
+- Tests: HTTP tests serve the page and replay its JSON-RPC sequence through `/mcp` (handshake,
+  run, check, refusal, 404 on a stale session, foreign origin refused), and check that the page
+  only calls tools the server has. An integration test runs the portal against the
+  Testcontainer. `tests/support.py` holds the shared uvicorn-in-a-thread helper. The page's JS
+  stays deliberately thin and is checked by hand (it was also checked with headless Chrome
+  screenshots against the demo stack); browser automation can come later if it grows.
 
 **1.6 Claude Code hookup**
 - Adds a `.mcp.json.example` and a README walkthrough (`claude mcp add …`), plus an integration

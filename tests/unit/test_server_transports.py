@@ -2,19 +2,17 @@
 
 import json
 import sys
-import threading
-import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
-import uvicorn
 from mcp import Client, StdioServerParameters
 
 from sql_warden.server import create_http_app
 from sql_warden.warden import Warden
+from tests.support import serving
 from tests.unit.conftest import FakeEngine
 
 pytestmark = pytest.mark.anyio
@@ -45,21 +43,8 @@ def engine() -> FakeEngine:
 
 @pytest.fixture
 def http_url(engine: FakeEngine) -> Iterator[str]:
-    """The HTTP app served by uvicorn on a free loopback port, in a background thread."""
-    config = uvicorn.Config(
-        create_http_app(Warden(engine)), host="127.0.0.1", port=0, log_level="warning"
-    )
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        assert time.monotonic() < deadline, "uvicorn did not start"
-        time.sleep(0.01)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    yield f"http://127.0.0.1:{port}/mcp"
-    server.should_exit = True
-    thread.join(timeout=10)
+    with serving(create_http_app(Warden(engine))) as base_url:
+        yield f"{base_url}/mcp"
 
 
 class TestHttp:

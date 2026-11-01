@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sql-warden portal</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #dde1e6; --text: #1d2228; --muted: #66707a;
+    --accent: #2f6fde; --ok: #1f8a4c; --ok-bg: #e6f4ec; --bad: #c4352b; --bad-bg: #fbeae8;
+    --warn: #9a6a00; --warn-bg: #fdf3dc; --code-bg: #f1f3f5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b; --panel: #1c2026; --border: #2e343c; --text: #e3e7ec; --muted: #8f99a3;
+      --accent: #6c9cf0; --ok: #4cc283; --ok-bg: #16301f; --bad: #f07167; --bad-bg: #3a1c1a;
+      --warn: #e3b341; --warn-bg: #352a10; --code-bg: #242931;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  #status { color: var(--muted); font-size: 12px; flex: 1; }
+  #status.down { color: var(--bad); }
+  main {
+    display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; padding: 16px;
+    max-width: 1500px; margin: 0 auto;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  section {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 16px; min-width: 0;
+  }
+  h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+    margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center;
+  }
+  button {
+    font: inherit; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.link {
+    border: none; background: none; padding: 0; color: var(--accent); font-size: 12px;
+    text-transform: none; letter-spacing: 0;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  textarea {
+    width: 100%; min-height: 120px; resize: vertical; padding: 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--code-bg); color: var(--text);
+    font: 13px/1.5 var(--mono);
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  select { font: inherit; padding: 5px; border-radius: 6px; max-width: 100%;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  code, pre { font-family: var(--mono); font-size: 12.5px; }
+  pre {
+    margin: 0; padding: 8px 10px; background: var(--code-bg); border-radius: 6px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .verdict { padding: 8px 10px; border-radius: 6px; font-weight: 600; margin-bottom: 8px; }
+  .verdict.ok { background: var(--ok-bg); color: var(--ok); }
+  .verdict.bad { background: var(--bad-bg); color: var(--bad); }
+  .verdict.warn { background: var(--warn-bg); color: var(--warn); }
+  .trace { list-style: none; margin: 0 0 8px; padding: 0; }
+  .trace li {
+    display: grid; grid-template-columns: 18px 70px 1fr auto; gap: 8px;
+    padding: 4px 0; border-bottom: 1px solid var(--border);
+  }
+  .trace li:last-child { border-bottom: none; }
+  .trace .pass { color: var(--ok); } .trace .fail { color: var(--bad); }
+  .trace .ms { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .label { color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
+  .notes { margin: 0; padding-left: 18px; color: var(--warn); }
+  .table-wrap { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12.5px; }
+  th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--code-bg); }
+  td.null { color: var(--muted); font-style: italic; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .footer .truncated { color: var(--warn); font-weight: 600; }
+  .empty { color: var(--muted); font-style: italic; }
+  details { margin: 2px 0; }
+  summary { cursor: pointer; }
+  .tables summary { font-family: var(--mono); font-size: 13px; }
+  .tables ul { list-style: none; margin: 2px 0 6px 14px; padding: 0; }
+  .tables li button { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .tables .type { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .history { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow: auto; }
+  .history li { padding: 4px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .history li:hover code { color: var(--accent); }
+  .history code { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { font-size: 11px; padding: 0 6px; border-radius: 4px; font-family: var(--mono); }
+  .tag.ok { background: var(--ok-bg); color: var(--ok); }
+  .tag.bad { background: var(--bad-bg); color: var(--bad); }
+  .tag.warn { background: var(--warn-bg); color: var(--warn); }
+  .console { max-height: 420px; overflow: auto; }
+  .console details { border-bottom: 1px solid var(--border); padding: 3px 0; }
+  .console summary { font-family: var(--mono); font-size: 12px; }
+  .console .out { color: var(--accent); } .console .in { color: var(--ok); }
+  .console .err { color: var(--bad); }
+  .console pre { margin-top: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>sql-warden portal</h1>
+  <span id="status">connecting…</span>
+  <button id="reconnect" class="link">reconnect</button>
+</header>
+
+<main>
+  <aside>
+    <section>
+      <h2>Tables <button id="refresh-tables" class="link">refresh</button></h2>
+      <div id="tables" class="tables"><span class="empty">loading…</span></div>
+      <p class="hint">Click a table to query it, a column to insert its name.</p>
+    </section>
+    <section>
+      <h2>History <button id="clear-history" class="link">clear</button></h2>
+      <ul id="history" class="history"></ul>
+    </section>
+  </aside>
+
+  <div>
+    <section>
+      <h2>Query</h2>
+      <textarea id="sql" spellcheck="false" placeholder="select id, name from products"></textarea>
+      <div class="row">
+        <button id="run" class="primary">Run</button>
+        <button id="check">Check</button>
+        <select id="examples" aria-label="Example queries">
+          <option value="">Examples…</option>
+        </select>
+        <span class="hint">⌘/Ctrl+Enter runs · ⇧⌘/Ctrl+Shift+Enter checks</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Decision</h2>
+      <div id="decision"><span class="empty">Run or check a query.</span></div>
+    </section>
+
+    <section>
+      <h2>Results</h2>
+      <div id="results"><span class="empty">No results yet.</span></div>
+    </section>
+
+    <section>
+      <h2>Console <button id="clear-console" class="link">clear</button></h2>
+      <p class="hint">Every JSON-RPC message exchanged with <code>/mcp</code>, newest first.</p>
+      <div id="console" class="console"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+const EXAMPLES = [
+  ["Allowed: a simple select", "select id, name, price_cents from products order by id"],
+  ["Allowed: join and aggregate", "select p.name, sum(o.quantity) as sold\nfrom orders o join products p on p.id = o.product_id\ngroup by p.name order by sold desc limit 10"],
+  ["Rewritten: LIMIT lowered", "select id from orders limit 5000"],
+  ["Refused: DELETE", "delete from orders"],
+  ["Refused: stacked statements", "select 1; delete from orders"],
+  ["Refused: data-modifying CTE", "with gone as (delete from orders returning *)\nselect count(*) from gone"],
+  ["Refused: pg_sleep", "select pg_sleep(60)"],
+  ["Refused: SQL hidden in a string", "select query_to_xml('select * from employee_salaries', true, true, '')"],
+  ["Refused: unknown function", "select age(created_at) from customers"],
+  ["Refused: FOR UPDATE", "select * from orders for update"],
+  ["Refused: parse error", "select (1"],
+  ["Error: statement timeout", "select count(*) from orders a cross join orders b"],
+];
+const HISTORY_KEY = "sql-warden-portal-history";
+const HISTORY_MAX = 50;
+const CONSOLE_MAX = 200;
+
+// ---------------------------------------------------------------- MCP over Streamable HTTP
+
+const mcp = {
+  sessionId: null,
+  protocolVersion: "2025-06-18",
+  serverInfo: null,
+  nextId: 1,
+  connecting: null,
+};
+
+function headers() {
+  const h = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" };
+  if (mcp.sessionId) {
+    h["Mcp-Session-Id"] = mcp.sessionId;
+    h["MCP-Protocol-Version"] = mcp.protocolVersion;
+  }
+  return h;
+}
+
+// A response is JSON, or a short SSE stream whose data lines carry JSON-RPC messages.
+function parseMessages(contentType, text) {
+  if (!text.trim()) return [];
+  if (!contentType.includes("text/event-stream")) return [JSON.parse(text)];
+  const messages = [];
+  for (const event of text.split(/\r?\n\r?\n/)) {
+    const data = event.split(/\r?\n/).filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart());
+    if (data.length) messages.push(JSON.parse(data.join("\n")));
+  }
+  return messages;
+}
+
+async function post(message) {
+  const tool = message.params && message.params.name;
+  logConsole("out", tool ? `${message.method} ${tool}` : message.method, message);
+  let response;
+  try {
+    response = await fetch("/mcp", { method: "POST", headers: headers(), body: JSON.stringify(message) });
+  } catch (exc) {
+    setStatus("cannot reach the portal server — is it still running?", true);
+    logConsole("err", "network error", String(exc));
+    throw exc;
+  }
+  const text = await response.text();
+  const messages = response.ok ? parseMessages(response.headers.get("content-type") || "", text) : [];
+  if (!response.ok) logConsole("err", `HTTP ${response.status}`, text || response.statusText);
+  for (const m of messages) logConsole(m.error ? "err" : "in", m.error ? "error" : "result", m);
+  return { response, messages };
+}
+
+async function connect() {
+  mcp.sessionId = null;
+  const { response, messages } = await post({
+    jsonrpc: "2.0", id: mcp.nextId++, method: "initialize",
+    params: {
+      protocolVersion: mcp.protocolVersion,
+      capabilities: {},
+      clientInfo: { name: "sql-warden-portal", version: "1" },
+    },
+  });
+  const reply = messages.find(m => m.result);
+  if (!response.ok || !reply) throw new Error(`initialize failed (HTTP ${response.status})`);
+  mcp.sessionId = response.headers.get("mcp-session-id");
+  mcp.protocolVersion = reply.result.protocolVersion;
+  mcp.serverInfo = reply.result.serverInfo;
+  await post({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const info = mcp.serverInfo ? `${mcp.serverInfo.name} ${mcp.serverInfo.version}` : "server";
+  setStatus(`connected to ${info} · protocol ${mcp.protocolVersion} · session ${(mcp.sessionId || "none").slice(0, 8)}`);
+}
+
+function ensureConnected() {
+  if (mcp.sessionId) return Promise.resolve();
+  mcp.connecting ??= connect().finally(() => { mcp.connecting = null; });
+  return mcp.connecting;
+}
+
+async function callTool(name, args, retried = false) {
+  await ensureConnected();
+  const id = mcp.nextId++;
+  const { response, messages } = await post({
+    jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args },
+  });
+  if (response.status === 404 && !retried) {
+    // The server forgot the session (it restarted, or the session expired): start a new one.
+    mcp.sessionId = null;
+    return callTool(name, args, true);
+  }
+  const reply = messages.find(m => m.id === id);
+  if (!reply) throw new Error(`no reply to tools/call (HTTP ${response.status})`);
+  if (reply.error) throw new Error(reply.error.message);
+  return reply.result;
+}
+
+// ---------------------------------------------------------------- DOM helpers
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child !== null && child !== undefined) node.append(child instanceof Node ? child : String(child));
+  }
+  return node;
+}
+
+const $ = id => document.getElementById(id);
+
+function setStatus(text, down = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("down", down);
+}
+
+function textOf(result) {
+  return (result.content || []).filter(c => c.type === "text").map(c => c.text).join("\n");
+}
+
+// ---------------------------------------------------------------- Rendering
+
+function renderDecision(tool, result) {
+  const payload = result.structuredContent;
+  const box = $("decision");
+  box.replaceChildren();
+  if (!payload) {
+    box.append(el("div", { class: "verdict bad" }, "Tool error"), el("pre", {}, textOf(result)));
+    return;
+  }
+  let verdict;
+  if (payload.refused) verdict = el("div", { class: "verdict bad" }, `✗ Refused by ${payload.check}: ${payload.code}`);
+  else if (payload.error) verdict = el("div", { class: "verdict warn" }, "Allowed, but the database failed to run it");
+  else if (tool === "check_query") verdict = el("div", { class: "verdict ok" }, "✓ Allowed (dry run, nothing was executed)");
+  else verdict = el("div", { class: "verdict ok" }, "✓ Allowed and executed");
+  box.append(verdict);
+
+  box.append(el("ul", { class: "trace" }, payload.trace.map(step => el("li", {},
+    el("span", { class: step.passed ? "pass" : "fail" }, step.passed ? "✓" : "✗"),
+    el("strong", {}, step.check),
+    el("span", {}, step.passed ? "" : `${step.code}: ${step.reason}`),
+    el("span", { class: "ms" }, `${step.duration_ms.toFixed(2)} ms`),
+  ))));
+
+  if (payload.error) box.append(el("div", { class: "label" }, "Database error"), el("pre", {}, payload.error));
+  if (payload.rewrites && payload.rewrites.length) {
+    box.append(el("div", { class: "label" }, "Rewrites"), el("ul", { class: "notes" }, payload.rewrites.map(r => el("li", {}, r))));
+  }
+  if (payload.sql) {
+    box.append(el("div", { class: "label" }, tool === "check_query" ? "Would run" : "Ran"), el("pre", {}, payload.sql));
+  }
+}
+
+function renderResults(tool, result) {
+  const box = $("results");
+  const rows = result.structuredContent && result.structuredContent.result;
+  if (!rows) {
+    const payload = result.structuredContent || {};
+    const why = tool === "check_query" ? "Dry run: nothing was executed."
+      : payload.error ? "No rows: the database failed to run the query."
+      : "No rows: the query did not run.";
+    box.replaceChildren(el("span", { class: "empty" }, why));
+    return;
+  }
+  const table = el("table", {},
+    el("thead", {}, el("tr", {}, rows.columns.map(c => el("th", {}, c)))),
+    el("tbody", {}, rows.rows.map(row => el("tr", {}, row.map(v => v === null
+      ? el("td", { class: "null" }, "NULL")
+      : el("td", {}, typeof v === "object" ? JSON.stringify(v) : v))))),
+  );
+  const footer = el("div", { class: "footer" },
+    `${rows.row_count} row${rows.row_count === 1 ? "" : "s"}, ${rows.duration_ms.toFixed(1)} ms`,
+    rows.truncated ? el("span", { class: "truncated" }, " · truncated at the row cap") : null,
+  );
+  box.replaceChildren(el("div", { class: "table-wrap" }, table), footer);
+}
+
+function renderTables(result) {
+  const box = $("tables");
+  const payload = result.structuredContent;
+  if (result.isError || !payload) {
+    box.replaceChildren(el("pre", {}, textOf(result) || "could not list tables"));
+    return;
+  }
+  if (!payload.tables.length) {
+    box.replaceChildren(el("span", { class: "empty" }, "No tables visible to the warehouse role."));
+    return;
+  }
+  box.replaceChildren(...payload.tables.map(t => {
+    const name = t.schema === "public" ? t.name : `${t.schema}.${t.name}`;
+    return el("details", {},
+      el("summary", {}, el("button", { class: "link", title: "Query this table", onclick: e => {
+        e.preventDefault();
+        setSql(`select * from ${name}`);
+      } }, name)),
+      el("ul", {}, t.columns.map(c => el("li", {},
+        el("button", { class: "link", title: "Insert at the cursor", onclick: () => insertAtCursor(c.name) }, c.name),
+        el("span", { class: "type" }, c.type),
+      ))),
+    );
+  }));
+}
+
+// ---------------------------------------------------------------- Console
+
+function logConsole(kind, label, body) {
+  const arrow = { out: "→", in: "←", err: "✗" }[kind];
+  const time = new Date().toLocaleTimeString();
+  const entry = el("details", {},
+    el("summary", { class: kind }, `${time}  ${arrow} ${label}`),
+    el("pre", {}, typeof body === "string" ? body : JSON.stringify(body, null, 2)),
+  );
+  const box = $("console");
+  box.prepend(entry);
+  while (box.children.length > CONSOLE_MAX) box.lastChild.remove();
+}
+
+// ---------------------------------------------------------------- History
+
+function loadHistory() {
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; } catch { return []; }
+}
+
+function saveHistory(items) {
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, HISTORY_MAX))); } catch { /* private mode */ }
+}
+
+function addHistory(sql, tool, result) {
+  const payload = result.structuredContent || {};
+  const outcome = payload.refused ? payload.code : payload.error ? "ERROR" : result.isError ? "TOOL_ERROR" : "ALLOWED";
+  const items = loadHistory().filter(h => !(h.sql === sql && h.tool === tool));
+  items.unshift({ sql, tool, outcome, at: Date.now() });
+  saveHistory(items);
+  renderHistory();
+}
+
+function renderHistory() {
+  const items = loadHistory();
+  const box = $("history");
+  if (!items.length) {
+    box.replaceChildren(el("li", { class: "empty" }, "Queries you run or check appear here."));
+    return;
+  }
+  box.replaceChildren(...items.map(h => {
+    const tone = h.outcome === "ALLOWED" ? "ok" : h.outcome === "ERROR" ? "warn" : "bad";
+    return el("li", { title: h.sql, onclick: () => setSql(h.sql) },
+      el("span", { class: `tag ${tone}` }, h.outcome), " ",
+      el("span", { class: "hint" }, h.tool === "check_query" ? "check" : "run"),
+      el("code", {}, h.sql.replace(/\s+/g, " ")),
+    );
+  }));
+}
+
+// ---------------------------------------------------------------- Actions
+
+function setSql(sql) {
+  $("sql").value = sql;
+  $("sql").focus();
+}
+
+function insertAtCursor(text) {
+  const area = $("sql");
+  const { selectionStart: start, selectionEnd: end, value } = area;
+  area.value = value.slice(0, start) + text + value.slice(end);
+  area.selectionStart = area.selectionEnd = start + text.length;
+  area.focus();
+}
+
+async function submit(tool) {
+  const sql = $("sql").value;
+  if (!sql.trim()) return;
+  for (const b of [$("run"), $("check")]) b.disabled = true;
+  try {
+    const result = await callTool(tool, { sql });
+    renderDecision(tool, result);
+    renderResults(tool, result);
+    addHistory(sql, tool, result);
+  } catch (exc) {
+    $("decision").replaceChildren(el("div", { class: "verdict bad" }, "Request failed"), el("pre", {}, String(exc.message || exc)));
+  } finally {
+    for (const b of [$("run"), $("check")]) b.disabled = false;
+  }
+}
+
+async function refreshTables() {
+  try {
+    renderTables(await callTool("list_tables", {}));
+  } catch (exc) {
+    $("tables").replaceChildren(el("pre", {}, String(exc.message || exc)));
+  }
+}
+
+async function reconnect() {
+  mcp.sessionId = null;
+  setStatus("connecting…");
+  try { await ensureConnected(); await refreshTables(); }
+  catch (exc) { setStatus(`not connected: ${exc.message || exc}`, true); }
+}
+
+// ---------------------------------------------------------------- Wiring
+
+for (const [label, sql] of EXAMPLES) $("examples").append(el("option", { value: sql }, label));
+$("examples").addEventListener("change", e => { if (e.target.value) setSql(e.target.value); e.target.value = ""; });
+$("run").addEventListener("click", () => submit("run_query"));
+$("check").addEventListener("click", () => submit("check_query"));
+$("sql").addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    submit(e.shiftKey ? "check_query" : "run_query");
+  }
+});
+$("refresh-tables").addEventListener("click", refreshTables);
+$("reconnect").addEventListener("click", reconnect);
+$("clear-history").addEventListener("click", () => { saveHistory([]); renderHistory(); });
+$("clear-console").addEventListener("click", () => $("console").replaceChildren());
+
+renderHistory();
+// ?sql=... fills the editor; &tool=run or &tool=check also submits it, for bookmarkable tests.
+const params = new URLSearchParams(location.search);
+if (params.has("sql")) $("sql").value = params.get("sql");
+reconnect().then(() => {
+  const tool = { run: "run_query", check: "check_query" }[params.get("tool")];
+  if (tool && params.has("sql")) submit(tool);
+});
+</script>
+</body>
+</html>
