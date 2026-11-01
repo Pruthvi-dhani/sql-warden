@@ -17,7 +17,7 @@ a separate audit database.
 
 Agents connect over MCP. Humans can use the `sql-warden` CLI.
 
-> **Status:** under construction. Parse check, read-only engine and CLI work today; the MCP server and a browser test portal are next.
+> **Status:** under construction. The parse and shape checks, read-only engine and CLI work today; the MCP server and a browser test portal are next.
 
 ## Development
 
@@ -60,12 +60,50 @@ this stack running.
 uv run sql-warden check "select id, name from products"          # dry run: one line per check
 uv run sql-warden check "select (1"                              # ✗ parse  PARSE_ERROR: Expecting ) ...
 uv run sql-warden query "select id, name, price_cents from products order by id" --max-rows 5
-uv run sql-warden query "select pg_sleep(3)" --timeout-ms 500     # cancelled by the timeout
+uv run sql-warden query "select count(*) from orders a cross join orders b" --timeout-ms 500
 ```
 
 `check` runs the checks without touching the database. `query` runs the same checks and, if
 they all pass, executes the SQL. Every query runs in a read-only transaction with a statement
-timeout and a row cap. So far the only check is `parse`.
+timeout and a row cap.
+
+What runs is the query as sql-warden parsed and checked it, regenerated from that tree, not
+the text that was sent. Comments are dropped, so nothing the parser skipped over can reach the
+database.
+
+#### The checks so far
+
+- **parse**: the SQL must parse (`PARSE_ERROR` otherwise, with line and column).
+- **shape**: one read-only `SELECT` within the structural rules in `warden.yaml`:
+
+  | Try                                                           | Refused with           |
+  |---------------------------------------------------------------|------------------------|
+  | `select 1; select 2`                                          | `MULTIPLE_STATEMENTS`  |
+  | `delete from orders`, `drop table orders`, `do $$ ... $$`     | `NOT_A_SELECT`         |
+  | `with x as (delete from orders returning *) select * from x`  | `NOT_READ_ONLY`        |
+  | `select * into copy from customers`, `... for update`         | `NOT_READ_ONLY`        |
+  | `select pg_sleep(60)`, `pg_read_file(...)`, `dblink(...)`     | `FUNCTION_NOT_ALLOWED` |
+  | `select age(created_at) from customers` (unknown function)    | `FUNCTION_NOT_ALLOWED` |
+  | more than `max_joins` joins, or `max_subquery_depth` nesting  | `TOO_MANY_JOINS`, `SUBQUERY_TOO_DEEP` |
+  | `select 1 limit all`                                          | `INVALID_LIMIT`        |
+
+  Functions sqlglot doesn't recognise as standard SQL are refused unless they are listed in
+  `shape.allowed_functions`. Built-in dangerous ones (`pg_sleep*`, `pg_read_file`, `lo_*`,
+  `dblink*`, `set_config`, `query_to_xml`, ...) are refused even if listed.
+
+  With `shape.limit: inject` (the default), a query without a LIMIT gets one, and a LIMIT above
+  the row cap is lowered. The new LIMIT is the row cap plus one, so the result can still say
+  it was truncated. With `limit: require`, such queries are refused (`LIMIT_REQUIRED`,
+  `LIMIT_TOO_HIGH`). `check` shows the rewrite and the SQL that would run:
+
+  ```text
+  $ uv run sql-warden check "select id from orders"
+  ✓ parse  0.3 ms
+  ✓ shape  0.1 ms
+  → allowed (dry run, nothing was executed)
+    note: added LIMIT 101 (row cap 100 + 1 to detect truncation)
+    would run: SELECT id FROM orders LIMIT 101
+  ```
 
 ## Configuration
 
@@ -85,4 +123,6 @@ Which config is used, highest priority first:
 
 Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
-enforces it.
+enforces it. Today that is `warehouse` (connection, timeout, row cap) and `shape` (joins,
+nesting, LIMIT policy, function allow and deny lists); [warden.example.yaml](warden.example.yaml)
+documents every key.

@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,14 +10,13 @@ from sql_warden import __version__
 from sql_warden.config import (
     ConfigError,
     WardenConfig,
-    WarehouseConfig,
     default_config,
     describe_dsn,
     load_config,
 )
 from sql_warden.engines import EngineError
 from sql_warden.engines.postgres import PostgresEngine
-from sql_warden.render import format_decision, format_table
+from sql_warden.render import format_decision, format_rewrites, format_table
 from sql_warden.warden import Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
@@ -56,24 +56,27 @@ def engine_options[F: Callable[..., Any]](command: F) -> F:
     return command
 
 
-def warehouse_settings(
+def settings(
     state: CliState, dsn: str | None, max_rows: int | None, timeout_ms: int | None
-) -> WarehouseConfig:
+) -> WardenConfig:
+    """The config file's settings with the command-line overrides applied."""
     config, _ = resolve_config(state.config_path)
     overrides = {"dsn": dsn, "max_rows": max_rows, "statement_timeout_ms": timeout_ms}
-    return config.warehouse.model_copy(
+    warehouse = config.warehouse.model_copy(
         update={key: value for key, value in overrides.items() if value is not None}
     )
+    return config.model_copy(update={"warehouse": warehouse})
 
 
-def build_warden(warehouse: WarehouseConfig) -> Warden:
+def build_warden(config: WardenConfig) -> Warden:
+    warehouse = config.warehouse
     engine = PostgresEngine(
         warehouse.dsn,
         statement_timeout_ms=warehouse.statement_timeout_ms,
         max_rows=warehouse.max_rows,
         connect_timeout_s=warehouse.connect_timeout_s,
     )
-    return Warden(engine, dialect=warehouse.dialect)
+    return Warden(engine, dialect=warehouse.dialect, shape=config.shape)
 
 
 @click.group()
@@ -89,6 +92,9 @@ def build_warden(warehouse: WarehouseConfig) -> Warden:
 @click.pass_context
 def cli(ctx: click.Context, config_path: Path | None) -> None:
     """A governed SQL gateway for AI agents."""
+    # sqlglot warns when it falls back to an opaque Command (DO, EXPLAIN, ...). The shape
+    # check refuses those with its own reason; the warning would only be noise.
+    logging.getLogger("sqlglot").setLevel(logging.ERROR)
     ctx.obj = CliState(config_path)
 
 
@@ -100,7 +106,7 @@ def check(
     state: CliState, sql: str, dsn: str | None, max_rows: int | None, timeout_ms: int | None
 ) -> None:
     """Dry run: show what each check decides about SQL, without executing it."""
-    warden = build_warden(warehouse_settings(state, dsn, max_rows, timeout_ms))
+    warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
     decision = warden.check(sql)
     click.echo(format_decision(decision, dry_run=True))
     if not decision.allowed:
@@ -115,7 +121,7 @@ def query(
     state: CliState, sql: str, dsn: str | None, max_rows: int | None, timeout_ms: int | None
 ) -> None:
     """Run SQL through the checks and, if allowed, against the warehouse."""
-    warden = build_warden(warehouse_settings(state, dsn, max_rows, timeout_ms))
+    warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
     try:
         outcome = warden.run(sql)
     except EngineError as exc:
@@ -124,6 +130,8 @@ def query(
         click.echo(format_decision(outcome.decision, dry_run=False))
         raise SystemExit(1)
     click.echo(format_table(outcome.result))
+    for note in format_rewrites(outcome.decision):
+        click.echo(note)
 
 
 @cli.group()
@@ -143,10 +151,24 @@ def validate(state: CliState, path: Path | None) -> None:
             "(start from warden.example.yaml)"
         )
     loaded, source = resolve_config(path)
-    warehouse = loaded.warehouse
+    warehouse, shape = loaded.warehouse, loaded.shape
     click.echo(f"✓ {source} is valid")
     click.echo(f"  warehouse: {warehouse.engine} at {describe_dsn(warehouse.dsn)}")
     click.echo(
         f"             statement timeout {warehouse.statement_timeout_ms} ms, "
         f"max {warehouse.max_rows} rows"
     )
+    click.echo(
+        f"  shape:     up to {shape.max_joins} joins, "
+        f"subqueries up to {shape.max_subquery_depth} deep"
+    )
+    click.echo(
+        "             LIMIT added or lowered to the row cap"
+        if shape.limit == "inject"
+        else "             LIMIT required, up to the row cap"
+    )
+    if shape.allowed_functions or shape.denied_functions:
+        click.echo(
+            f"             {len(shape.allowed_functions)} extra functions allowed, "
+            f"{len(shape.denied_functions)} extra denied"
+        )

@@ -34,6 +34,9 @@ class QueryFailed(EngineError):
 
 
 class Engine(Protocol):
+    max_rows: int
+    """The row cap: execute() returns at most this many rows."""
+
     def execute(self, sql: str) -> Result:
         """Run one read-only query, returning at most the engine's row cap."""
         ...

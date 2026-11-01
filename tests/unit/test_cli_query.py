@@ -8,11 +8,40 @@ from sql_warden.engines import QueryTimeout
 from tests.unit.conftest import FakeEngine
 
 
-def test_query_prints_a_table(engines: list[FakeEngine]) -> None:
+def test_query_prints_a_table_and_what_was_rewritten(engines: list[FakeEngine]) -> None:
     outcome = CliRunner().invoke(cli, ["query", "select 1 as id"])
     assert outcome.exit_code == 0, outcome.output
+    assert outcome.output.splitlines() == [
+        "id",
+        "--",
+        "1",
+        "(1 row, 1 ms)",
+        "note: added LIMIT 101 (row cap 100 + 1 to detect truncation)",
+    ]
+    assert engines[0].executed == ["SELECT 1 AS id LIMIT 101"]
+
+
+def test_query_without_rewrites_has_no_notes(engines: list[FakeEngine]) -> None:
+    outcome = CliRunner().invoke(cli, ["query", "select 1 as id limit 1"])
     assert outcome.output.splitlines() == ["id", "--", "1", "(1 row, 1 ms)"]
-    assert engines[0].executed == ["select 1 as id"]
+
+
+def test_shape_refusals_never_execute(engines: list[FakeEngine]) -> None:
+    outcome = CliRunner().invoke(cli, ["query", "delete from orders"])
+    assert outcome.exit_code == 1
+    assert outcome.output.splitlines()[1:] == [
+        "✗ shape  NOT_A_SELECT: only SELECT queries are allowed, not DELETE",
+        "→ refused by shape",
+    ]
+    assert engines[0].executed == []
+
+
+def test_sqlglot_fallback_warnings_are_silenced(
+    engines: list[FakeEngine], caplog: pytest.LogCaptureFixture
+) -> None:
+    outcome = CliRunner().invoke(cli, ["query", "do $$ begin end $$"])
+    assert "NOT_A_SELECT: only SELECT queries are allowed, not DO" in outcome.output
+    assert [record for record in caplog.records if record.name == "sqlglot"] == []
 
 
 def test_query_uses_demo_dsn_and_defaults(engines: list[FakeEngine]) -> None:
@@ -58,7 +87,7 @@ def test_engine_errors_become_a_clean_message(monkeypatch: pytest.MonkeyPatch) -
         return FakeEngine(error=QueryTimeout("query cancelled"))
 
     monkeypatch.setattr(cli_module, "PostgresEngine", failing)
-    outcome = CliRunner().invoke(cli, ["query", "select pg_sleep(10)"])
+    outcome = CliRunner().invoke(cli, ["query", "select count(*) from orders"])
     assert outcome.exit_code == 1
     assert "Error: query cancelled" in outcome.output
     assert "Traceback" not in outcome.output

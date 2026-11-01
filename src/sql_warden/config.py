@@ -6,16 +6,65 @@ like it is being enforced. Each section is added together with the check that en
 
 import os
 import re
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import psycopg
 import yaml
 from psycopg.conninfo import conninfo_to_dict
-from pydantic import BaseModel, ConfigDict, PositiveInt, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    NonNegativeInt,
+    PositiveInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import PydanticCustomError
 
 # The read-only role in the dev/docker-compose.yml demo stack.
 DEFAULT_DSN = "postgresql://warden_reader:warden_reader@localhost:5433/warehouse"
+
+# Functions refused whatever the config says: they stall or signal the server, read its files,
+# reach other databases, change session settings, take locks, write, or run SQL given as a
+# string (which would slip past every check). Glob patterns, matched against lowercase names.
+BUILTIN_DENIED_FUNCTIONS = (
+    "pg_sleep*",
+    "pg_read_file",
+    "pg_read_binary_file",
+    "pg_ls_*",
+    "pg_stat_file",
+    "pg_file_*",
+    "lo_*",
+    "loread",
+    "lowrite",
+    "dblink*",
+    "set_config",
+    "current_setting",
+    "pg_cancel_backend",
+    "pg_terminate_backend",
+    "pg_reload_conf",
+    "pg_rotate_logfile",
+    "pg_advisory_*",
+    "pg_try_advisory_*",
+    "pg_notify",
+    "pg_stat_reset*",
+    "pg_switch_wal",
+    "pg_promote",
+    "pg_create_*",
+    "pg_drop_*",
+    "pg_logical_*",
+    "pg_replication_*",
+    "nextval",
+    "setval",
+    "query_to_xml*",
+    "cursor_to_xml*",
+    "table_to_xml*",
+    "schema_to_xml*",
+    "database_to_xml*",
+)
 
 # ${VAR} or ${VAR:-default}, in any string value.
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -41,9 +90,44 @@ class WarehouseConfig(_Section):
         return self.engine
 
 
+class ShapeConfig(_Section):
+    max_joins: NonNegativeInt = 4
+    max_subquery_depth: NonNegativeInt = 3
+    limit: Literal["inject", "require"] = "inject"
+    """inject: add a LIMIT if missing, lower one above the row cap. require: refuse instead."""
+    allowed_functions: tuple[str, ...] = ()
+    """Functions sqlglot does not know as standard SQL, allowed anyway."""
+    denied_functions: tuple[str, ...] = ()
+    """Glob patterns refused on top of BUILTIN_DENIED_FUNCTIONS."""
+
+    @field_validator("allowed_functions", "denied_functions")
+    @classmethod
+    def _lowercase(cls, names: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(name.lower() for name in names)
+
+    @model_validator(mode="after")
+    def _nothing_allowed_is_denied(self) -> Self:
+        for name in self.allowed_functions:
+            pattern = self.denied_by(name)
+            if pattern is not None:
+                raise PydanticCustomError(
+                    "function_denied",
+                    "allowed_functions lists {name}, but it is denied by '{pattern}'",
+                    {"name": name, "pattern": pattern},
+                )
+        return self
+
+    def denied_by(self, function: str) -> str | None:
+        """The denylist pattern that matches function, or None if it is not denied."""
+        name = function.lower()
+        patterns = (*BUILTIN_DENIED_FUNCTIONS, *self.denied_functions)
+        return next((pattern for pattern in patterns if fnmatchcase(name, pattern)), None)
+
+
 class WardenConfig(_Section):
     version: Literal[1]
     warehouse: WarehouseConfig = WarehouseConfig()
+    shape: ShapeConfig = ShapeConfig()
 
 
 def default_config() -> WardenConfig:

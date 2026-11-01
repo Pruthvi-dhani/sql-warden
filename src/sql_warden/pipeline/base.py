@@ -15,6 +15,8 @@ class CheckContext:
     sql: str
     dialect: str
     statements: list[exp.Expr] = field(default_factory=list)
+    rewrites: list[str] = field(default_factory=list)
+    """Checks that change the tree say how here."""
 
 
 class Check(Protocol):

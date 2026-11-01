@@ -16,3 +16,15 @@ warehouse:
   statement_timeout_ms: 5000   # queries running longer are cancelled
   max_rows: 100                # rows returned per query; more are cut off and flagged
   connect_timeout_s: 5
+
+shape:
+  max_joins: 4                 # JOINs per query, comma joins included
+  max_subquery_depth: 3        # how deep subqueries and CTEs may nest
+  # inject:  add a LIMIT when there is none, and lower one above the row cap (max_rows).
+  # require: refuse the query instead.
+  limit: inject
+  # Functions sqlglot doesn't know as standard SQL are refused unless listed here, e.g.
+  # [age, pg_typeof]. Built-in dangerous ones (pg_sleep, pg_read_file, dblink, set_config,
+  # query_to_xml, ...) are always refused and can't be listed.
+  allowed_functions: []
+  denied_functions: []         # more names or glob patterns to refuse, e.g. [md5, "regexp_*"]

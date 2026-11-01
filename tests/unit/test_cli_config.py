@@ -116,8 +116,24 @@ class TestValidate:
             f"✓ {path} is valid",
             "  warehouse: postgres at db.internal:6000/sales as bot",
             "             statement timeout 750 ms, max 25 rows",
+            "  shape:     up to 4 joins, subqueries up to 3 deep",
+            "             LIMIT added or lowered to the row cap",
         ]
         assert "hunter2" not in outcome.output
+
+    def test_summary_shows_shape_settings(self, isolated_cli: Path) -> None:
+        path = _write(
+            isolated_cli / "policy.yaml",
+            "version: 1\nshape:\n  max_joins: 2\n  max_subquery_depth: 1\n  limit: require\n"
+            "  allowed_functions: [age, pg_typeof]\n  denied_functions: [md5]\n",
+        )
+        outcome = CliRunner().invoke(cli, ["config", "validate", str(path)])
+        assert outcome.exit_code == 0, outcome.output
+        assert outcome.output.splitlines()[3:] == [
+            "  shape:     up to 2 joins, subqueries up to 1 deep",
+            "             LIMIT required, up to the row cap",
+            "             2 extra functions allowed, 1 extra denied",
+        ]
 
     def test_defaults_to_warden_yaml(self, isolated_cli: Path) -> None:
         _write(isolated_cli / "warden.yaml")

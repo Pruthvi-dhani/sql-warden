@@ -5,7 +5,7 @@ from sql_warden.models import Decision
 
 
 def format_decision(decision: Decision, *, dry_run: bool) -> str:
-    """One line per check that ran, then the verdict."""
+    """One line per check that ran, then the verdict and anything the checks rewrote."""
     width = max(len(entry.check) for entry in decision.trace)
     lines = []
     for entry in decision.trace:
@@ -21,7 +21,14 @@ def format_decision(decision: Decision, *, dry_run: bool) -> str:
         lines.append("→ allowed (dry run, nothing was executed)")
     else:
         lines.append("→ allowed")
+    lines += [f"  {note}" for note in format_rewrites(decision)]
+    if dry_run and decision.sql is not None:
+        lines.append(f"  would run: {decision.sql}")
     return "\n".join(lines)
+
+
+def format_rewrites(decision: Decision) -> list[str]:
+    return [f"note: {rewrite}" for rewrite in decision.rewrites]
 
 
 def format_value(value: object) -> str:

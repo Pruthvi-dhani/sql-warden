@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from sql_warden.config import (
     DEFAULT_DSN,
     ConfigError,
+    ShapeConfig,
     WardenConfig,
     default_config,
     describe_dsn,
@@ -48,6 +49,71 @@ def test_full_warehouse_section() -> None:
     assert config.warehouse.connect_timeout_s == 2
 
 
+def test_shape_section() -> None:
+    config = parse_config(
+        """
+        version: 1
+        shape:
+          max_joins: 0
+          max_subquery_depth: 1
+          limit: require
+          allowed_functions: [Age, pg_typeof]
+          denied_functions: ["regexp_*"]
+        """
+    )
+    assert config.shape == ShapeConfig(
+        max_joins=0,
+        max_subquery_depth=1,
+        limit="require",
+        allowed_functions=("age", "pg_typeof"),
+        denied_functions=("regexp_*",),
+    )
+
+
+def test_shape_defaults() -> None:
+    shape = default_config().shape
+    assert (shape.max_joins, shape.max_subquery_depth, shape.limit) == (4, 3, "inject")
+    assert (shape.allowed_functions, shape.denied_functions) == ((), ())
+
+
+class TestDeniedFunctions:
+    @pytest.mark.parametrize(
+        ("name", "pattern"),
+        [
+            ("pg_sleep", "pg_sleep*"),
+            ("PG_SLEEP_FOR", "pg_sleep*"),
+            ("lo_export", "lo_*"),
+            ("dblink_exec", "dblink*"),
+            ("query_to_xml_and_xmlschema", "query_to_xml*"),
+            ("current_setting", "current_setting"),
+        ],
+    )
+    def test_builtin_patterns(self, name: str, pattern: str) -> None:
+        assert ShapeConfig().denied_by(name) == pattern
+
+    @pytest.mark.parametrize("name", ["count", "lower", "age", "pg_typeof", "current_settings"])
+    def test_ordinary_functions_are_not_denied(self, name: str) -> None:
+        assert ShapeConfig().denied_by(name) is None
+
+    def test_configured_patterns_add_to_the_builtin_ones(self) -> None:
+        shape = ShapeConfig(denied_functions=("MD5", "regexp_*"))
+        assert shape.denied_by("md5") == "md5"
+        assert shape.denied_by("regexp_replace") == "regexp_*"
+        assert shape.denied_by("pg_sleep") == "pg_sleep*"
+
+    def test_a_builtin_denied_function_cannot_be_allowed(self) -> None:
+        message = _error("version: 1\nshape:\n  allowed_functions: [age, PG_SLEEP]")
+        assert "shape: allowed_functions lists pg_sleep, but it is denied by 'pg_sleep*'" in (
+            message
+        )
+
+    def test_a_function_cannot_be_both_allowed_and_denied(self) -> None:
+        message = _error(
+            "version: 1\nshape:\n  allowed_functions: [age]\n  denied_functions: ['a*']"
+        )
+        assert "allowed_functions lists age, but it is denied by 'a*'" in message
+
+
 def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WARDEN_READER_PASSWORD", raising=False)
     assert load_config(EXAMPLE_CONFIG) == default_config()
@@ -75,6 +141,16 @@ def test_config_is_immutable() -> None:
             "warehouse.max_rows: Input should be a valid integer",
         ),
         ("version: 1\nwarehouse:\n  engine: mysql", "warehouse.engine: Input should be 'postgres'"),
+        (
+            "version: 1\nshape:\n  max_joins: -1",
+            "shape.max_joins: Input should be greater than or equal to 0",
+        ),
+        ("version: 1\nshape:\n  limit: cap", "shape.limit: Input should be 'inject' or 'require'"),
+        ("version: 1\nshape:\n  max_join: 2", "shape.max_join: Extra inputs are not permitted"),
+        (
+            "version: 1\nshape:\n  allowed_functions: age",
+            "shape.allowed_functions: Input should be a valid tuple",
+        ),
         ("version: 2", "version: Input should be 1"),
         ("warehouse: {}", "version: Field required"),
         ("", "version: Field required"),
