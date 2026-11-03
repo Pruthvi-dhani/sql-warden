@@ -15,7 +15,13 @@ Every query runs through a series of checks before it touches the database:
 Any check can refuse a query with a specific code and reason. Every request is recorded in
 a separate audit database.
 
-Agents connect over MCP. Humans can use the `sql-warden` CLI.
+Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
+[test portal](#test-portal), which shows exactly what an agent gets back:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-refused-dark.png">
+  <img alt="The test portal refusing a query whose CTE deletes rows: parse passes, shape fails with NOT_READ_ONLY" src="docs/images/portal-refused-light.png">
+</picture>
 
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server and a browser test portal work today; the Claude Code hookup is next. See the [plan](docs/plan.md) for the roadmap.
 
@@ -137,14 +143,32 @@ pages from reaching it through your browser.
 
 ### Test portal
 
-A browser page for trying queries by hand, talking real MCP to the server:
+A browser page for trying sql-warden by hand. It is a real MCP client of the same server agents
+use, so a query it allows or refuses is allowed or refused for an agent too.
 
 ```bash
-uv run python -m tests.portal          # opens http://127.0.0.1:8765/
+docker compose -f dev/docker-compose.yml up -d     # the demo warehouse, if it isn't running
+uv run python -m tests.portal                      # opens http://127.0.0.1:8765/
 ```
 
-It shows each check's verdict, the SQL that ran, the rows, the tables you can query, your
-history, and the raw JSON-RPC traffic. See [tests/portal/README.md](tests/portal/README.md).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-allowed-dark.png">
+  <img alt="The test portal running a join: both checks pass, LIMIT 101 is added, and the rows are shown" src="docs/images/portal-allowed-light.png">
+</picture>
+
+For each query it shows:
+
+- the verdict, and one line per check with its code, reason and time;
+- any rewrites (such as an added LIMIT) and the exact SQL that ran or would run;
+- the rows, with a note when the row cap cut them off;
+- every JSON-RPC request and response, in the console.
+
+The sidebar lists the tables the warehouse role can read (click one to query it) and your
+history. **Examples** has a query for each kind of refusal, and `?sql=...&tool=run` in the URL
+runs a query on load, so a test case can be bookmarked. The portal only listens on 127.0.0.1 and
+takes the same options as `sql-warden` (`--config`, `--dsn`, `--max-rows`, `--timeout-ms`), plus
+`--port` and `--no-open`. It is a testing tool, so it lives in `tests/` and is not part of the
+package. More in [tests/portal/README.md](tests/portal/README.md).
 
 ## Configuration
 
