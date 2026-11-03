@@ -250,7 +250,7 @@ async function connect() {
   mcp.serverInfo = reply.result.serverInfo;
   await post({ jsonrpc: "2.0", method: "notifications/initialized" });
   const info = mcp.serverInfo ? `${mcp.serverInfo.name} ${mcp.serverInfo.version}` : "server";
-  setStatus(`connected to ${info} · protocol ${mcp.protocolVersion} · session ${(mcp.sessionId || "none").slice(0, 8)}`);
+  setStatus(`connected to ${info} · MCP protocol ${mcp.protocolVersion} · session ${(mcp.sessionId || "none").slice(0, 8)}`);
 }
 
 function ensureConnected() {
