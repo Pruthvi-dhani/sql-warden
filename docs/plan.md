@@ -166,7 +166,7 @@ portal, or Claude.
   `python -m sql_warden serve` over stdio in a subprocess. The server refuses non-loopback
   hosts. Integration: `tables()` and `run_query` against the seeded warehouse.
 
-**1.5 Test portal (`tests/portal/`)** ✅ done
+**1.5 Test portal (`tests/portal/`)** ✅ done (`9a1a230`)
 - A browser page for manual testing. It's a testing tool, so it lives in the tests tree and is
   **not shipped** in the `sql_warden` package:
   ```
@@ -349,6 +349,8 @@ account.
 **8.3 CI**
 - A GitHub Actions workflow runs ruff, mypy, the unit tests and the integration tests (Docker
   is available on ubuntu runners).
+- The lint job (`ruff check`, `ruff format --check`, `mypy` strict) is ✅ done early, in
+  `.github/workflows/ci.yml`; the test jobs are still to come.
 
 ## Phase 9 — Production: sql-warden as a central service
 Target setup: agents connect over HTTPS with a token, and only the warden holds database
