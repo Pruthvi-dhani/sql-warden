@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sql-warden": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--directory", "${CLAUDE_PROJECT_DIR:-.}", "sql-warden", "serve"]
+    }
+  }
+}

@@ -197,9 +197,15 @@ portal, or Claude.
   stays deliberately thin and is checked by hand (it was also checked with headless Chrome
   screenshots against the demo stack); browser automation can come later if it grows.
 
-**1.6 Claude Code hookup**
+**1.6 Claude Code hookup** ✅ done
 - Adds a `.mcp.json.example` and a README walkthrough (`claude mcp add …`), plus an integration
   test that starts the stdio server as a subprocess against the Testcontainer.
+- The example runs `uv run --directory ${CLAUDE_PROJECT_DIR:-.} sql-warden serve`, so the
+  server starts in the repo and reads `./warden.yaml` like the CLI. `.mcp.json` itself is
+  git-ignored, so the repo never asks a cloned checkout to approve a server.
+- The integration test reads `.mcp.json.example`, expands it the way Claude Code does, and
+  launches exactly that command: tools, instructions, `list_tables`, a run that honours the
+  config's row cap, and refusals all arrive over stdio.
 - **Play:** connect Claude Code to sql-warden and ask it questions about the demo data. Each
   check added after this point shows up in Claude and in the portal immediately.
 

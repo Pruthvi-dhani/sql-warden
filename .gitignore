@@ -17,3 +17,6 @@ build/
 
 # Local config (copy warden.example.yaml to warden.yaml)
 warden.yaml
+
+# Local Claude Code MCP config (copy .mcp.json.example to .mcp.json)
+.mcp.json

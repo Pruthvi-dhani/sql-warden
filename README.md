@@ -23,7 +23,8 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
   <img alt="The test portal refusing a query whose CTE deletes rows: parse passes, shape fails with NOT_READ_ONLY" src="docs/images/portal-refused-light.png">
 </picture>
 
-> **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server and a browser test portal work today; the Claude Code hookup is next. See the [plan](docs/plan.md) for the roadmap.
+> **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup and a browser test portal work today; CLI polish is next,
+> then table and column access rules. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -140,6 +141,40 @@ refusal as an answer.
 The HTTP transport has no authentication yet, so it only listens on loopback (`127.0.0.1`,
 `::1`, `localhost`) and rejects requests whose `Host` or `Origin` isn't local, which stops web
 pages from reaching it through your browser.
+
+### Claude Code
+
+Claude Code can use sql-warden as a tool. It starts `sql-warden serve` itself over stdio, so
+there is no port and nothing to keep running; only the demo stack needs to be up. Pick one:
+
+```bash
+# Just for you, in this project (saved in ~/.claude.json). Run it from the repo root.
+claude mcp add sql-warden -- uv run --quiet --directory "$PWD" sql-warden serve
+
+# Or as a project file. .mcp.json is git-ignored; Claude Code asks you to approve it once.
+cp .mcp.json.example .mcp.json
+```
+
+Start `claude` in the repo and run `/mcp`: sql-warden should be listed as connected, with
+`run_query`, `check_query` and `list_tables` (`claude mcp list` checks it from the shell).
+Then ask in plain language and watch which tools Claude calls and what comes back:
+
+| Ask Claude                                              | What you should see                             |
+|---------------------------------------------------------|-------------------------------------------------|
+| "What are the five best-selling products?"              | `list_tables`, then a join over `orders`        |
+| "How many customers signed up each month?"              | rows, and a note that a LIMIT was added         |
+| "Run `delete from orders` through sql-warden"           | refused, `NOT_A_SELECT`, with the reason        |
+| "Run `select pg_sleep(60)` through sql-warden"          | refused, `FUNCTION_NOT_ALLOWED`                 |
+| "Count every pair of rows in orders with a cross join"  | passes the checks, cancelled at the timeout     |
+
+The server reads `./warden.yaml` from the repo, like the CLI. To use another policy, set
+`SQL_WARDEN_CONFIG` for it: `-e SQL_WARDEN_CONFIG=/path/to/warden.yaml` with `claude mcp add`,
+or an `"env"` entry in `.mcp.json`. Keep passwords out of both: put them in `warden.yaml` as
+`${VAR}` references. A policy change takes effect when the server restarts (reconnect it from
+`/mcp`).
+
+Until access rules arrive in Phase 2, Claude can read every table `warden_reader` can,
+including `employee_salaries`.
 
 ### Test portal
 
