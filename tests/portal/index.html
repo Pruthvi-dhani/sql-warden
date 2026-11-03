@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>sql-warden portal</title>
+<title>test portal</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #dde1e6; --text: #1d2228; --muted: #66707a;
@@ -24,12 +24,13 @@
     font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   header {
-    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
     padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
   }
+  header .title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 16px; }
   header h1 { font-size: 16px; margin: 0; }
-  #status { color: var(--muted); font-size: 12px; flex: 1; }
+  #status { color: var(--muted); font-size: 12px; }
   #status.down { color: var(--bad); }
+  header .intro { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
   main {
     display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; padding: 16px;
     max-width: 1500px; margin: 0 auto;
@@ -113,9 +114,12 @@
 </head>
 <body>
 <header>
-  <h1>sql-warden portal</h1>
-  <span id="status">connecting…</span>
-  <button id="reconnect" class="link">reconnect</button>
+  <div class="title">
+    <h1>test portal</h1>
+    <span id="status">connecting…</span>
+    <button id="reconnect" class="link">reconnect</button>
+  </div>
+  <p class="intro">Try queries through the same MCP server agents use, and see exactly what they get back.</p>
 </header>
 
 <main>

@@ -135,7 +135,7 @@ def test_the_page_is_served_at_the_root(portal_url: str) -> None:
     with urllib.request.urlopen(f"{portal_url}/", timeout=10) as response:
         assert response.headers["content-type"].startswith("text/html")
         assert response.headers["cache-control"] == "no-store"
-        assert "<title>sql-warden portal</title>" in response.read().decode()
+        assert "<title>test portal</title>" in response.read().decode()
 
 
 def test_the_page_only_calls_tools_the_server_has() -> None:
