@@ -20,6 +20,12 @@ Decisions made:
   disagreement or a comment trick can't smuggle SQL past the checks.
 - **Audit DB is always Postgres**, on a separate instance from the warehouse, whatever the
   warehouse engine is.
+- **Profiles, not per-feature rule sets.** Who may see what is a named **profile** in
+  `warden.yaml` (e.g. `public` for an agent released to customers, `admin` for internal
+  admins), holding that caller's tables, columns, masks, cost limits and budgets. A server is
+  tied to a profile by whoever deploys it (`--profile`, Phase 2) and later by the caller's
+  token (Phase 9.2); the agent itself can never choose or change its profile. Each profile can
+  also connect as its own database role, so Postgres enforces the same split.
 - **Snowflake:** built on the shared engine protocol. There is no Snowflake account yet, so it is
   tested with fakesnow and recorded EXPLAIN fixtures. Live tests run only when `SNOWFLAKE_*` env
   vars are set.
@@ -55,6 +61,7 @@ src/sql_warden/
   pipeline/  access.py  cost.py  budget.py  masking.py  lineage.py
   engines/   snowflake.py          # plus explain() on the Engine protocol
   catalog.py                       # introspected schema -> sqlglot schema mapping
+  profiles.py                      # active profile: its tables/columns, DSN, later masks and limits
   audit/     schema.sql, sink.py   # AuditSink protocol, PostgresAuditSink, MemoryAuditSink
   sessions.py                      # session + budget store
 tests/portal/  tests/snowflake/ (marker: snowflake)
@@ -209,7 +216,7 @@ portal, or Claude.
 - **Play:** connect Claude Code to sql-warden and ask it questions about the demo data. Each
   check added after this point shows up in Claude and in the portal immediately.
 
-**1.7 CLI polish + end-to-end tests** ✅ done
+**1.7 CLI polish + end-to-end tests** ✅ done (`337b6a7`)
 - Strips the internal `DECLARE … CURSOR FOR` wrapper from database error messages. The engine
   rebuilds the message from Postgres's diagnostics (message, DETAIL, HINT), with a caret under
   the error position shifted into the SQL as sent, so the CLI, MCP and the portal all show it.
@@ -222,32 +229,78 @@ portal, or Claude.
 - Note: until Phase 2 there are no table or column rules. A well-formed SELECT can read
   anything `warden_reader` can see.
 
-## Phase 2 — Table & column access control
+## Phase 2 — Profiles: table & column access control
+Goal: an agent released to customers sees only public data, an admin agent sees everything, and
+neither can change which one it is. Example policy:
+```yaml
+default_profile: public
+profiles:
+  public:                                   # the agent released to customers
+    dsn: ${WARDEN_PUBLIC_DSN}               # optional: a DB role that can only read these
+    tables:
+      public.products: [id, name, price_cents]
+  admin:                                    # internal admins
+    tables: "*"                             # every table and column the role can read
+```
+
 **2.1 Catalog introspection**
 - `catalog.py` builds on `Engine.tables()` (from 1.4): caches the result and turns it into a
   sqlglot schema.
 - Tests: unit tests with a fake catalog, an integration test against the seeded DB.
 
-**2.2 Access check**
+**2.2 Profiles in the policy + `--profile`**
+- A `profiles:` section replaces a single `tables:` section. Each profile has `tables`: either
+  `"*"`, or a map of schema-qualified table → `"*"` or a list of columns. Each profile may set
+  its own `dsn`; without one it uses `warehouse.dsn`. `default_profile` names the profile used
+  when none is picked.
+- A server is tied to one profile: `--profile NAME` or `SQL_WARDEN_PROFILE` on `serve`,
+  `query` and `check` picks it, else `default_profile`. An unknown profile is a startup error,
+  never a fallback.
+- With no `profiles:` section there is one implicit `all` profile allowing every table (the
+  Phase 1 behaviour), so existing configs keep working; `config validate` says so loudly, and
+  9.1 refuses to serve beyond loopback without real profiles.
+- The active profile is part of every Decision: the CLI shows it, `--json` and the MCP results
+  carry `profile`, and the server's instructions name it. `config validate` lists each
+  profile's tables and whether it has its own DSN.
+- Demo stack: the seed adds a `warden_public` role with `SELECT` only on `products`, and
+  `warden.example.yaml` ships the `public` and `admin` profiles above (`public` connects as
+  `warden_public`). Picking up the new role needs a reseed (`down -v`, then `up -d`).
+- Tests: config unit tests (unknown keys, an unknown default profile, a bad table spec, every
+  problem reported at once); profile selection precedence (flag > env > default); a profile's
+  own DSN reaches the engine.
+
+**2.3 Access check**
 - `sqlglot.optimizer.qualify` with the catalog resolves aliases, CTEs, subqueries, quoting and
   case. The check collects every (table, column) referenced in any clause and refuses
-  `TABLE_NOT_ALLOWED` or `COLUMN_NOT_ALLOWED`, naming the offender. Adds the `tables` config
-  section.
+  `TABLE_NOT_ALLOWED` or `COLUMN_NOT_ALLOWED` against the **active profile**, naming the
+  offender and the profile.
 - `SELECT *` is expanded when every column is approved. Otherwise it is refused with
   `STAR_NOT_ALLOWED`, which lists the permitted columns.
 - Tests: aliases, a CTE that shadows a real table name, a correlated subquery,
   schema-qualified and quoted names, an unknown column, a column referenced only in
-  WHERE/ORDER BY.
+  WHERE/ORDER BY; the same query allowed under `admin` and refused under `public`.
+  Integration: the `public` profile's own DB role refuses `employee_salaries` even if the
+  access check is bypassed (defence in depth).
 
-**2.3 Discoverability**
-- `list_tables` and the new `describe_table` (MCP and CLI `tables`) show only approved tables
-  and columns, with masked columns flagged.
-- Tests: unit tests (unapproved objects never appear) and a CLI snapshot.
+**2.4 Discoverability**
+- `list_tables` and the new `describe_table` (MCP and CLI `tables`) show only what the active
+  profile allows, with masked columns flagged once Phase 5 lands. A `public` agent never
+  learns that `employee_salaries` exists.
+- Tests: unit tests (unapproved objects never appear, per profile) and a CLI snapshot.
+
+**2.5 Portal: profile picker**
+- The portal serves one MCP endpoint per profile (`/p/<profile>/mcp`, each its own `Warden`),
+  and a picker in the header switches between them, starting a new session. The Tables panel
+  follows the picked profile.
+- A **Compare** button runs the current query under every profile and shows one row each
+  (allowed / refused with code and reason), so `public` and `admin` can be seen side by side.
+- Tests: the portal HTTP tests call each profile's endpoint and get that profile's tables and
+  decisions; an integration test runs the comparison against the Testcontainer.
 
 ## Phase 3 — Audit database
 **3.1 Audit sink**
 - `audit/schema.sql` creates `audit_events` with these columns: id, ts, session_id, client,
-  sql (as sent), executed_sql (as regenerated and run), rewrites, decision, check, code,
+  profile, sql (as sent), executed_sql (as regenerated and run), rewrites, decision, check, code,
   reason, cost_estimate, rows_returned, masked_columns, duration_ms, and the full trace as
   jsonb. The schema is applied idempotently at startup. Adds the `audit` config section.
 - There is an `AuditSink` protocol with Postgres and in-memory implementations.
@@ -272,7 +325,7 @@ portal, or Claude.
 
 **4.2 Cost check**
 - Uses the policy values `max_total_cost` and `max_estimated_rows` (new `cost` config
-  section). It refuses with `COST_TOO_HIGH`, giving the estimate against the limit and the
+  section, with per-profile overrides, so `public` can be held to tighter limits than `admin`). It refuses with `COST_TOO_HIGH`, giving the estimate against the limit and the
   dominant plan node (e.g. "Seq Scan on orders"). The estimate is written to the audit record.
 - Tests: unit tests with a fake engine at the boundaries (equal to the limit passes);
   integration tests where the cartesian join is refused and the filtered query passes.
@@ -281,7 +334,8 @@ portal, or Claude.
 **5.1 Mask strategies**
 - Strategies: `redact`, `partial` (e.g. last 4), `hmac` (keyed and deterministic, so masked
   values can still be joined and grouped), and `null`. They handle NULL and non-string types.
-  Adds the `masks` config section.
+  Masks live under each profile (`profiles.<name>.masks`), so `admin` can see an unmasked
+  column that another profile sees masked.
 - Tests: unit tests, including a test that HMAC output is stable for one key and differs
   across keys.
 
@@ -303,7 +357,8 @@ portal, or Claude.
 **6.1 Session store**
 - Each session has a `session_id` (per MCP connection; the CLI takes `--session`). Budgets:
   `max_queries`, `max_total_cost`, `max_rows_returned`, and `max_refusals`, which stops an
-  agent from brute-forcing its way through the checks. The store is thread-safe and in-memory,
+  agent from brute-forcing its way through the checks. Limits come from a `budgets` section
+  with per-profile overrides. The store is thread-safe and in-memory,
   behind a `SessionStore` protocol so that 9.3 can swap in a Postgres-backed store.
 - Tests: unit tests, including concurrent increments.
 
@@ -347,8 +402,9 @@ account.
 ## Phase 8 — Hardening & CI
 **8.1 Startup safety checks**
 - On startup the server refuses to run if the configured DB role can write (Postgres: checks
-  `has_table_privilege` for INSERT/UPDATE/DELETE). The README gets a "defence in depth"
-  section.
+  `has_table_privilege` for INSERT/UPDATE/DELETE), checking every profile's DSN. It also warns
+  when a profile's role can read tables the profile doesn't allow, i.e. when the database isn't
+  backing up the access check. The README gets a "defence in depth" section.
 - Tests: integration with the superuser (refused) and with `warden_reader` (starts).
 
 **8.2 Adversarial corpus**
@@ -371,18 +427,24 @@ CLI.
 
 **9.1 Production HTTP transport**
 - Builds on the local-only HTTP mode from 1.4: lifts the loopback-only restriction (only
-  together with 9.2 auth), adds configurable host/port and TLS-terminating proxy guidance. Each
+  together with 9.2 auth, and only when the policy defines real profiles rather than the
+  implicit `all`), adds configurable host/port and TLS-terminating proxy guidance. Each
   MCP session id maps to a warden session.
 - Tests: an in-process HTTP MCP client session covers the tool list, run, refuse, and session
   isolation between two clients.
 
-**9.2 Authentication + per-client policies**
+**9.2 Authentication → profiles**
 - Bearer tokens: either static hashed API keys in config, or OIDC/JWT validated with `pyjwt`
-  against JWKS. Each identity maps to a policy profile (tables, masks, cost limits, budgets),
-  and the identity is recorded on every audit event. Unauthenticated → 401, with nothing
-  executed and the attempt audited.
+  against JWKS. Each token maps to one of the **profiles from Phase 2** (an API key names its
+  profile; for OIDC a claim or group maps to a profile name). There is no separate per-client
+  policy format: the profile is the policy, and one server now serves every profile, each
+  request using its token's profile (and that profile's DSN).
+- A token with no profile mapping is refused (403), never given `default_profile`. The
+  identity and profile are recorded on every audit event. Unauthenticated → 401, with nothing
+  executed and the attempt audited. `--profile` stays for stdio and local use only.
 - Tests: unit tests for token validation (expired, wrong audience, unknown key) and profile
-  resolution. An HTTP test checks that two tokens see different tables.
+  resolution (unmapped token refused). An HTTP test checks that a `public` token and an
+  `admin` token see different tables and get different decisions for the same query.
 
 **9.3 Shared budget state across replicas**
 - `PostgresSessionStore` lives in the audit DB and uses atomic `UPDATE … RETURNING` counters,
@@ -423,16 +485,32 @@ CLI.
 
 ---
 
+**9.7 Per-customer row filtering** (only if customers need their own rows)
+- For an agent released to customers that must show each customer only *their* rows (e.g.
+  "my orders"), not just shared public tables. Needs 9.2, because the customer id must come
+  from an authenticated token, never from the agent or the SQL.
+- A profile can give a table a row filter, e.g. `public.orders: {columns: [...], rows:
+  "customer_id = :customer_id"}`, where `:customer_id` is bound from a token claim. The check
+  rewrites every reference to that table, in joins, subqueries, CTEs and UNION branches, into a
+  filtered subquery, so the filter can't be escaped with `OR`, aliases or a second reference.
+  The rewrite note says a row filter was applied.
+- Defence in depth: the same rule as Postgres row-level security on the profile's DB role, with
+  the warden itself setting the customer id for the transaction.
+- Tests: two customers' tokens never see each other's rows through joins, subqueries, UNIONs,
+  aggregates or `OR` tricks; a token without the claim is refused; integration with RLS on.
+
 ## Verification
 - After each point, run `uv run ruff check . && uv run mypy && uv run pytest -m "not snowflake"`.
   Integration tests need Docker running.
 - To check by hand, run `docker compose -f dev/docker-compose.yml up -d`, then
   `uv run sql-warden check/query` with good and bad SQL. Look at the per-check trace (and, from
   Phase 3 on, at `sql-warden audit tail`).
+- From 2.5 on, use the portal's profile picker and Compare to check that `public` is refused
+  what `admin` is allowed.
 - From 1.5 on, use the portal (`uv run python -m tests.portal`); from 1.6 on, run the MCP
   server in Claude Code via `.mcp.json`. Ask the agent for something forbidden (salaries, a
   cross join, a raw SSN) and check that the refusal reason is specific and, from Phase 3 on,
   that the audit DB recorded it.
 - From Phase 9 on, run `docker run` on the image with `--transport http`, point Claude Code at
-  the URL with a token, and check `/readyz` and `/metrics`. Use two tokens to confirm that the
-  per-client policies differ.
+  the URL with a token, and check `/readyz` and `/metrics`. Use a `public` and an `admin` token
+  to confirm that their profiles differ.
