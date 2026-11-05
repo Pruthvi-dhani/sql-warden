@@ -48,6 +48,8 @@ class Decision:
     """What runs if the query is allowed: regenerated from the checked tree. None if refused."""
     rewrites: tuple[str, ...] = ()
     """How the checks changed the query, e.g. "added LIMIT 101"."""
+    profile: str | None = None
+    """The profile the query was checked for; the Warden always sets it."""
 
     @property
     def refused_by(self) -> TraceEntry | None:

@@ -28,3 +28,17 @@ shape:
   # query_to_xml, ...) are always refused and can't be listed.
   allowed_functions: []
   denied_functions: []         # more names or glob patterns to refuse, e.g. [md5, "regexp_*"]
+
+# Who a server serves. A server is tied to one profile when it starts: --profile, else
+# SQL_WARDEN_PROFILE, else default_profile. Agents can't change it; the tools take only SQL.
+# A profile's own dsn, usually a role that can read less, is used even when --dsn or
+# SQL_WARDEN_DSN is set; profiles without one connect with warehouse.dsn. Leave the section
+# out and there is one implicit profile, `all`, that can read everything warehouse.dsn can.
+#
+# Which tables and columns each profile may query arrives with the access check (Phase 2.3).
+# Until then a profile is limited by what its database role can read.
+default_profile: public
+profiles:
+  public:          # an agent released to customers: products (id, name, price_cents) only
+    dsn: postgresql://warden_public:${WARDEN_PUBLIC_PASSWORD:-warden_public}@localhost:5433/warehouse
+  admin: {}        # internal admins: everything warden_reader can read

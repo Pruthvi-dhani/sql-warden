@@ -14,7 +14,7 @@ def test_allowed_query_shows_each_check_and_executes_nothing(engines: list[FakeE
     assert re.fullmatch(r"✓ parse  \d+\.\d ms", parse)
     assert re.fullmatch(r"✓ shape  \d+\.\d ms", shape)
     assert rest == [
-        "→ allowed (dry run, nothing was executed)",
+        "→ allowed (profile all; dry run, nothing was executed)",
         "  note: added LIMIT 101 (row cap 100 + 1 to detect truncation)",
         "  would run: SELECT id FROM products LIMIT 101",
     ]
@@ -37,7 +37,7 @@ def test_refused_query_names_the_check_code_and_reason(engines: list[FakeEngine]
     outcome = CliRunner().invoke(cli, ["check", "select * from orders where"])
     assert outcome.exit_code == 2
     assert outcome.output.splitlines()[0].startswith("✗ parse  PARSE_ERROR: ")
-    assert outcome.output.splitlines()[-1] == "→ refused by parse"
+    assert outcome.output.splitlines()[-1] == "→ refused by parse (profile all)"
     assert engines[0].executed == []
 
 

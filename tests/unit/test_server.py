@@ -149,6 +149,7 @@ class TestListTables:
         result = await _call(FakeEngine(), "list_tables")
         assert result.is_error is False
         assert _payload(result) == {
+            "profile": "all",
             "tables": [
                 {
                     "schema": "public",
@@ -158,7 +159,7 @@ class TestListTables:
                         {"name": "name", "type": "text"},
                     ],
                 }
-            ]
+            ],
         }
 
     async def test_unreachable_database_is_a_clean_error(self) -> None:

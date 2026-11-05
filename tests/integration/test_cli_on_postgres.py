@@ -33,7 +33,7 @@ def test_a_refused_query_never_reaches_the_database_and_exits_2(warehouse: Wareh
     assert output.splitlines()[1:] == [
         "✗ shape  NOT_READ_ONLY: the query contains a DELETE in the CTE x; "
         "queries must not modify data",
-        "→ refused by shape",
+        "→ refused by shape (profile all)",
     ]
     code, output = _invoke(warehouse, "query", "select count(*) from orders")
     assert output.splitlines()[2] == "1000000"

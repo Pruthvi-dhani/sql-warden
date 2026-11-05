@@ -242,13 +242,46 @@ uv run sql-warden config validate          # checks the file without connecting
 
 Which config is used, highest priority first:
 
-1. command-line flags (`--dsn`, `--max-rows`, `--timeout-ms`) and `SQL_WARDEN_DSN`
+1. command-line flags (`--dsn`, `--max-rows`, `--timeout-ms`, `--profile`) and `SQL_WARDEN_DSN`,
+   `SQL_WARDEN_PROFILE`
 2. the file given by `--config PATH` or `SQL_WARDEN_CONFIG`
 3. `./warden.yaml`, if it exists
 4. built-in defaults for the local demo stack
 
 Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
-enforces it. Today that is `warehouse` (connection, timeout, row cap) and `shape` (joins,
-nesting, LIMIT policy, function allow and deny lists); [warden.example.yaml](warden.example.yaml)
-documents every key.
+enforces it. Today that is `warehouse` (connection, timeout, row cap), `shape` (joins,
+nesting, LIMIT policy, function allow and deny lists) and `profiles`;
+[warden.example.yaml](warden.example.yaml) documents every key.
+
+### Profiles
+
+A profile is who a server serves: say `public` for an agent released to customers, and `admin`
+for internal admins. Each server is tied to one profile when it starts, and nothing an agent
+sends can change it (the tools take only SQL):
+
+```yaml
+default_profile: public
+profiles:
+  public:      # connects as a role that can read products (id, name, price_cents) only
+    dsn: postgresql://warden_public:${WARDEN_PUBLIC_PASSWORD:-warden_public}@localhost:5433/warehouse
+  admin: {}    # connects with warehouse.dsn: everything warden_reader can read
+```
+
+```bash
+cp warden.example.yaml warden.yaml                                                   # ships these two profiles
+uv run sql-warden query "select count(*) from employee_salaries"                    # public: permission denied
+uv run sql-warden query "select count(*) from employee_salaries" --profile admin    # admin: 50
+uv run sql-warden serve --profile public                                             # an MCP server for customers
+```
+
+The profile comes from `--profile`, else `SQL_WARDEN_PROFILE`, else `default_profile`. An
+unknown name is an error, never a fallback. A profile's own `dsn` wins over `--dsn` and
+`SQL_WARDEN_DSN`, so a flag can't widen what it reads. Every decision names its profile: the
+CLI prints it, and `--json` and the MCP results carry `profile`.
+
+Today a profile is limited by what its database role can read; per-profile table and column
+rules come with the access check (next in the [plan](docs/plan.md)). Without a `profiles`
+section there is one implicit profile, `all`, and `config validate` says so. The demo
+database's `warden_public` role was added with profiles: if your demo stack is older, reseed it
+with `docker compose -f dev/docker-compose.yml down -v && docker compose -f dev/docker-compose.yml up -d`.

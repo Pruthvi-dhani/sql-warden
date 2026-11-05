@@ -61,6 +61,7 @@
   }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
   .hint { color: var(--muted); font-size: 12px; }
+  .verdict .profile { font-weight: normal; opacity: .8; }
   select { font: inherit; padding: 5px; border-radius: 6px; max-width: 100%;
     border: 1px solid var(--border); background: var(--panel); color: var(--text); }
   code, pre { font-family: var(--mono); font-size: 12.5px; }
@@ -320,6 +321,7 @@ function renderDecision(tool, result) {
   else if (payload.error) verdict = el("div", { class: "verdict warn" }, "Allowed, but the database failed to run it");
   else if (tool === "check_query") verdict = el("div", { class: "verdict ok" }, "✓ Allowed (dry run, nothing was executed)");
   else verdict = el("div", { class: "verdict ok" }, "✓ Allowed and executed");
+  if (payload.profile) verdict.append(el("span", { class: "profile" }, ` · profile ${payload.profile}`));
   box.append(verdict);
 
   box.append(el("ul", { class: "trace" }, payload.trace.map(step => el("li", {},

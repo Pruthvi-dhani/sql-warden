@@ -9,6 +9,7 @@ import uvicorn
 
 from sql_warden import __version__
 from sql_warden.config import (
+    IMPLICIT_PROFILE,
     ConfigError,
     WardenConfig,
     default_config,
@@ -16,6 +17,7 @@ from sql_warden.config import (
     load_config,
 )
 from sql_warden.engines.postgres import PostgresEngine
+from sql_warden.profiles import ProfileError, select_profile
 from sql_warden.render import format_decision, format_rewrites, format_table
 from sql_warden.server import create_http_app, create_server, describe
 from sql_warden.warden import Warden
@@ -45,6 +47,12 @@ def resolve_config(path: Path | None) -> tuple[WardenConfig, str]:
 
 def engine_options[F: Callable[..., Any]](command: F) -> F:
     command = click.option(
+        "--profile",
+        envvar="SQL_WARDEN_PROFILE",
+        help="Profile to serve, from warden.yaml's profiles (env: SQL_WARDEN_PROFILE). "
+        "Default: default_profile.",
+    )(command)
+    command = click.option(
         "--timeout-ms",
         type=click.IntRange(min=1),
         help="Statement timeout; overrides warehouse.statement_timeout_ms.",
@@ -55,7 +63,8 @@ def engine_options[F: Callable[..., Any]](command: F) -> F:
     command = click.option(
         "--dsn",
         envvar="SQL_WARDEN_DSN",
-        help="Warehouse connection string; overrides warehouse.dsn (env: SQL_WARDEN_DSN).",
+        help="Warehouse connection string; overrides warehouse.dsn, which profiles without "
+        "their own dsn use (env: SQL_WARDEN_DSN).",
     )(command)
     return command
 
@@ -81,15 +90,21 @@ def json_option[F: Callable[..., Any]](command: F) -> F:
     )(command)
 
 
-def build_warden(config: WardenConfig) -> Warden:
+def build_warden(config: WardenConfig, profile: str | None = None) -> Warden:
+    """A Warden for one profile. A profile's own dsn wins over --dsn and SQL_WARDEN_DSN: it is
+    part of the policy, often a role that can read less, and a flag must not widen it."""
+    try:
+        active = select_profile(config, profile)
+    except ProfileError as exc:
+        raise click.ClickException(str(exc)) from exc
     warehouse = config.warehouse
     engine = PostgresEngine(
-        warehouse.dsn,
+        active.dsn,
         statement_timeout_ms=warehouse.statement_timeout_ms,
         max_rows=warehouse.max_rows,
         connect_timeout_s=warehouse.connect_timeout_s,
     )
-    return Warden(engine, dialect=warehouse.dialect, shape=config.shape)
+    return Warden(engine, dialect=warehouse.dialect, shape=config.shape, profile=active.name)
 
 
 class UsageError(click.UsageError):
@@ -148,13 +163,14 @@ def check(
     dsn: str | None,
     max_rows: int | None,
     timeout_ms: int | None,
+    profile: str | None,
     as_json: bool,
 ) -> None:
     """Dry run: show what each check decides about SQL, without executing it.
 
     Exits 0 if the query would be allowed, 2 if a check refuses it, 1 on any other error.
     """
-    warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
+    warden = build_warden(settings(state, dsn, max_rows, timeout_ms), profile)
     decision = warden.check(sql)
     if as_json:
         click.echo(describe(decision).model_dump_json(exclude_none=True))
@@ -175,13 +191,14 @@ def query(
     dsn: str | None,
     max_rows: int | None,
     timeout_ms: int | None,
+    profile: str | None,
     as_json: bool,
 ) -> None:
     """Run SQL through the checks and, if allowed, against the warehouse.
 
     Exits 0 if it ran, 2 if a check refused it, 1 if the database failed or on any other error.
     """
-    warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
+    warden = build_warden(settings(state, dsn, max_rows, timeout_ms), profile)
     outcome = warden.run(sql)
     if as_json:
         click.echo(describe(outcome.decision, outcome).model_dump_json(exclude_none=True))
@@ -194,7 +211,7 @@ def query(
             click.echo(format_decision(outcome.decision, dry_run=False))
         raise SystemExit(EXIT_REFUSED)
     if not as_json:
-        click.echo(format_table(outcome.result))
+        click.echo(format_table(outcome.result, profile=warden.profile))
         for note in format_rewrites(outcome.decision):
             click.echo(note)
 
@@ -221,9 +238,10 @@ def serve(
     dsn: str | None,
     max_rows: int | None,
     timeout_ms: int | None,
+    profile: str | None,
 ) -> None:
-    """Serve the MCP tools: run_query, check_query and list_tables."""
-    warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
+    """Serve the MCP tools: run_query, check_query and list_tables, for one profile."""
+    warden = build_warden(settings(state, dsn, max_rows, timeout_ms), profile)
     if transport == "stdio":
         create_server(warden).run("stdio")
         return
@@ -232,7 +250,11 @@ def serve(
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     url_host = f"[{host}]" if ":" in host else host
-    click.echo(f"sql-warden MCP server on http://{url_host}:{port}/mcp (Ctrl+C stops it)", err=True)
+    click.echo(
+        f"sql-warden MCP server on http://{url_host}:{port}/mcp, profile {warden.profile} "
+        "(Ctrl+C stops it)",
+        err=True,
+    )
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
@@ -274,3 +296,27 @@ def validate(state: CliState, path: Path | None) -> None:
             f"             {len(shape.allowed_functions)} extra functions allowed, "
             f"{len(shape.denied_functions)} extra denied"
         )
+    for line in describe_profiles(loaded):
+        click.echo(line)
+
+
+def describe_profiles(config: WardenConfig) -> list[str]:
+    if config.profiles is None:
+        return [
+            f"  profiles:  ! none defined: every server uses the implicit profile "
+            f"'{IMPLICIT_PROFILE}',",
+            "             which can read everything the warehouse role can",
+        ]
+    lines = []
+    for index, (name, profile) in enumerate(config.profiles.items()):
+        label = "  profiles:  " if index == 0 else "             "
+        default = " (default)" if name == config.default_profile else ""
+        where = (
+            f"connects to {describe_dsn(profile.dsn)}"
+            if profile.dsn is not None
+            else "connects with warehouse.dsn"
+        )
+        lines.append(f"{label}{name}{default}: {where}")
+    if config.default_profile is None:
+        lines.append("             no default_profile: servers must be given --profile")
+    return lines

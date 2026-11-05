@@ -115,8 +115,16 @@ class TestDeniedFunctions:
 
 
 def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("WARDEN_READER_PASSWORD", raising=False)
-    assert load_config(EXAMPLE_CONFIG) == default_config()
+    for name in ("WARDEN_READER_PASSWORD", "WARDEN_PUBLIC_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    example, defaults = load_config(EXAMPLE_CONFIG), default_config()
+    assert (example.warehouse, example.shape) == (defaults.warehouse, defaults.shape)
+    assert example.default_profile == "public"
+    assert example.profiles is not None
+    assert {name: profile.dsn for name, profile in example.profiles.items()} == {
+        "public": "postgresql://warden_public:warden_public@localhost:5433/warehouse",
+        "admin": None,
+    }
 
 
 def test_config_is_immutable() -> None:

@@ -15,6 +15,8 @@ class Warehouse:
 
     admin_dsn: str
     reader_dsn: str
+    public_dsn: str
+    """The `public` profile's role: products (id, name, price_cents) only."""
 
 
 @pytest.fixture(scope="session")
@@ -35,4 +37,5 @@ def warehouse() -> Iterator[Warehouse]:
         yield Warehouse(
             admin_dsn=container.get_connection_url(),
             reader_dsn=f"postgresql://warden_reader:warden_reader@{host}:{port}/warehouse",
+            public_dsn=f"postgresql://warden_public:warden_public@{host}:{port}/warehouse",
         )

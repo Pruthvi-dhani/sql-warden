@@ -69,6 +69,11 @@ BUILTIN_DENIED_FUNCTIONS = (
 # ${VAR} or ${VAR:-default}, in any string value.
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
+IMPLICIT_PROFILE = "all"
+"""The one profile there is when warden.yaml defines none: every table the role can read."""
+# Profile names end up in URLs and audit records, so they stay simple.
+_PROFILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}")
+
 
 class ConfigError(Exception):
     """The config file is missing or invalid. The message says where and why."""
@@ -124,10 +129,69 @@ class ShapeConfig(_Section):
         return next((pattern for pattern in patterns if fnmatchcase(name, pattern)), None)
 
 
+class ProfileConfig(_Section):
+    """Who a server serves, e.g. an agent released to customers, or internal admins."""
+
+    dsn: str | None = None
+    """A connection, usually as a role that can read only what this profile may see. Without
+    one, the profile connects with warehouse.dsn."""
+
+
 class WardenConfig(_Section):
     version: Literal[1]
     warehouse: WarehouseConfig = WarehouseConfig()
     shape: ShapeConfig = ShapeConfig()
+    profiles: dict[str, ProfileConfig] | None = None
+    """None: no profiles are defined, and the one profile is the implicit `all`."""
+    default_profile: str | None = None
+    """The profile a server uses when none is picked with --profile or SQL_WARDEN_PROFILE."""
+
+    @field_validator("profiles")
+    @classmethod
+    def _profile_names(
+        cls, profiles: dict[str, ProfileConfig] | None
+    ) -> dict[str, ProfileConfig] | None:
+        if profiles is None:
+            return None
+        if not profiles:
+            raise PydanticCustomError(
+                "no_profiles", "define at least one profile, or leave the section out"
+            )
+        for name in profiles:
+            if name == IMPLICIT_PROFILE:
+                raise PydanticCustomError(
+                    "reserved_profile",
+                    "'{name}' is the implicit profile used when none are defined; pick "
+                    "another name",
+                    {"name": name},
+                )
+            if not _PROFILE_NAME.fullmatch(name):
+                raise PydanticCustomError(
+                    "profile_name",
+                    "profile name '{name}' must be lowercase letters, digits, '-' or '_', "
+                    "starting with a letter",
+                    {"name": name},
+                )
+        return profiles
+
+    @model_validator(mode="after")
+    def _default_profile_exists(self) -> Self:
+        default = self.default_profile
+        if default is None:
+            return self
+        if self.profiles is None:
+            raise PydanticCustomError(
+                "default_without_profiles",
+                "default_profile is '{name}', but there is no profiles section",
+                {"name": default},
+            )
+        if default not in self.profiles:
+            raise PydanticCustomError(
+                "unknown_default_profile",
+                "default_profile is '{name}', which is not one of the profiles ({known})",
+                {"name": default, "known": ", ".join(self.profiles)},
+            )
+        return self
 
 
 def default_config() -> WardenConfig:

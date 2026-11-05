@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 from sql_warden.catalog import Catalog
-from sql_warden.config import ShapeConfig
+from sql_warden.config import IMPLICIT_PROFILE, ShapeConfig
 from sql_warden.engines import Engine, EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
 from sql_warden.pipeline import Check, CheckContext, ParseCheck, Pipeline, ShapeCheck
@@ -18,9 +18,12 @@ class Warden:
         dialect: str = "postgres",
         shape: ShapeConfig | None = None,
         checks: Sequence[Check] = (),
+        profile: str = IMPLICIT_PROFILE,
     ) -> None:
         self.engine = engine
         self.dialect = dialect
+        self.profile = profile
+        """The profile this Warden serves. Fixed for its lifetime."""
         self.catalog = Catalog(engine, dialect=dialect)
         shape_check = ShapeCheck(shape or ShapeConfig(), max_rows=engine.max_rows)
         self.pipeline = Pipeline([ParseCheck(), shape_check, *checks])
@@ -28,7 +31,7 @@ class Warden:
     def check(self, sql: str) -> Decision:
         """Run the checks only. Nothing reaches the database."""
         ctx = CheckContext(sql=sql, dialect=self.dialect)
-        decision = self.pipeline.run(ctx)
+        decision = replace(self.pipeline.run(ctx), profile=self.profile)
         if not decision.allowed:
             return decision
         # What runs is the tree the checks approved, regenerated, never the raw text: nothing

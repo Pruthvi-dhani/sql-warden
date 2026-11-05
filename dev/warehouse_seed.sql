@@ -102,3 +102,11 @@ CREATE ROLE warden_reader LOGIN PASSWORD 'warden_reader';
 ALTER ROLE warden_reader SET default_transaction_read_only = on;
 GRANT USAGE ON SCHEMA public TO warden_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO warden_reader;
+
+-- The role for the `public` profile: an agent released to customers. It can read only the
+-- product catalog, and only these columns, so the database itself enforces what the profile
+-- allows even if a check in front of it is wrong.
+CREATE ROLE warden_public LOGIN PASSWORD 'warden_public';
+ALTER ROLE warden_public SET default_transaction_read_only = on;
+GRANT USAGE ON SCHEMA public TO warden_public;
+GRANT SELECT (id, name, price_cents) ON products TO warden_public;

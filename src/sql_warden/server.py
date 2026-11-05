@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.applications import Starlette
 
 from sql_warden import __version__
+from sql_warden.config import IMPLICIT_PROFILE
 from sql_warden.engines import EngineError
 from sql_warden.models import Decision, QueryOutcome
 from sql_warden.warden import Warden
@@ -54,6 +55,8 @@ class QueryRows(BaseModel):
 
 class QueryResponse(BaseModel):
     refused: bool
+    profile: str | None = None
+    """The profile the query was checked for: what this server lets its callers see."""
     check: str | None = None
     """The check that refused the query."""
     code: str | None = None
@@ -81,6 +84,7 @@ class TableInfo(BaseModel):
 
 
 class TablesResponse(BaseModel):
+    profile: str
     tables: list[TableInfo]
 
 
@@ -109,6 +113,7 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
     error = outcome.error if outcome else None
     return QueryResponse(
         refused=refusal is not None,
+        profile=decision.profile,
         check=refused_by.check if refused_by else None,
         code=refusal.code if refusal else None,
         reason=refusal.reason if refusal else None,
@@ -147,8 +152,18 @@ def tool_result(response: QueryResponse, *, is_error: bool) -> CallToolResult:
     )
 
 
+def instructions(profile: str) -> str:
+    """INSTRUCTIONS, plus which profile this server serves."""
+    if profile == IMPLICIT_PROFILE:
+        return INSTRUCTIONS + "\nNo access profiles are configured on this server."
+    return INSTRUCTIONS + (
+        f"\nThis server serves the '{profile}' profile; queries are checked against its rules. "
+        "The profile is set when the server starts and can't be changed from here."
+    )
+
+
 def create_server(warden: Warden) -> MCPServer:
-    server = MCPServer("sql-warden", version=__version__, instructions=INSTRUCTIONS)
+    server = MCPServer("sql-warden", version=__version__, instructions=instructions(warden.profile))
 
     @server.tool(annotations=READ_ONLY)
     def run_query(sql: str) -> Annotated[CallToolResult, QueryResponse]:
@@ -176,6 +191,7 @@ def create_server(warden: Warden) -> MCPServer:
             # Engine messages are safe to show; anything else stays hidden by the SDK.
             raise ToolError(str(exc)) from exc
         return TablesResponse(
+            profile=warden.profile,
             tables=[
                 TableInfo(
                     schema_name=table.schema,
@@ -183,7 +199,7 @@ def create_server(warden: Warden) -> MCPServer:
                     columns=[ColumnInfo(name=c.name, type=c.type) for c in table.columns],
                 )
                 for table in tables
-            ]
+            ],
         )
 
     return server

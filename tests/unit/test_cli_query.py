@@ -15,7 +15,7 @@ def test_query_prints_a_table_and_what_was_rewritten(engines: list[FakeEngine]) 
         "id",
         "--",
         "1",
-        "(1 row, 1 ms)",
+        "(1 row, 1 ms, profile all)",
         "note: added LIMIT 101 (row cap 100 + 1 to detect truncation)",
     ]
     assert engines[0].executed == ["SELECT 1 AS id LIMIT 101"]
@@ -23,7 +23,7 @@ def test_query_prints_a_table_and_what_was_rewritten(engines: list[FakeEngine]) 
 
 def test_query_without_rewrites_has_no_notes(engines: list[FakeEngine]) -> None:
     outcome = CliRunner().invoke(cli, ["query", "select 1 as id limit 1"])
-    assert outcome.output.splitlines() == ["id", "--", "1", "(1 row, 1 ms)"]
+    assert outcome.output.splitlines() == ["id", "--", "1", "(1 row, 1 ms, profile all)"]
 
 
 def test_shape_refusals_never_execute(engines: list[FakeEngine]) -> None:
@@ -31,7 +31,7 @@ def test_shape_refusals_never_execute(engines: list[FakeEngine]) -> None:
     assert outcome.exit_code == 2
     assert outcome.output.splitlines()[1:] == [
         "✗ shape  NOT_A_SELECT: only SELECT queries are allowed, not DELETE",
-        "→ refused by shape",
+        "→ refused by shape (profile all)",
     ]
     assert engines[0].executed == []
 
@@ -77,7 +77,7 @@ def test_refused_query_shows_the_reason_and_never_executes(engines: list[FakeEng
     assert outcome.exit_code == 2
     assert outcome.output.splitlines() == [
         "✗ parse  PARSE_ERROR: Invalid expression / Unexpected token (line 1, col 7)",
-        "→ refused by parse",
+        "→ refused by parse (profile all)",
     ]
     assert engines[0].executed == []
 

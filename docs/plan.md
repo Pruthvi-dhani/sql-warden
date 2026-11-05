@@ -45,6 +45,7 @@ src/sql_warden/
     parse.py         # ParseCheck: parses once with sqlglot, readable errors
     shape.py         # ShapeCheck: structural rules + LIMIT rewrite
   catalog.py         # Catalog: the role's tables and columns, cached, as a sqlglot schema
+  profiles.py        # select_profile: the profile a server serves, and where it connects
   engines/
     base.py          # Engine protocol (max_rows, execute(sql) -> Result, tables()), engine errors
     postgres.py      # read-only transaction, statement timeout, row cap via server-side cursor
@@ -61,7 +62,6 @@ Still to come:
 src/sql_warden/
   pipeline/  access.py  cost.py  budget.py  masking.py  lineage.py
   engines/   snowflake.py          # plus explain() on the Engine protocol
-  profiles.py                      # active profile: its tables/columns, DSN, later masks and limits
   audit/     schema.sql, sink.py   # AuditSink protocol, PostgresAuditSink, MemoryAuditSink
   sessions.py                      # session + budget store
 tests/portal/  tests/snowflake/ (marker: snowflake)
@@ -255,11 +255,16 @@ profiles:
   parse (e.g. `tsvector`) become `UNKNOWN`; the column is still listed.
 - Tests: unit tests with a fake catalog, an integration test against the seeded DB.
 
-**2.2 Profiles in the policy + `--profile`**
-- A `profiles:` section replaces a single `tables:` section. Each profile has `tables`: either
-  `"*"`, or a map of schema-qualified table → `"*"` or a list of columns. Each profile may set
-  its own `dsn`; without one it uses `warehouse.dsn`. `default_profile` names the profile used
-  when none is picked.
+**2.2 Profiles in the policy + `--profile`** ✅ done
+- A `profiles:` section replaces a single `tables:` section. Each profile may set its own
+  `dsn`; without one it uses `warehouse.dsn`. `default_profile` names the profile used when
+  none is picked.
+- A profile's `tables` arrive in 2.3, with the access check that enforces them: a rule in the
+  file is never one nothing enforces, so until then `tables:` is an unknown key. In 2.2 a
+  profile is limited by its database role.
+- A profile's own `dsn` wins over `--dsn` and `SQL_WARDEN_DSN`: it is part of the policy, and
+  a flag must not widen what a profile can read. Profile names are lowercase
+  (`[a-z][a-z0-9_-]*`, later used in URLs); `all` is reserved for the implicit profile.
 - A server is tied to one profile: `--profile NAME` or `SQL_WARDEN_PROFILE` on `serve`,
   `query` and `check` picks it, else `default_profile`. An unknown profile is a startup error,
   never a fallback.
@@ -271,12 +276,16 @@ profiles:
   profile's tables and whether it has its own DSN.
 - Demo stack: the seed adds a `warden_public` role with `SELECT` only on `products`, and
   `warden.example.yaml` ships the `public` and `admin` profiles above (`public` connects as
-  `warden_public`). Picking up the new role needs a reseed (`down -v`, then `up -d`).
+  `warden_public`). Picking up the new role needs a reseed (`down -v`, then `up -d`). The role
+  gets column-level grants (`products (id, name, price_cents)`), the same columns the `public`
+  profile will be allowed in 2.3.
 - Tests: config unit tests (unknown keys, an unknown default profile, a bad table spec, every
   problem reported at once); profile selection precedence (flag > env > default); a profile's
   own DSN reaches the engine.
 
 **2.3 Access check**
+- Adds `tables` to each profile: either `"*"`, or a map of schema-qualified table → `"*"` or a
+  list of columns. A profile without `tables` can read nothing (fail closed).
 - `sqlglot.optimizer.qualify` with the catalog resolves aliases, CTEs, subqueries, quoting and
   case. The check collects every (table, column) referenced in any clause and refuses
   `TABLE_NOT_ALLOWED` or `COLUMN_NOT_ALLOWED` against the **active profile**, naming the

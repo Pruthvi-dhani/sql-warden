@@ -28,14 +28,17 @@ def main(
     dsn: str | None,
     max_rows: int | None,
     timeout_ms: int | None,
+    profile: str | None,
     port: int,
     open_browser: bool,
 ) -> None:
     """Serve the sql-warden test portal on http://127.0.0.1:PORT/ (loopback only)."""
     logging.getLogger("sqlglot").setLevel(logging.ERROR)  # as the CLI does
-    warden = build_warden(settings(CliState(config_path), dsn, max_rows, timeout_ms))
+    warden = build_warden(settings(CliState(config_path), dsn, max_rows, timeout_ms), profile)
     url = f"http://127.0.0.1:{port}/"
-    click.echo(f"sql-warden test portal on {url} (Ctrl+C stops it)", err=True)
+    click.echo(
+        f"sql-warden test portal on {url}, profile {warden.profile} (Ctrl+C stops it)", err=True
+    )
     if open_browser:
         threading.Timer(0.5, webbrowser.open, (url,)).start()
     uvicorn.run(create_portal_app(warden), host="127.0.0.1", port=port, log_level="warning")

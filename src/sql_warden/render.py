@@ -15,12 +15,15 @@ def format_decision(decision: Decision, *, dry_run: bool) -> str:
             refusal = entry.refusal
             lines.append(f"✗ {entry.check.ljust(width)}  {refusal.code}: {refusal.reason}")
     refused_by = decision.refused_by
+    profile = f"profile {decision.profile}" if decision.profile else None
     if refused_by is not None:
-        lines.append(f"→ refused by {refused_by.check}")
+        lines.append(f"→ refused by {refused_by.check}" + (f" ({profile})" if profile else ""))
     elif dry_run:
-        lines.append("→ allowed (dry run, nothing was executed)")
+        lines.append(
+            "→ allowed (" + (f"{profile}; " if profile else "") + "dry run, nothing was executed)"
+        )
     else:
-        lines.append("→ allowed")
+        lines.append("→ allowed" + (f" ({profile})" if profile else ""))
     lines += [f"  {note}" for note in format_rewrites(decision)]
     if dry_run and decision.sql is not None:
         lines.append(f"  would run: {decision.sql}")
@@ -35,7 +38,7 @@ def format_value(value: object) -> str:
     return "NULL" if value is None else str(value)
 
 
-def format_table(result: Result) -> str:
+def format_table(result: Result, *, profile: str | None = None) -> str:
     cells = [[format_value(v) for v in row] for row in result.rows]
     widths = [len(name) for name in result.columns]
     for row in cells:
@@ -46,13 +49,14 @@ def format_table(result: Result) -> str:
 
     lines = [line(list(result.columns)), "-+-".join("-" * w for w in widths)]
     lines += [line(row) for row in cells]
-    lines.append(format_footer(result))
+    lines.append(format_footer(result, profile=profile))
     return "\n".join(lines)
 
 
-def format_footer(result: Result) -> str:
+def format_footer(result: Result, *, profile: str | None = None) -> str:
     count = len(result.rows)
     footer = f"({count} row{'' if count == 1 else 's'}"
     if result.truncated:
         footer += ", truncated at the row cap"
-    return footer + f", {result.duration_ms:.0f} ms)"
+    footer += f", {result.duration_ms:.0f} ms"
+    return footer + (f", profile {profile})" if profile else ")")
