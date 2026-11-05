@@ -36,3 +36,29 @@ jobs:
 
       - name: mypy (strict)
         run: uv run mypy
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest -ra -m "not integration and not snowflake"
+
+  integration:
+    name: Integration tests (Postgres via Testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      # ubuntu runners come with Docker; Testcontainers starts a seeded Postgres per session.
+      # The snowflake tests need a live account, so they never run here.
+      - run: uv run pytest -ra -m "integration and not snowflake"

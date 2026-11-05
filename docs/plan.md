@@ -419,11 +419,14 @@ account.
   functions, `COPY`, `DO $$`, `EXPLAIN ANALYZE` smuggling, stacked statements, `set_config` in a
   subquery, and casting tricks.
 
-**8.3 CI**
+**8.3 CI** ✅ done early
 - A GitHub Actions workflow runs ruff, mypy, the unit tests and the integration tests (Docker
   is available on ubuntu runners).
-- The lint job (`ruff check`, `ruff format --check`, `mypy` strict) is ✅ done early, in
-  `.github/workflows/ci.yml`; the test jobs are still to come.
+- `.github/workflows/ci.yml` runs on every push to `main` and every pull request, as three
+  parallel jobs: lint (`ruff check`, `ruff format --check`, `mypy` strict), unit tests
+  (`-m "not integration and not snowflake"`), and integration tests against Testcontainers
+  Postgres (`-m "integration and not snowflake"`). The live Snowflake tests (Phase 7) stay out
+  of CI until there is an account to run them against.
 
 ## Phase 9 — Production: sql-warden as a central service
 Target setup: agents connect over HTTPS with a token, and only the warden holds database
