@@ -149,7 +149,7 @@ uv run sql-warden serve --transport http     # Streamable HTTP at http://127.0.0
 |---------------|------------------------------------------------------------------------------|
 | `run_query`   | checks the SQL and, if allowed, runs it and returns the rows                 |
 | `check_query` | dry run: the decision and the exact SQL that would run, nothing executed     |
-| `list_tables` | the tables and views the warehouse role can read, with column types          |
+| `list_tables` | tables and views the role can read, with column types; cached for a minute   |
 
 Results are structured, so an agent can tell why a query was refused and fix it:
 

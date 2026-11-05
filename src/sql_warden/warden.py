@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import replace
 
+from sql_warden.catalog import Catalog
 from sql_warden.config import ShapeConfig
 from sql_warden.engines import Engine, EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
@@ -20,6 +21,7 @@ class Warden:
     ) -> None:
         self.engine = engine
         self.dialect = dialect
+        self.catalog = Catalog(engine, dialect=dialect)
         shape_check = ShapeCheck(shape or ShapeConfig(), max_rows=engine.max_rows)
         self.pipeline = Pipeline([ParseCheck(), shape_check, *checks])
 
@@ -47,4 +49,4 @@ class Warden:
 
     def tables(self) -> tuple[Table, ...]:
         """What callers can see of the catalog."""
-        return self.engine.tables()
+        return self.catalog.tables()

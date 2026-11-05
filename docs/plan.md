@@ -44,6 +44,7 @@ src/sql_warden/
     base.py          # Check protocol, CheckContext, Pipeline (ordered, short-circuit, per-check trace, fail-closed)
     parse.py         # ParseCheck: parses once with sqlglot, readable errors
     shape.py         # ShapeCheck: structural rules + LIMIT rewrite
+  catalog.py         # Catalog: the role's tables and columns, cached, as a sqlglot schema
   engines/
     base.py          # Engine protocol (max_rows, execute(sql) -> Result, tables()), engine errors
     postgres.py      # read-only transaction, statement timeout, row cap via server-side cursor
@@ -60,7 +61,6 @@ Still to come:
 src/sql_warden/
   pipeline/  access.py  cost.py  budget.py  masking.py  lineage.py
   engines/   snowflake.py          # plus explain() on the Engine protocol
-  catalog.py                       # introspected schema -> sqlglot schema mapping
   profiles.py                      # active profile: its tables/columns, DSN, later masks and limits
   audit/     schema.sql, sink.py   # AuditSink protocol, PostgresAuditSink, MemoryAuditSink
   sessions.py                      # session + budget store
@@ -243,9 +243,16 @@ profiles:
     tables: "*"                             # every table and column the role can read
 ```
 
-**2.1 Catalog introspection**
+**2.1 Catalog introspection** ✅ done
 - `catalog.py` builds on `Engine.tables()` (from 1.4): caches the result and turns it into a
   sqlglot schema.
+- `Catalog` reads lazily and reuses a read for 60 s (`refresh()` forces a new one); concurrent
+  callers share one read, and a failed read is not cached. `Warden.tables()`, and so
+  `list_tables`, now come from it.
+- Names are kept exactly as Postgres stores them and the sqlglot `MappingSchema` is built with
+  `normalize=False`, so qualifying a query resolves names like Postgres: `PRODUCTS` finds
+  `products`, `"MixedCase"` finds only `MixedCase`, `"ID"` finds nothing. Types sqlglot can't
+  parse (e.g. `tsvector`) become `UNKNOWN`; the column is still listed.
 - Tests: unit tests with a fake catalog, an integration test against the seeded DB.
 
 **2.2 Profiles in the policy + `--profile`**
