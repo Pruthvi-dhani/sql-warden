@@ -25,6 +25,44 @@ _TABLES_SQL = """
     ORDER BY c.table_schema, c.table_name, c.ordinal_position
 """
 
+_CURSOR = "sql_warden"
+# psycopg runs a named cursor's query as this prefix plus the SQL, and Postgres reports error
+# positions in that statement.
+_DECLARE = f'DECLARE "{_CURSOR}" CURSOR FOR '
+_CONTEXT = 40
+"""Characters of SQL shown on each side of an error position."""
+
+
+def point_at(sql: str, offset: int) -> list[str]:
+    """The line of SQL around offset, and a caret under it."""
+    start = sql.rfind("\n", 0, offset) + 1
+    end = sql.find("\n", offset)
+    end = len(sql) if end == -1 else end
+    left, right = max(start, offset - _CONTEXT), min(end, offset + _CONTEXT)
+    before = "..." if left > start else ""
+    after = "..." if right < end else ""
+    return [
+        f"  {before}{sql[left:right]}{after}",
+        "  " + " " * (len(before) + offset - left) + "^",
+    ]
+
+
+def describe_error(exc: psycopg.Error, sql: str | None = None) -> str:
+    """The database's message, pointing into the SQL as sent rather than psycopg's DECLARE."""
+    diag = exc.diag
+    if diag.message_primary is None:
+        return str(exc).strip()
+    lines = [diag.message_primary]
+    if sql is not None and diag.statement_position is not None:
+        offset = int(diag.statement_position) - 1 - len(_DECLARE)
+        if 0 <= offset <= len(sql):
+            lines += point_at(sql, offset)
+    if diag.message_detail:
+        lines.append(f"DETAIL: {diag.message_detail}")
+    if diag.message_hint:
+        lines.append(f"HINT: {diag.message_hint}")
+    return "\n".join(lines)
+
 
 class PostgresEngine:
     """Runs queries in a read-only transaction with a statement timeout and a row cap.
@@ -55,7 +93,7 @@ class PostgresEngine:
         started = time.perf_counter()
         # A server-side cursor streams rows, so the row cap bounds memory too.
         # It also only accepts queries: Postgres rejects anything else in DECLARE.
-        with self._read_only() as conn, conn.cursor(name="sql_warden") as cur:
+        with self._read_only(sql) as conn, conn.cursor(name=_CURSOR) as cur:
             cur.execute(sql)
             fetched = cur.fetchmany(self.max_rows + 1)
             columns = tuple(col.name for col in cur.description or ())
@@ -76,10 +114,11 @@ class PostgresEngine:
         return tuple(Table(schema, name, tuple(cols)) for (schema, name), cols in columns.items())
 
     @contextmanager
-    def _read_only(self) -> Iterator[psycopg.Connection[tuple[Any, ...]]]:
+    def _read_only(self, sql: str | None = None) -> Iterator[psycopg.Connection[tuple[Any, ...]]]:
         """A connection in a read-only transaction with the statement timeout, rolled back after.
 
-        Database errors inside the block come out as engine errors.
+        Database errors inside the block come out as engine errors; positions in them point
+        into sql, the query run through the cursor, if given.
         """
         try:
             conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout_s)
@@ -99,6 +138,6 @@ class PostgresEngine:
                     f"query cancelled after the {self.statement_timeout_ms} ms statement timeout"
                 ) from exc
             except psycopg.Error as exc:
-                raise QueryFailed(str(exc).strip(), exc.sqlstate) from exc
+                raise QueryFailed(describe_error(exc, sql), exc.sqlstate) from exc
             finally:
                 conn.rollback()

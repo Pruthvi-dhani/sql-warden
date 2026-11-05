@@ -17,10 +17,13 @@ from sql_warden.config import (
 )
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.render import format_decision, format_rewrites, format_table
-from sql_warden.server import create_http_app, create_server
+from sql_warden.server import create_http_app, create_server, describe
 from sql_warden.warden import Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
+EXIT_ERROR = 1
+EXIT_REFUSED = 2
+"""A check refused the query. Nothing else exits 2, so scripts can tell a refusal apart."""
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,15 @@ def settings(
     return config.model_copy(update={"warehouse": warehouse})
 
 
+def json_option[F: Callable[..., Any]](command: F) -> F:
+    return click.option(
+        "--json",
+        "as_json",
+        is_flag=True,
+        help="Print the decision as one line of JSON: what the MCP tools return.",
+    )(command)
+
+
 def build_warden(config: WardenConfig) -> Warden:
     warehouse = config.warehouse
     engine = PostgresEngine(
@@ -80,7 +92,33 @@ def build_warden(config: WardenConfig) -> Warden:
     return Warden(engine, dialect=warehouse.dialect, shape=config.shape)
 
 
-@click.group()
+class UsageError(click.UsageError):
+    exit_code = EXIT_ERROR
+
+
+class Cli(click.Group):
+    """Usage errors exit 1 like any other error; Click would use 2, which means refused here."""
+
+    def make_context(
+        self,
+        info_name: str | None,
+        args: list[str],
+        parent: click.Context | None = None,
+        **extra: Any,
+    ) -> click.Context:
+        try:
+            return super().make_context(info_name, args, parent, **extra)
+        except click.UsageError as exc:
+            raise UsageError(exc.format_message(), exc.ctx) from exc
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as exc:
+            raise UsageError(exc.format_message(), exc.ctx) from exc
+
+
+@click.group(cls=Cli)
 @click.version_option(__version__, prog_name="sql-warden")
 @click.option(
     "--config",
@@ -102,36 +140,63 @@ def cli(ctx: click.Context, config_path: Path | None) -> None:
 @cli.command()
 @click.argument("sql")
 @engine_options
+@json_option
 @click.pass_obj
 def check(
-    state: CliState, sql: str, dsn: str | None, max_rows: int | None, timeout_ms: int | None
+    state: CliState,
+    sql: str,
+    dsn: str | None,
+    max_rows: int | None,
+    timeout_ms: int | None,
+    as_json: bool,
 ) -> None:
-    """Dry run: show what each check decides about SQL, without executing it."""
+    """Dry run: show what each check decides about SQL, without executing it.
+
+    Exits 0 if the query would be allowed, 2 if a check refuses it, 1 on any other error.
+    """
     warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
     decision = warden.check(sql)
-    click.echo(format_decision(decision, dry_run=True))
+    if as_json:
+        click.echo(describe(decision).model_dump_json(exclude_none=True))
+    else:
+        click.echo(format_decision(decision, dry_run=True))
     if not decision.allowed:
-        raise SystemExit(1)
+        raise SystemExit(EXIT_REFUSED)
 
 
 @cli.command()
 @click.argument("sql")
 @engine_options
+@json_option
 @click.pass_obj
 def query(
-    state: CliState, sql: str, dsn: str | None, max_rows: int | None, timeout_ms: int | None
+    state: CliState,
+    sql: str,
+    dsn: str | None,
+    max_rows: int | None,
+    timeout_ms: int | None,
+    as_json: bool,
 ) -> None:
-    """Run SQL through the checks and, if allowed, against the warehouse."""
+    """Run SQL through the checks and, if allowed, against the warehouse.
+
+    Exits 0 if it ran, 2 if a check refused it, 1 if the database failed or on any other error.
+    """
     warden = build_warden(settings(state, dsn, max_rows, timeout_ms))
     outcome = warden.run(sql)
+    if as_json:
+        click.echo(describe(outcome.decision, outcome).model_dump_json(exclude_none=True))
     if outcome.error is not None:
+        if as_json:
+            raise SystemExit(EXIT_ERROR)
         raise click.ClickException(str(outcome.error)) from outcome.error
     if outcome.result is None:
-        click.echo(format_decision(outcome.decision, dry_run=False))
-        raise SystemExit(1)
-    click.echo(format_table(outcome.result))
-    for note in format_rewrites(outcome.decision):
-        click.echo(note)
+        if not as_json:
+            click.echo(format_decision(outcome.decision, dry_run=False))
+        raise SystemExit(EXIT_REFUSED)
+    if not as_json:
+        click.echo(format_table(outcome.result))
+        for note in format_rewrites(outcome.decision):
+            click.echo(note)
 
 
 @cli.command()

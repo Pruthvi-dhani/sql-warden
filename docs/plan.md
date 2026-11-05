@@ -197,7 +197,7 @@ portal, or Claude.
   stays deliberately thin and is checked by hand (it was also checked with headless Chrome
   screenshots against the demo stack); browser automation can come later if it grows.
 
-**1.6 Claude Code hookup** ✅ done
+**1.6 Claude Code hookup** ✅ done (`f3bce20`)
 - Adds a `.mcp.json.example` and a README walkthrough (`claude mcp add …`), plus an integration
   test that starts the stdio server as a subprocess against the Testcontainer.
 - The example runs `uv run --directory ${CLAUDE_PROJECT_DIR:-.} sql-warden serve`, so the
@@ -209,12 +209,16 @@ portal, or Claude.
 - **Play:** connect Claude Code to sql-warden and ask it questions about the demo data. Each
   check added after this point shows up in Claude and in the portal immediately.
 
-**1.7 CLI polish + end-to-end tests**
-- Strips the internal `DECLARE … CURSOR FOR` wrapper from database error messages.
-- Adds `--json` output (the same structured Decision that MCP returns) and meaningful exit
-  codes (0 allowed, 2 refused, 1 error).
-- Tests: CLI snapshot and exit-code tests. An integration test against the Testcontainer runs
-  one allowed and one refused query through the real engine.
+**1.7 CLI polish + end-to-end tests** ✅ done
+- Strips the internal `DECLARE … CURSOR FOR` wrapper from database error messages. The engine
+  rebuilds the message from Postgres's diagnostics (message, DETAIL, HINT), with a caret under
+  the error position shifted into the SQL as sent, so the CLI, MCP and the portal all show it.
+- Adds `--json` output (the same structured Decision that MCP returns, as one line) and
+  meaningful exit codes (0 allowed, 2 refused, 1 error). Click's usage errors would exit 2, so
+  the CLI group moves them to 1: exit 2 always means a check refused the query.
+- Tests: CLI snapshot and exit-code tests, and the CLI's `--json` compared with `run_query`'s
+  structured result. An integration test against the Testcontainer runs one allowed and one
+  refused query through the real engine, plus a database error with and without `--json`.
 - Note: until Phase 2 there are no table or column rules. A well-formed SELECT can read
   anything `warden_reader` can see.
 

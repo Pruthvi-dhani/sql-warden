@@ -23,8 +23,8 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
   <img alt="The test portal refusing a query whose CTE deletes rows: parse passes, shape fails with NOT_READ_ONLY" src="docs/images/portal-refused-light.png">
 </picture>
 
-> **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup and a browser test portal work today; CLI polish is next,
-> then table and column access rules. See the [plan](docs/plan.md) for the roadmap.
+> **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup and a browser test portal work today, which completes Phase 1.
+> Table and column access rules are next. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -76,7 +76,33 @@ timeout and a row cap.
 
 What runs is the query as sql-warden parsed and checked it, regenerated from that tree, not
 the text that was sent. Comments are dropped, so nothing the parser skipped over can reach the
-database.
+database. A database error points into that SQL:
+
+```text
+$ uv run sql-warden query "select nope from products"
+Error: column "nope" does not exist
+  SELECT nope FROM products LIMIT 101
+         ^
+HINT: Perhaps you meant to reference the column "products.name".
+```
+
+#### In scripts
+
+`check` and `query` exit with a status a script can act on:
+
+| Exit | Meaning                                                                      |
+|------|------------------------------------------------------------------------------|
+| `0`  | allowed: `check` would run it, `query` ran it                                |
+| `2`  | refused by a check (nothing else exits 2)                                    |
+| `1`  | anything else: the database failed, it was unreachable, a bad config or flag |
+
+`--json` prints one line of JSON instead of text, the same payload the MCP tools return (see
+[MCP server](#mcp-server)), including the `error` when the database fails:
+
+```bash
+uv run sql-warden query "select count(*) as n from orders" --json | jq '.result.rows'
+if ! uv run sql-warden check "$SQL" --json > decision.json; then jq -r .reason decision.json; fi
+```
 
 #### The checks so far
 

@@ -69,6 +69,40 @@ def test_syntax_errors_are_reported(warehouse: Warehouse) -> None:
     assert "syntax error" in str(caught.value)
 
 
+class TestErrorMessages:
+    """Errors point into the SQL as sent; psycopg's DECLARE ... CURSOR FOR never shows."""
+
+    def _message(self, warehouse: Warehouse, sql: str) -> str:
+        with pytest.raises(QueryFailed) as caught:
+            PostgresEngine(warehouse.reader_dsn).execute(sql)
+        message = str(caught.value)
+        assert "DECLARE" not in message
+        assert "sql_warden" not in message
+        return message
+
+    def test_an_unknown_column_points_at_it_with_the_hint(self, warehouse: Warehouse) -> None:
+        assert self._message(warehouse, "SELECT nope FROM products").splitlines() == [
+            'column "nope" does not exist',
+            "  SELECT nope FROM products",
+            "         ^",
+            'HINT: Perhaps you meant to reference the column "products.name".',
+        ]
+
+    def test_the_caret_finds_the_right_line(self, warehouse: Warehouse) -> None:
+        message = self._message(warehouse, "SELECT id\nFROM products\nWHERE nope = 1")
+        assert message.splitlines()[1:3] == ["  WHERE nope = 1", "        ^"]
+
+    def test_the_end_of_input_is_pointed_at(self, warehouse: Warehouse) -> None:
+        assert self._message(warehouse, "SELECT 1 +").splitlines()[:3] == [
+            "syntax error at end of input",
+            "  SELECT 1 +",
+            "            ^",
+        ]
+
+    def test_errors_while_fetching_have_no_position(self, warehouse: Warehouse) -> None:
+        assert self._message(warehouse, "SELECT 1 / 0") == "division by zero"
+
+
 def test_engine_is_reusable_after_a_failure(warehouse: Warehouse) -> None:
     engine = PostgresEngine(warehouse.reader_dsn)
     with pytest.raises(QueryFailed):

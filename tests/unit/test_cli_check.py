@@ -29,13 +29,13 @@ def test_the_row_cap_option_changes_the_limit(engines: list[FakeEngine]) -> None
 def test_shape_policy_comes_from_the_config(engines: list[FakeEngine], isolated_cli: Path) -> None:
     (isolated_cli / "warden.yaml").write_text("version: 1\nshape:\n  limit: require\n")
     outcome = CliRunner().invoke(cli, ["check", "select id from products"])
-    assert outcome.exit_code == 1
+    assert outcome.exit_code == 2
     assert "✗ shape  LIMIT_REQUIRED: " in outcome.output
 
 
 def test_refused_query_names_the_check_code_and_reason(engines: list[FakeEngine]) -> None:
     outcome = CliRunner().invoke(cli, ["check", "select * from orders where"])
-    assert outcome.exit_code == 1
+    assert outcome.exit_code == 2
     assert outcome.output.splitlines()[0].startswith("✗ parse  PARSE_ERROR: ")
     assert outcome.output.splitlines()[-1] == "→ refused by parse"
     assert engines[0].executed == []
@@ -43,7 +43,7 @@ def test_refused_query_names_the_check_code_and_reason(engines: list[FakeEngine]
 
 def test_empty_query_is_refused(engines: list[FakeEngine]) -> None:
     outcome = CliRunner().invoke(cli, ["check", "  ;  "])
-    assert outcome.exit_code == 1
+    assert outcome.exit_code == 2
     assert "PARSE_ERROR: the query is empty" in outcome.output
 
 

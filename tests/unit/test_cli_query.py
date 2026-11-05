@@ -28,7 +28,7 @@ def test_query_without_rewrites_has_no_notes(engines: list[FakeEngine]) -> None:
 
 def test_shape_refusals_never_execute(engines: list[FakeEngine]) -> None:
     outcome = CliRunner().invoke(cli, ["query", "delete from orders"])
-    assert outcome.exit_code == 1
+    assert outcome.exit_code == 2
     assert outcome.output.splitlines()[1:] == [
         "✗ shape  NOT_A_SELECT: only SELECT queries are allowed, not DELETE",
         "→ refused by shape",
@@ -68,13 +68,13 @@ def test_query_options_and_env_dsn(engines: list[FakeEngine]) -> None:
 
 def test_query_rejects_zero_max_rows(engines: list[FakeEngine]) -> None:
     outcome = CliRunner().invoke(cli, ["query", "select 1", "--max-rows", "0"])
-    assert outcome.exit_code == 2
+    assert outcome.exit_code == 1
     assert engines == []
 
 
 def test_refused_query_shows_the_reason_and_never_executes(engines: list[FakeEngine]) -> None:
     outcome = CliRunner().invoke(cli, ["query", "SELEC 1"])
-    assert outcome.exit_code == 1
+    assert outcome.exit_code == 2
     assert outcome.output.splitlines() == [
         "✗ parse  PARSE_ERROR: Invalid expression / Unexpected token (line 1, col 7)",
         "→ refused by parse",

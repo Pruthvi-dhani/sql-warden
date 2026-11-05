@@ -53,4 +53,8 @@ async def test_database_errors_reach_the_agent(warehouse: Warehouse) -> None:
         result = await client.call_tool("run_query", {"sql": "select nope from products"})
     assert result.is_error is True
     assert result.structured_content is not None
-    assert 'column "nope" does not exist' in result.structured_content["error"]
+    assert result.structured_content["error"].splitlines()[:3] == [
+        'column "nope" does not exist',
+        "  SELECT nope FROM products LIMIT 1001",  # the engine's default row cap
+        "         ^",
+    ]
