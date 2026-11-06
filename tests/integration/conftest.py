@@ -39,3 +39,17 @@ def warehouse() -> Iterator[Warehouse]:
             reader_dsn=f"postgresql://warden_reader:warden_reader@{host}:{port}/warehouse",
             public_dsn=f"postgresql://warden_public:warden_public@{host}:{port}/warehouse",
         )
+
+
+@pytest.fixture(scope="session")
+def audit_dsn() -> Iterator[str]:
+    """A throwaway Postgres for the audit log, separate from the warehouse as in production."""
+    container = PostgresContainer(
+        POSTGRES_IMAGE,
+        username="warden_audit",
+        password="warden_audit",
+        dbname="audit",
+        driver=None,
+    )
+    with container:
+        yield container.get_connection_url()

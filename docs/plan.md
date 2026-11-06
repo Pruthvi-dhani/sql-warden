@@ -51,6 +51,7 @@ src/sql_warden/
     base.py          # Engine protocol (max_rows, execute(sql) -> Result, tables()), engine errors
     postgres.py      # read-only transaction, statement timeout, row cap via server-side cursor
   warden.py          # Warden facade: parse -> checks -> regenerate SQL -> execute
+  audit/             # schema.sql, sink.py: AuditEvent, AuditSink, Memory/PostgresAuditSink
   server.py          # MCP tools (run_query, check_query, list_tables); stdio + loopback HTTP
   render.py          # CLI text output
   cli.py             # click: query / check / serve / config validate
@@ -63,7 +64,6 @@ Still to come:
 src/sql_warden/
   pipeline/  cost.py  budget.py  masking.py  lineage.py
   engines/   snowflake.py          # plus explain() on the Engine protocol
-  audit/     schema.sql, sink.py   # AuditSink protocol, PostgresAuditSink, MemoryAuditSink
   sessions.py                      # session + budget store
 tests/portal/  tests/snowflake/ (marker: snowflake)
 ```
@@ -334,7 +334,7 @@ profiles:
   payloads.
 - Tests: unit tests (unapproved objects never appear, per profile) and a CLI snapshot.
 
-**2.5 Portal: profile picker** ✅ done
+**2.5 Portal: profile picker** ✅ done (`0300cde`)
 - The portal serves one MCP endpoint per profile (`/p/<profile>/mcp`, each its own `Warden`),
   and a picker in the header switches between them, starting a new session. The Tables panel
   follows the picked profile.
@@ -349,15 +349,26 @@ profiles:
   decisions; an integration test runs the comparison against the Testcontainer.
 
 ## Phase 3 — Audit database
-**3.1 Audit sink**
+**3.1 Audit sink** ✅ done
 - `audit/schema.sql` creates `audit_events` with these columns: id, ts, session_id, client,
   profile, sql (as sent), executed_sql (as regenerated and run), rewrites, decision, check, code,
   reason, cost_estimate, rows_returned, masked_columns, duration_ms, and the full trace as
-  jsonb. The schema is applied idempotently at startup. Adds the `audit` config section.
+  jsonb. The schema is applied idempotently at startup.
 - There is an `AuditSink` protocol with Postgres and in-memory implementations.
+- As built: `check` is a reserved word in Postgres, so the column is `refused_by`. Also added:
+  `dry_run` (check_query), `error` (why an allowed query failed), `truncated`. `decision` is
+  `allowed | refused | failed`, enforced by a CHECK constraint. Event ids are UUIDs made by
+  sql-warden, so the caller knows the id before the row exists (Snowflake's QUERY_TAG, 7.2).
+  `ensure_schema()` takes an advisory lock, so servers starting at once don't collide (a test
+  fails without it). The sink keeps one connection, shared by threads, and replaces it once
+  if it broke. Later columns go in as `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
+- The `audit` config section moved to 3.2: a section in the file must be backed by something
+  that uses it, and nothing records events until 3.2.
 - Tests: integration with a second Testcontainer.
 
 **3.2 Record every request, fail-closed**
+- Adds the `audit` config section (`dsn`, from the demo stack's `audit` service by default) and
+  `ensure_schema()` at startup.
 - Every outcome writes exactly one event: allowed, refused, execution error, timeout. If the
   audit write fails, the query is refused with `AUDIT_UNAVAILABLE`, and the database is never
   queried without an audit record.
