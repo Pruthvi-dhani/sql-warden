@@ -23,8 +23,8 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
   <img alt="The test portal refusing a query whose CTE deletes rows: parse passes, shape fails with NOT_READ_ONLY" src="docs/images/portal-refused-light.png">
 </picture>
 
-> **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup and a browser test portal work today, which completes Phase 1.
-> Table and column access rules are next. See the [plan](docs/plan.md) for the roadmap.
+> **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
+> work today. Next: `list_tables` showing only what a profile may read. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -123,6 +123,22 @@ if ! uv run sql-warden check "$SQL" --json > decision.json; then jq -r .reason d
   Functions sqlglot doesn't recognise as standard SQL are refused unless they are listed in
   `shape.allowed_functions`. Built-in dangerous ones (`pg_sleep*`, `pg_read_file`, `lo_*`,
   `dblink*`, `set_config`, `query_to_xml`, ...) are refused even if listed.
+- **access**: only the tables and columns the server's [profile](#profiles) allows, wherever
+  the query uses them (selected, filtered, joined, grouped or sorted on, in subqueries and
+  CTEs). With the example config's `public` profile:
+
+  | Try                                                           | Refused with           |
+  |---------------------------------------------------------------|------------------------|
+  | `select count(*) from employee_salaries`, `... from nosuch`   | `TABLE_NOT_ALLOWED`    |
+  | `select email from customers`, `select category from products`| `TABLE_NOT_ALLOWED`, `COLUMN_NOT_ALLOWED` |
+  | `select id from products order by category`                   | `COLUMN_NOT_ALLOWED`   |
+  | `select * from products`, `select row_to_json(p) from products p` | `STAR_NOT_ALLOWED` (lists the allowed columns) |
+  | `select 1 from information_schema.tables`                     | `TABLE_NOT_ALLOWED`    |
+
+  A table that doesn't exist gets the same answer as one the profile may not read, and so does
+  a column, so a profile can't probe for names. Allowed queries run with each table pinned to
+  its schema (`products` → `public.products`), so the database reads the table that was
+  checked. Without profiles there is no access check (the implicit profile `all`).
 
   With `shape.limit: inject` (the default), a query without a LIMIT gets one, and a LIMIT above
   the row cap is lowered. The new LIMIT is the row cap plus one, so the result can still say
@@ -263,25 +279,36 @@ sends can change it (the tools take only SQL):
 ```yaml
 default_profile: public
 profiles:
-  public:      # connects as a role that can read products (id, name, price_cents) only
+  public:      # an agent released to customers
     dsn: postgresql://warden_public:${WARDEN_PUBLIC_PASSWORD:-warden_public}@localhost:5433/warehouse
-  admin: {}    # connects with warehouse.dsn: everything warden_reader can read
+    tables:
+      public.products: [id, name, price_cents]
+  admin:       # internal admins: connects with warehouse.dsn
+    tables: "*"
 ```
 
 ```bash
 cp warden.example.yaml warden.yaml                                                   # ships these two profiles
-uv run sql-warden query "select count(*) from employee_salaries"                    # public: permission denied
+uv run sql-warden query "select count(*) from employee_salaries"                    # public: TABLE_NOT_ALLOWED
 uv run sql-warden query "select count(*) from employee_salaries" --profile admin    # admin: 50
 uv run sql-warden serve --profile public                                             # an MCP server for customers
 ```
+
+`tables` is what a profile may query: `"*"` for every table its role can read, or
+`schema.table` → `"*"` (every column, including ones added later) or a list of columns. A
+profile that lists no tables can read nothing. `SELECT *` (and a whole-row reference like
+`row_to_json(p)`) needs `"*"` for the table, since it would read columns the list leaves out.
 
 The profile comes from `--profile`, else `SQL_WARDEN_PROFILE`, else `default_profile`. An
 unknown name is an error, never a fallback. A profile's own `dsn` wins over `--dsn` and
 `SQL_WARDEN_DSN`, so a flag can't widen what it reads. Every decision names its profile: the
 CLI prints it, and `--json` and the MCP results carry `profile`.
 
-Today a profile is limited by what its database role can read; per-profile table and column
-rules come with the access check (next in the [plan](docs/plan.md)). Without a `profiles`
-section there is one implicit profile, `all`, and `config validate` says so. The demo
-database's `warden_public` role was added with profiles: if your demo stack is older, reseed it
-with `docker compose -f dev/docker-compose.yml down -v && docker compose -f dev/docker-compose.yml up -d`.
+Give a profile its own `dsn` as a role with matching grants, and Postgres enforces the same
+rules underneath (the demo's `warden_public` can read only those three product columns). The
+access check reads the catalog to resolve names, so with profiles even `check` connects to the
+database (to read the catalog, never to run the query); if it can't, the query is refused with
+`CATALOG_UNAVAILABLE`. Without a `profiles` section there is one implicit profile, `all`, with
+no table rules, and `config validate` says so. The demo database's `warden_public` role was
+added with profiles: if your demo stack is older, reseed it with
+`docker compose -f dev/docker-compose.yml down -v && docker compose -f dev/docker-compose.yml up -d`.

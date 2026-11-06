@@ -7,7 +7,7 @@ from mcp import Client
 
 from sql_warden.cli import EXIT_ERROR, cli
 from sql_warden.config import DEFAULT_DSN, ConfigError, parse_config
-from sql_warden.profiles import Profile, ProfileError, select_profile
+from sql_warden.profiles import Access, Profile, ProfileError, select_profile
 from sql_warden.server import create_server
 from sql_warden.warden import Warden
 from tests.unit.conftest import FakeEngine
@@ -19,8 +19,12 @@ default_profile: public
 profiles:
   public:
     dsn: {PUBLIC_DSN}
-  admin: {{}}
+    tables:
+      public.products: [id, name, price_cents]
+  admin:
+    tables: "*"
 """
+PUBLIC_ACCESS = Access({("public", "products"): frozenset({"id", "name", "price_cents"})})
 
 
 def _config_error(text: str) -> str:
@@ -50,10 +54,33 @@ class TestConfig:
     def test_no_section_means_no_profiles(self) -> None:
         assert parse_config("version: 1").profiles is None
 
-    def test_tables_arrive_with_the_access_check(self) -> None:
-        # Until the access check enforces them, a tables rule must not look enforced.
-        message = _config_error('version: 1\nprofiles:\n  public:\n    tables: "*"\n')
-        assert "profiles.public.tables: Extra inputs are not permitted" in message
+    def test_table_rules(self) -> None:
+        config = parse_config(POLICY)
+        assert config.profiles is not None
+        assert config.profiles["public"].tables == {
+            "public.products": ("id", "name", "price_cents")
+        }
+        assert config.profiles["admin"].tables == "*"
+
+    def test_a_profile_without_tables_reads_nothing(self) -> None:
+        config = parse_config("version: 1\nprofiles:\n  public: {}\n")
+        assert config.profiles is not None
+        assert Access.from_config(config.profiles["public"]) == Access({})
+
+    @pytest.mark.parametrize(
+        ("tables", "message"),
+        [
+            ("all", 'tables must be "*" or a mapping of schema.table to "*" or a list'),
+            ("[public.products]", 'tables must be "*" or a mapping'),
+            ('{products: "*"}', "'products' must be schema.table, e.g. public.products"),
+            ('{a.b.c: "*"}', "'a.b.c' must be schema.table"),
+            ("{public.products: id}", 'public.products must be "*" or a list of column names'),
+            ("{public.products: []}", "public.products lists no columns; give some"),
+            ("{public.products: [id, name, id]}", "public.products lists id more than once"),
+        ],
+    )
+    def test_bad_table_rules(self, tables: str, message: str) -> None:
+        assert message in _config_error(f"version: 1\nprofiles:\n  p:\n    tables: {tables}\n")
 
     @pytest.mark.parametrize(
         ("text", "message"),
@@ -93,11 +120,13 @@ class TestSelect:
             select_profile(parse_config("version: 1"), "public")
 
     def test_the_default(self) -> None:
-        assert select_profile(parse_config(POLICY)) == Profile("public", PUBLIC_DSN, own_dsn=True)
+        assert select_profile(parse_config(POLICY)) == Profile(
+            "public", PUBLIC_DSN, own_dsn=True, access=PUBLIC_ACCESS
+        )
 
     def test_a_profile_without_a_dsn_uses_the_warehouse_dsn(self) -> None:
         assert select_profile(parse_config(POLICY), "admin") == Profile(
-            "admin", DEFAULT_DSN, own_dsn=False
+            "admin", DEFAULT_DSN, own_dsn=False, access=Access("*")
         )
 
     def test_an_unknown_name_is_never_a_fallback(self) -> None:
@@ -170,7 +199,9 @@ class TestCli:
         assert outcome.exit_code == 0, outcome.output
         assert outcome.output.splitlines()[5:] == [
             "  profiles:  public (default): connects to db/warehouse as warden_public",
+            "               reads public.products (id, name, price_cents)",
             "             admin: connects with warehouse.dsn",
+            "               reads every table its role can",
         ]
         assert "pw" not in outcome.output
 

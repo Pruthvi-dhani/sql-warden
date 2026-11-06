@@ -16,6 +16,7 @@ from psycopg.conninfo import conninfo_to_dict
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     NonNegativeInt,
     PositiveInt,
     ValidationError,
@@ -129,12 +130,87 @@ class ShapeConfig(_Section):
         return next((pattern for pattern in patterns if fnmatchcase(name, pattern)), None)
 
 
+EVERYTHING: Literal["*"] = "*"
+ColumnRule = Literal["*"] | tuple[str, ...]
+"""Every column of a table, including ones added later, or just these."""
+
+
 class ProfileConfig(_Section):
     """Who a server serves, e.g. an agent released to customers, or internal admins."""
 
     dsn: str | None = None
     """A connection, usually as a role that can read only what this profile may see. Without
     one, the profile connects with warehouse.dsn."""
+    tables: Literal["*"] | dict[str, ColumnRule] = Field(default_factory=dict)
+    """What the profile may read: "*" for every table, or schema.table → "*" or columns.
+    A profile that lists no tables can read nothing."""
+
+    @field_validator("tables", mode="before")
+    @classmethod
+    def _table_rules(cls, tables: object) -> object:
+        # Checked before pydantic's own validation, whose messages for a union are unreadable.
+        if tables == EVERYTHING:
+            return tables
+        if not isinstance(tables, dict):
+            raise PydanticCustomError(
+                "tables",
+                'tables must be "*" or a mapping of schema.table to "*" or a list of columns',
+            )
+        for name, columns in tables.items():
+            schema, _, table = str(name).partition(".")
+            if not schema or not table or "." in table:
+                raise PydanticCustomError(
+                    "table_name",
+                    "'{name}' must be schema.table, e.g. public.products",
+                    {"name": name},
+                )
+            if columns == EVERYTHING:
+                continue
+            if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+                raise PydanticCustomError(
+                    "column_rule",
+                    '{name} must be "*" or a list of column names',
+                    {"name": name},
+                )
+            if not columns:
+                raise PydanticCustomError(
+                    "no_columns",
+                    '{name} lists no columns; give some, use "*", or leave the table out',
+                    {"name": name},
+                )
+            repeated = sorted({column for column in columns if columns.count(column) > 1})
+            if repeated:
+                raise PydanticCustomError(
+                    "repeated_columns",
+                    "{name} lists {columns} more than once",
+                    {"name": name, "columns": ", ".join(repeated)},
+                )
+        return tables
+        assert isinstance(tables, dict)
+        for name, columns in tables.items():
+            schema, _, table = name.partition(".")
+            if not schema or not table or "." in table:
+                raise PydanticCustomError(
+                    "table_name",
+                    "'{name}' must be schema.table, e.g. public.products",
+                    {"name": name},
+                )
+            if columns == EVERYTHING:
+                continue
+            if not columns:
+                raise PydanticCustomError(
+                    "no_columns",
+                    '{name} lists no columns; give some, use "*", or leave the table out',
+                    {"name": name},
+                )
+            repeated = sorted({column for column in columns if columns.count(column) > 1})
+            if repeated:
+                raise PydanticCustomError(
+                    "repeated_columns",
+                    "{name} lists {columns} more than once",
+                    {"name": name, "columns": ", ".join(repeated)},
+                )
+        return tables
 
 
 class WardenConfig(_Section):

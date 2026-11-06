@@ -35,10 +35,15 @@ shape:
 # SQL_WARDEN_DSN is set; profiles without one connect with warehouse.dsn. Leave the section
 # out and there is one implicit profile, `all`, that can read everything warehouse.dsn can.
 #
-# Which tables and columns each profile may query arrives with the access check (Phase 2.3).
-# Until then a profile is limited by what its database role can read.
+# tables is what a profile may query: "*" for every table its role can read, or
+# schema.table → "*" (every column, including ones added later) or a list of columns.
+# A profile that lists no tables can read nothing. SELECT * needs "*" for the table.
 default_profile: public
 profiles:
-  public:          # an agent released to customers: products (id, name, price_cents) only
+  public:          # an agent released to customers
+    # A role that can read only these columns, so Postgres enforces them too.
     dsn: postgresql://warden_public:${WARDEN_PUBLIC_PASSWORD:-warden_public}@localhost:5433/warehouse
-  admin: {}        # internal admins: everything warden_reader can read
+    tables:
+      public.products: [id, name, price_cents]
+  admin:           # internal admins
+    tables: "*"

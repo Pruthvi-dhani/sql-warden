@@ -121,9 +121,12 @@ def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) 
     assert (example.warehouse, example.shape) == (defaults.warehouse, defaults.shape)
     assert example.default_profile == "public"
     assert example.profiles is not None
-    assert {name: profile.dsn for name, profile in example.profiles.items()} == {
-        "public": "postgresql://warden_public:warden_public@localhost:5433/warehouse",
-        "admin": None,
+    assert {name: (p.dsn, p.tables) for name, p in example.profiles.items()} == {
+        "public": (
+            "postgresql://warden_public:warden_public@localhost:5433/warehouse",
+            {"public.products": ("id", "name", "price_cents")},
+        ),
+        "admin": (None, "*"),
     }
 
 

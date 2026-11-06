@@ -18,6 +18,13 @@ class RefusalCode(StrEnum):
     LIMIT_REQUIRED = "LIMIT_REQUIRED"
     LIMIT_TOO_HIGH = "LIMIT_TOO_HIGH"
     INVALID_LIMIT = "INVALID_LIMIT"
+    TABLE_NOT_ALLOWED = "TABLE_NOT_ALLOWED"
+    """A table the profile may not read, or one that doesn't exist: the two look the same."""
+    COLUMN_NOT_ALLOWED = "COLUMN_NOT_ALLOWED"
+    STAR_NOT_ALLOWED = "STAR_NOT_ALLOWED"
+    """* (or a whole-row reference) on a table the profile may read only some columns of."""
+    CATALOG_UNAVAILABLE = "CATALOG_UNAVAILABLE"
+    """The tables and columns could not be read, so access could not be checked."""
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """A check crashed. The query is refused rather than let through unchecked."""
 

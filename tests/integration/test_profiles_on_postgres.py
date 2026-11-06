@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from mcp import Client
 
 from sql_warden.catalog import Catalog
-from sql_warden.cli import EXIT_ERROR, build_warden, cli
+from sql_warden.cli import EXIT_ERROR, EXIT_REFUSED, build_warden, cli
 from sql_warden.config import load_config
 from sql_warden.engines import QueryFailed
 from sql_warden.engines.postgres import PostgresEngine
@@ -23,7 +23,11 @@ def policy(warehouse: Warehouse, tmp_path: Path) -> Path:
     path.write_text(
         f"version: 1\nwarehouse:\n  dsn: {warehouse.reader_dsn}\n"
         f"default_profile: public\nprofiles:\n"
-        f"  public:\n    dsn: {warehouse.public_dsn}\n  admin: {{}}\n"
+        f"  public:\n    dsn: {warehouse.public_dsn}\n"
+        f"    tables:\n      public.products: [id, name, price_cents]\n"
+        f'  admin:\n    tables: "*"\n'
+        # Misconfigured on purpose: its rules allow everything, its role doesn't.
+        f'  loose:\n    dsn: {warehouse.public_dsn}\n    tables: "*"\n'
     )
     return path
 
@@ -64,8 +68,22 @@ class TestCli:
 
     def test_the_default_profile_cannot_read_salaries(self, policy: Path) -> None:
         code, output = self._query(policy, "select count(*) from employee_salaries")
+        assert code == EXIT_REFUSED
+        assert "TABLE_NOT_ALLOWED: table public.employee_salaries is not available" in output
+
+    def test_every_table_means_every_table_its_role_can_read(self, policy: Path) -> None:
+        # The catalog is read as the profile's role, so salaries don't exist for loose.
+        code, output = self._query(
+            policy, "select count(*) from employee_salaries", "--profile", "loose"
+        )
+        assert code == EXIT_REFUSED
+        assert "table public.employee_salaries is not available to profile loose" in output
+
+    def test_the_role_still_refuses_when_the_rules_are_too_wide(self, policy: Path) -> None:
+        # Defence in depth: loose's rules allow * on products, its role has three columns.
+        code, output = self._query(policy, "select * from products", "--profile", "loose")
         assert code == EXIT_ERROR
-        assert "Error: permission denied for table employee_salaries" in output
+        assert "Error: permission denied for table products" in output
 
     def test_admin_can(self, policy: Path) -> None:
         code, output = self._query(
@@ -79,10 +97,10 @@ class TestCli:
         self, policy: Path, warehouse: Warehouse
     ) -> None:
         code, output = self._query(
-            policy, "select count(*) from employee_salaries", "--dsn", warehouse.admin_dsn
+            policy, "select * from products", "--profile", "loose", "--dsn", warehouse.admin_dsn
         )
         assert code == EXIT_ERROR
-        assert "permission denied" in output
+        assert "permission denied for table products" in output
 
 
 @pytest.mark.anyio

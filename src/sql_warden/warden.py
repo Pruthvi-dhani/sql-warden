@@ -5,7 +5,8 @@ from sql_warden.catalog import Catalog
 from sql_warden.config import IMPLICIT_PROFILE, ShapeConfig
 from sql_warden.engines import Engine, EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
-from sql_warden.pipeline import Check, CheckContext, ParseCheck, Pipeline, ShapeCheck
+from sql_warden.pipeline import AccessCheck, Check, CheckContext, ParseCheck, Pipeline, ShapeCheck
+from sql_warden.profiles import Access
 
 
 class Warden:
@@ -19,6 +20,7 @@ class Warden:
         shape: ShapeConfig | None = None,
         checks: Sequence[Check] = (),
         profile: str = IMPLICIT_PROFILE,
+        access: Access | None = None,
     ) -> None:
         self.engine = engine
         self.dialect = dialect
@@ -26,7 +28,13 @@ class Warden:
         """The profile this Warden serves. Fixed for its lifetime."""
         self.catalog = Catalog(engine, dialect=dialect)
         shape_check = ShapeCheck(shape or ShapeConfig(), max_rows=engine.max_rows)
-        self.pipeline = Pipeline([ParseCheck(), shape_check, *checks])
+        # The implicit profile has no table rules, so there is nothing for an access check.
+        access_checks = (
+            [AccessCheck(self.catalog, access, profile=profile, dialect=dialect)]
+            if access is not None
+            else []
+        )
+        self.pipeline = Pipeline([ParseCheck(), shape_check, *access_checks, *checks])
 
     def check(self, sql: str) -> Decision:
         """Run the checks only. Nothing reaches the database."""

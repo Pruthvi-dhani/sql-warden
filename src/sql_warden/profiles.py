@@ -4,13 +4,44 @@ A server is tied to one profile when it starts, by whoever deploys it. Nothing a
 can change it: the tools take SQL, never a profile.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
-from sql_warden.config import IMPLICIT_PROFILE, WardenConfig
+from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, ProfileConfig, WardenConfig
+
+Columns = Literal["*"] | frozenset[str]
+"""Every column of a table, including ones added later, or just these."""
 
 
 class ProfileError(Exception):
     """No usable profile: an unknown name, or none picked when several are defined."""
+
+
+@dataclass(frozen=True)
+class Access:
+    """What a profile may read. Names are exact, as the database stores them."""
+
+    tables: Literal["*"] | Mapping[tuple[str, str], Columns]
+    """Every table, or (schema, table) → its columns."""
+
+    @classmethod
+    def from_config(cls, profile: ProfileConfig) -> "Access":
+        if profile.tables == EVERYTHING:
+            return cls(EVERYTHING)
+        assert isinstance(profile.tables, dict)
+        rules: dict[tuple[str, str], Columns] = {}
+        for name, columns in profile.tables.items():
+            schema, _, table = name.partition(".")
+            rules[(schema, table)] = EVERYTHING if columns == EVERYTHING else frozenset(columns)
+        return cls(rules)
+
+    def columns(self, schema: str, table: str) -> Columns | None:
+        """The columns of schema.table this profile may read, or None if not the table."""
+        if self.tables == EVERYTHING:
+            return EVERYTHING
+        assert not isinstance(self.tables, str)
+        return self.tables.get((schema, table))
 
 
 @dataclass(frozen=True)
@@ -22,6 +53,8 @@ class Profile:
     """True if the profile has its own dsn, so the database itself limits what it can read."""
     implicit: bool = False
     """True when warden.yaml defines no profiles and this is the implicit `all`."""
+    access: Access | None = None
+    """What the profile may read; None for the implicit `all`, which has no table rules."""
 
 
 def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
@@ -46,4 +79,9 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
     profile = config.profiles.get(name)
     if profile is None:
         raise ProfileError(f"unknown profile '{name}': the config defines {known}")
-    return Profile(name, profile.dsn or warehouse_dsn, own_dsn=profile.dsn is not None)
+    return Profile(
+        name,
+        profile.dsn or warehouse_dsn,
+        own_dsn=profile.dsn is not None,
+        access=Access.from_config(profile),
+    )

@@ -44,6 +44,7 @@ src/sql_warden/
     base.py          # Check protocol, CheckContext, Pipeline (ordered, short-circuit, per-check trace, fail-closed)
     parse.py         # ParseCheck: parses once with sqlglot, readable errors
     shape.py         # ShapeCheck: structural rules + LIMIT rewrite
+    access.py        # AccessCheck: tables and columns per profile, tables pinned to schemas
   catalog.py         # Catalog: the role's tables and columns, cached, as a sqlglot schema
   profiles.py        # select_profile: the profile a server serves, and where it connects
   engines/
@@ -60,7 +61,7 @@ tests/unit/  tests/integration/ (marker: integration)
 Still to come:
 ```
 src/sql_warden/
-  pipeline/  access.py  cost.py  budget.py  masking.py  lineage.py
+  pipeline/  cost.py  budget.py  masking.py  lineage.py
   engines/   snowflake.py          # plus explain() on the Engine protocol
   audit/     schema.sql, sink.py   # AuditSink protocol, PostgresAuditSink, MemoryAuditSink
   sessions.py                      # session + budget store
@@ -255,7 +256,7 @@ profiles:
   parse (e.g. `tsvector`) become `UNKNOWN`; the column is still listed.
 - Tests: unit tests with a fake catalog, an integration test against the seeded DB.
 
-**2.2 Profiles in the policy + `--profile`** ✅ done
+**2.2 Profiles in the policy + `--profile`** ✅ done (`ef61d06`)
 - A `profiles:` section replaces a single `tables:` section. Each profile may set its own
   `dsn`; without one it uses `warehouse.dsn`. `default_profile` names the profile used when
   none is picked.
@@ -283,15 +284,38 @@ profiles:
   problem reported at once); profile selection precedence (flag > env > default); a profile's
   own DSN reaches the engine.
 
-**2.3 Access check**
+**2.3 Access check** ✅ done
 - Adds `tables` to each profile: either `"*"`, or a map of schema-qualified table → `"*"` or a
   list of columns. A profile without `tables` can read nothing (fail closed).
 - `sqlglot.optimizer.qualify` with the catalog resolves aliases, CTEs, subqueries, quoting and
   case. The check collects every (table, column) referenced in any clause and refuses
   `TABLE_NOT_ALLOWED` or `COLUMN_NOT_ALLOWED` against the **active profile**, naming the
   offender and the profile.
-- `SELECT *` is expanded when every column is approved. Otherwise it is refused with
-  `STAR_NOT_ALLOWED`, which lists the permitted columns.
+- `SELECT *` needs `"*"` for the table. Otherwise it is refused with `STAR_NOT_ALLOWED`, which
+  lists the permitted columns. (Changed from "expanded when every column is approved":
+  expanding rewrites the query, which breaks `JOIN … USING`, and a column added later would
+  slip into the expansion; a `"*"` rule already covers future columns.)
+- As built:
+  - Names resolve against the role's **full** catalog, innermost scope first, as Postgres does,
+    then the profile's rules apply. Resolving against only the allowed columns would let a
+    correlated subquery read an inner forbidden column that looks like an outer allowed one.
+  - Not in `scope.columns`, so walked explicitly: `t.*` anywhere (`to_jsonb(p.*)`) and
+    whole-row references (`SELECT p`, `row_to_json(p)`, `p::text`, which sqlglot turns into
+    `TableColumn`) count as `*`. Bare names sqlglot leaves unqualified (DISTINCT ON) must be an
+    output name or belong to exactly one source.
+  - Refused outright: `NATURAL JOIN` (it compares columns it doesn't name), column alias lists
+    on tables (`products x(a, b, name)` renames by position, so `x.name` would be `category`),
+    three-part names. System catalogs aren't in the catalog, so `information_schema` and
+    `pg_catalog` are `TABLE_NOT_ALLOWED`.
+  - A missing table or column gets the same refusal as a forbidden one, so a profile can't
+    probe for names.
+  - What runs is the query as written, normalized and with each table **pinned to its
+    schema** (`public.products`), not sqlglot's qualified tree (which renames outputs to
+    `_col_0` and rewrites `USING`). Pinning stops `search_path` from reading a different table
+    than the one checked, e.g. one in a schema named after the role.
+  - The check reads the catalog, so with profiles `check` connects (never runs the query); an
+    unreadable catalog refuses with `CATALOG_UNAVAILABLE`. The implicit profile `all` has no
+    access check.
 - Tests: aliases, a CTE that shadows a real table name, a correlated subquery,
   schema-qualified and quoted names, an unknown column, a column referenced only in
   WHERE/ORDER BY; the same query allowed under `admin` and refused under `public`.

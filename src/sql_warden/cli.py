@@ -9,8 +9,10 @@ import uvicorn
 
 from sql_warden import __version__
 from sql_warden.config import (
+    EVERYTHING,
     IMPLICIT_PROFILE,
     ConfigError,
+    ProfileConfig,
     WardenConfig,
     default_config,
     describe_dsn,
@@ -104,7 +106,13 @@ def build_warden(config: WardenConfig, profile: str | None = None) -> Warden:
         max_rows=warehouse.max_rows,
         connect_timeout_s=warehouse.connect_timeout_s,
     )
-    return Warden(engine, dialect=warehouse.dialect, shape=config.shape, profile=active.name)
+    return Warden(
+        engine,
+        dialect=warehouse.dialect,
+        shape=config.shape,
+        profile=active.name,
+        access=active.access,
+    )
 
 
 class UsageError(click.UsageError):
@@ -300,6 +308,18 @@ def validate(state: CliState, path: Path | None) -> None:
         click.echo(line)
 
 
+def describe_tables(profile: ProfileConfig) -> list[str]:
+    if profile.tables == EVERYTHING:
+        return ["reads every table its role can"]
+    assert isinstance(profile.tables, dict)
+    if not profile.tables:
+        return ["reads nothing: it lists no tables"]
+    return [
+        f"reads {name} ({'every column' if columns == EVERYTHING else ', '.join(columns)})"
+        for name, columns in profile.tables.items()
+    ]
+
+
 def describe_profiles(config: WardenConfig) -> list[str]:
     if config.profiles is None:
         return [
@@ -317,6 +337,7 @@ def describe_profiles(config: WardenConfig) -> list[str]:
             else "connects with warehouse.dsn"
         )
         lines.append(f"{label}{name}{default}: {where}")
+        lines += [f"               {line}" for line in describe_tables(profile)]
     if config.default_profile is None:
         lines.append("             no default_profile: servers must be given --profile")
     return lines
