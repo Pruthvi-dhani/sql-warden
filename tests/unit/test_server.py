@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from mcp import Client
 from mcp_types import CallToolResult, TextContent
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.cli import cli
 from sql_warden.engines import EngineUnavailable, QueryTimeout, Result
 from sql_warden.server import create_http_app, create_server, is_loopback, json_value
@@ -24,7 +25,7 @@ def anyio_backend() -> str:
 
 
 async def _call(engine: FakeEngine, tool: str, **arguments: Any) -> CallToolResult:
-    async with Client(create_server(Warden(engine))) as client:
+    async with Client(create_server(Warden(engine, audit=MemoryAuditSink()))) as client:
         return await client.call_tool(tool, arguments)
 
 
@@ -35,7 +36,7 @@ def _payload(result: CallToolResult) -> dict[str, Any]:
 
 
 async def test_tools_are_listed_as_read_only() -> None:
-    async with Client(create_server(Warden(FakeEngine()))) as client:
+    async with Client(create_server(Warden(FakeEngine(), audit=MemoryAuditSink()))) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
     assert set(tools) == {"run_query", "check_query", "list_tables", "describe_table"}
     for tool in tools.values():
@@ -47,7 +48,7 @@ async def test_tools_are_listed_as_read_only() -> None:
 
 
 async def test_server_tells_agents_how_it_works() -> None:
-    async with Client(create_server(Warden(FakeEngine()))) as client:
+    async with Client(create_server(Warden(FakeEngine(), audit=MemoryAuditSink()))) as client:
         assert client.instructions is not None
         assert "refused" in client.instructions
 
@@ -215,7 +216,7 @@ async def test_loopback_hosts(host: str, loopback: bool) -> None:
 
 async def test_http_app_refuses_non_loopback_hosts() -> None:
     with pytest.raises(ValueError, match="only listens on loopback"):
-        create_http_app(Warden(FakeEngine()), host="0.0.0.0")
+        create_http_app(Warden(FakeEngine(), audit=MemoryAuditSink()), host="0.0.0.0")
 
 
 async def test_serve_refuses_non_loopback_hosts(engines: list[FakeEngine]) -> None:

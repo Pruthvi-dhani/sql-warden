@@ -5,6 +5,7 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.config import EVERYTHING
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.profiles import Access
@@ -18,7 +19,9 @@ ADMIN = Access(EVERYTHING)
 
 
 def _admin(warehouse: Warehouse) -> Warden:
-    return Warden(PostgresEngine(warehouse.reader_dsn), profile="admin", access=ADMIN)
+    return Warden(
+        PostgresEngine(warehouse.reader_dsn), audit=MemoryAuditSink(), profile="admin", access=ADMIN
+    )
 
 
 @pytest.mark.parametrize(
@@ -31,7 +34,12 @@ def _admin(warehouse: Warehouse) -> Warden:
     ],
 )
 def test_admin_may_and_public_may_not(warehouse: Warehouse, sql: str) -> None:
-    public = Warden(PostgresEngine(warehouse.public_dsn), profile="public", access=PUBLIC)
+    public = Warden(
+        PostgresEngine(warehouse.public_dsn),
+        audit=MemoryAuditSink(),
+        profile="public",
+        access=PUBLIC,
+    )
     assert _admin(warehouse).run(sql).result is not None
     refused = public.run(sql)
     assert refused.result is None
@@ -99,7 +107,12 @@ def test_tables_are_pinned_to_the_schema_that_was_checked(
 
 def test_only_what_the_profile_may_query_is_listed(warehouse: Warehouse) -> None:
     # The reader role sees every table; the profile's rules decide what is shown.
-    warden = Warden(PostgresEngine(warehouse.reader_dsn), profile="public", access=PUBLIC)
+    warden = Warden(
+        PostgresEngine(warehouse.reader_dsn),
+        audit=MemoryAuditSink(),
+        profile="public",
+        access=PUBLIC,
+    )
     tables = warden.tables()
     assert [(t.name, [c.name for c in t.columns]) for t in tables] == [
         ("products", ["id", "name", "price_cents"])

@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from mcp import Client
 
 from sql_warden import cli as cli_module
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.cli import EXIT_ERROR, EXIT_REFUSED, cli
 from sql_warden.engines import EngineError, EngineUnavailable, QueryFailed, QueryTimeout
 from sql_warden.server import create_server
@@ -128,9 +129,11 @@ class TestJson:
         self, engines: list[FakeEngine], anyio_backend: str, sql: str
     ) -> None:
         printed = _json(CliRunner().invoke(cli, ["query", sql, "--json"]).output)
-        async with Client(create_server(Warden(FakeEngine()))) as client:
+        async with Client(create_server(Warden(FakeEngine(), audit=MemoryAuditSink()))) as client:
             returned = (await client.call_tool("run_query", {"sql": sql})).structured_content
         assert returned is not None
+        # Each call is its own request, with its own audit record.
+        assert printed.pop("audit_id") != returned.pop("audit_id")
         assert _without_timings(printed) == _without_timings(returned)
 
 

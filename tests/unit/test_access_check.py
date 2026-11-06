@@ -1,5 +1,6 @@
 import pytest
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.config import EVERYTHING, ShapeConfig
 from sql_warden.engines import Column, EngineUnavailable, Table
 from sql_warden.models import Decision
@@ -35,7 +36,13 @@ SHAPE = ShapeConfig(allowed_functions=("to_jsonb", "row_to_json"))
 
 
 def _decide(sql: str, access: Access | None = PUBLIC, profile: str = "public") -> Decision:
-    warden = Warden(FakeEngine(catalog=CATALOG), shape=SHAPE, profile=profile, access=access)
+    warden = Warden(
+        FakeEngine(catalog=CATALOG),
+        audit=MemoryAuditSink(),
+        shape=SHAPE,
+        profile=profile,
+        access=access,
+    )
     return warden.check(sql)
 
 
@@ -198,7 +205,9 @@ class TestNoRules:
 
 def test_an_unreadable_catalog_refuses_rather_than_guesses() -> None:
     engine = FakeEngine(error=EngineUnavailable("could not connect to the database"))
-    decision = Warden(engine, profile="public", access=PUBLIC).check("select id from products")
+    decision = Warden(engine, audit=MemoryAuditSink(), profile="public", access=PUBLIC).check(
+        "select id from products"
+    )
     refused_by = decision.refused_by
     assert refused_by is not None
     assert refused_by.refusal is not None
@@ -208,6 +217,8 @@ def test_an_unreadable_catalog_refuses_rather_than_guesses() -> None:
 
 def test_refusals_happen_before_anything_runs() -> None:
     engine = FakeEngine(catalog=CATALOG)
-    outcome = Warden(engine, profile="public", access=PUBLIC).run("select * from employee_salaries")
+    outcome = Warden(engine, audit=MemoryAuditSink(), profile="public", access=PUBLIC).run(
+        "select * from employee_salaries"
+    )
     assert outcome.result is None
     assert engine.executed == []

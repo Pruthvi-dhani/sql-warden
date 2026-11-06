@@ -5,6 +5,7 @@ import pytest
 from click.testing import CliRunner
 from mcp import Client
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.cli import EXIT_ERROR, cli
 from sql_warden.config import DEFAULT_DSN, ConfigError, parse_config
 from sql_warden.profiles import Access, Profile, ProfileError, select_profile
@@ -197,7 +198,7 @@ class TestCli:
     def test_validate_lists_the_profiles(self, policy: Path) -> None:
         outcome = CliRunner().invoke(cli, ["config", "validate"])
         assert outcome.exit_code == 0, outcome.output
-        assert outcome.output.splitlines()[5:] == [
+        assert outcome.output.splitlines()[6:] == [
             "  profiles:  public (default): connects to db/warehouse as warden_public",
             "               reads public.products (id, name, price_cents)",
             "             admin: connects with warehouse.dsn",
@@ -218,7 +219,9 @@ class TestCli:
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
 class TestMcp:
     async def test_results_and_tables_name_the_profile(self, anyio_backend: str) -> None:
-        async with Client(create_server(Warden(FakeEngine(), profile="public"))) as client:
+        async with Client(
+            create_server(Warden(FakeEngine(), audit=MemoryAuditSink(), profile="public"))
+        ) as client:
             instructions = client.instructions
             ran = await client.call_tool("run_query", {"sql": "select 1"})
             refused = await client.call_tool("run_query", {"sql": "delete from orders"})
@@ -230,6 +233,6 @@ class TestMcp:
             assert result.structured_content["profile"] == "public"
 
     async def test_without_profiles_the_instructions_say_so(self, anyio_backend: str) -> None:
-        async with Client(create_server(Warden(FakeEngine()))) as client:
+        async with Client(create_server(Warden(FakeEngine(), audit=MemoryAuditSink()))) as client:
             assert client.instructions is not None
             assert "No access profiles are configured" in client.instructions

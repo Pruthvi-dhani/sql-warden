@@ -5,12 +5,14 @@ does (JSON-RPC over Streamable HTTP), so what you see is what an agent receives.
 tool: it lives in the tests tree and is not part of the `sql_warden` package.
 
 ```bash
-docker compose -f dev/docker-compose.yml up -d     # the demo warehouse
+docker compose -f dev/docker-compose.yml up -d     # the demo warehouse and audit database
 uv run python -m tests.portal                      # opens http://127.0.0.1:8765/
 ```
 
 Options are the same as `sql-warden`'s: `--config`, `--dsn`, `--max-rows`, `--timeout-ms`,
-`--profile`, plus `--port` and `--no-open`. The portal only listens on 127.0.0.1.
+`--profile`, `--audit-dsn`, plus `--port` and `--no-open`. The portal only listens on
+127.0.0.1. Like `sql-warden serve`, it records every Run and Check in the audit database and
+won't start without it; each result's `audit_id` is in the console panel.
 
 It serves every profile in the config at once. With the example config:
 

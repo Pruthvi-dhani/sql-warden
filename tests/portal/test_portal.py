@@ -18,6 +18,7 @@ import pytest
 import uvicorn
 from click.testing import CliRunner
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.warden import Warden
 from tests.portal.__main__ import main
 from tests.portal.app import PAGE, create_portal_app
@@ -124,7 +125,7 @@ def engine() -> FakeEngine:
 
 @pytest.fixture
 def portal_url(engine: FakeEngine) -> Iterator[str]:
-    with serving(create_portal_app(Warden(engine))) as base_url:
+    with serving(create_portal_app(Warden(engine, audit=MemoryAuditSink()))) as base_url:
         yield base_url
 
 
@@ -229,8 +230,12 @@ def test_launcher_reports_a_broken_config(tmp_path: Path) -> None:
 @pytest.fixture
 def profiles_url() -> Iterator[str]:
     wardens = {
-        "public": Warden(FakeEngine(catalog=CATALOG), profile="public", access=PUBLIC),
-        "admin": Warden(FakeEngine(catalog=CATALOG), profile="admin", access=ADMIN),
+        "public": Warden(
+            FakeEngine(catalog=CATALOG), audit=MemoryAuditSink(), profile="public", access=PUBLIC
+        ),
+        "admin": Warden(
+            FakeEngine(catalog=CATALOG), audit=MemoryAuditSink(), profile="admin", access=ADMIN
+        ),
     }
     with serving(create_portal_app(wardens, default="public")) as base_url:
         yield base_url

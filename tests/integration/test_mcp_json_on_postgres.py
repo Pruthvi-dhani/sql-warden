@@ -40,7 +40,7 @@ def expand(value: str, env: Mapping[str, str]) -> str:
 
 
 @pytest.fixture
-def params(warehouse: Warehouse, tmp_path: Path) -> StdioServerParameters:
+def params(warehouse: Warehouse, audit_dsn: str, tmp_path: Path) -> StdioServerParameters:
     entry = json.loads(EXAMPLE.read_text())["mcpServers"]["sql-warden"]
     config = tmp_path / "warden.yaml"
     config.write_text("version: 1\nwarehouse:\n  max_rows: 3\n")
@@ -51,6 +51,7 @@ def params(warehouse: Warehouse, tmp_path: Path) -> StdioServerParameters:
         env={
             "CLAUDE_PROJECT_DIR": str(REPO),
             "SQL_WARDEN_DSN": warehouse.reader_dsn,
+            "SQL_WARDEN_AUDIT_DSN": audit_dsn,
             "SQL_WARDEN_CONFIG": str(config),
         },
         cwd=REPO,

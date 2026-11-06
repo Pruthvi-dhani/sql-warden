@@ -115,10 +115,14 @@ class TestDeniedFunctions:
 
 
 def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("WARDEN_READER_PASSWORD", "WARDEN_PUBLIC_PASSWORD"):
+    for name in ("WARDEN_READER_PASSWORD", "WARDEN_PUBLIC_PASSWORD", "WARDEN_AUDIT_PASSWORD"):
         monkeypatch.delenv(name, raising=False)
     example, defaults = load_config(EXAMPLE_CONFIG), default_config()
-    assert (example.warehouse, example.shape) == (defaults.warehouse, defaults.shape)
+    assert (example.warehouse, example.audit, example.shape) == (
+        defaults.warehouse,
+        defaults.audit,
+        defaults.shape,
+    )
     assert example.default_profile == "public"
     assert example.profiles is not None
     assert {name: (p.dsn, p.tables) for name, p in example.profiles.items()} == {

@@ -244,7 +244,7 @@ profiles:
     tables: "*"                             # every table and column the role can read
 ```
 
-**2.1 Catalog introspection** ✅ done
+**2.1 Catalog introspection** ✅ done (`af08936`)
 - `catalog.py` builds on `Engine.tables()` (from 1.4): caches the result and turns it into a
   sqlglot schema.
 - `Catalog` reads lazily and reuses a read for 60 s (`refresh()` forces a new one); concurrent
@@ -349,7 +349,7 @@ profiles:
   decisions; an integration test runs the comparison against the Testcontainer.
 
 ## Phase 3 — Audit database
-**3.1 Audit sink** ✅ done
+**3.1 Audit sink** ✅ done (`ffff341`)
 - `audit/schema.sql` creates `audit_events` with these columns: id, ts, session_id, client,
   profile, sql (as sent), executed_sql (as regenerated and run), rewrites, decision, check, code,
   reason, cost_estimate, rows_returned, masked_columns, duration_ms, and the full trace as
@@ -366,7 +366,7 @@ profiles:
   that uses it, and nothing records events until 3.2.
 - Tests: integration with a second Testcontainer.
 
-**3.2 Record every request, fail-closed**
+**3.2 Record every request, fail-closed** ✅ done
 - Adds the `audit` config section (`dsn`, from the demo stack's `audit` service by default) and
   `ensure_schema()` at startup.
 - Every outcome writes exactly one event: allowed, refused, execution error, timeout. If the
@@ -374,6 +374,21 @@ profiles:
   queried without an audit record.
 - Tests: a unit test with a failing sink; integration tests where one call produces one row
   with the right fields.
+- As built: the `Warden` records, so the CLI, MCP server and portal all do; it takes a required
+  `audit` sink, so none can be built without one. `check` and `run` record after deciding
+  (`dry_run` marks `check`). A timeout is a `failed` event whose `error` says so.
+- Fail-closed, in two places, since a read's row count is only known after it ran: before an
+  allowed query runs, the sink is pinged (`SELECT 1` on its connection), and if that fails
+  the query never reaches the warehouse. If the write after it still fails, the rows (or the
+  database error) are withheld. Either way the response is an `AUDIT_UNAVAILABLE` refusal,
+  added to the end of the trace, so the trace still shows what the checks decided. An
+  unexpected error in the sink is treated the same way, without its message.
+- Startup: `query`, `check`, `serve` and the portal apply the schema at start and exit 1 if
+  the audit database is unreachable. `tables` runs no query and needs no audit database. Flags:
+  `--audit-dsn` / `SQL_WARDEN_AUDIT_DSN`. There is no setting that turns auditing off.
+- Responses carry `audit_id`; events carry `client` (`cli`, or the MCP client's self-reported
+  name and version, e.g. `claude-code 2.1.3`). `session_id` stays empty until 6.1.
+  `list_tables` and `describe_table` are not recorded: they run no query.
 
 **3.3 `sql-warden audit tail|show <id>`**
 - Tests: CLI output against seeded audit rows.

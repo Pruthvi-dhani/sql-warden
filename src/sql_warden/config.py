@@ -27,6 +27,8 @@ from pydantic_core import PydanticCustomError
 
 # The read-only role in the dev/docker-compose.yml demo stack.
 DEFAULT_DSN = "postgresql://warden_reader:warden_reader@localhost:5433/warehouse"
+# The demo stack's audit database, a separate Postgres instance.
+DEFAULT_AUDIT_DSN = "postgresql://warden_audit:warden_audit@localhost:5434/audit"
 
 # Functions refused whatever the config says: they stall or signal the server, read its files,
 # reach other databases, change session settings, take locks, write, or run SQL given as a
@@ -130,6 +132,15 @@ class ShapeConfig(_Section):
         return next((pattern for pattern in patterns if fnmatchcase(name, pattern)), None)
 
 
+class AuditConfig(_Section):
+    """Where every request is recorded. Always Postgres, whatever the warehouse engine, and on
+    its own instance: the warehouse role must not be able to touch the audit log. There is no
+    way to turn auditing off: sql-warden refuses requests it can't record."""
+
+    dsn: str = DEFAULT_AUDIT_DSN
+    connect_timeout_s: PositiveInt = 5
+
+
 EVERYTHING: Literal["*"] = "*"
 ColumnRule = Literal["*"] | tuple[str, ...]
 """Every column of a table, including ones added later, or just these."""
@@ -186,37 +197,13 @@ class ProfileConfig(_Section):
                     {"name": name, "columns": ", ".join(repeated)},
                 )
         return tables
-        assert isinstance(tables, dict)
-        for name, columns in tables.items():
-            schema, _, table = name.partition(".")
-            if not schema or not table or "." in table:
-                raise PydanticCustomError(
-                    "table_name",
-                    "'{name}' must be schema.table, e.g. public.products",
-                    {"name": name},
-                )
-            if columns == EVERYTHING:
-                continue
-            if not columns:
-                raise PydanticCustomError(
-                    "no_columns",
-                    '{name} lists no columns; give some, use "*", or leave the table out',
-                    {"name": name},
-                )
-            repeated = sorted({column for column in columns if columns.count(column) > 1})
-            if repeated:
-                raise PydanticCustomError(
-                    "repeated_columns",
-                    "{name} lists {columns} more than once",
-                    {"name": name, "columns": ", ".join(repeated)},
-                )
-        return tables
 
 
 class WardenConfig(_Section):
     version: Literal[1]
     warehouse: WarehouseConfig = WarehouseConfig()
     shape: ShapeConfig = ShapeConfig()
+    audit: AuditConfig = AuditConfig()
     profiles: dict[str, ProfileConfig] | None = None
     """None: no profiles are defined, and the one profile is the implicit `all`."""
     default_profile: str | None = None

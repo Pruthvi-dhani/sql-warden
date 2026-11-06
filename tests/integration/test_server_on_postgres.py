@@ -1,6 +1,7 @@
 import pytest
 from mcp import Client
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.engines import Column
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.server import create_server
@@ -27,7 +28,9 @@ def test_tables_lists_what_the_reader_can_see(warehouse: Warehouse) -> None:
 
 
 async def test_run_query_returns_real_values_as_json(warehouse: Warehouse) -> None:
-    server = create_server(Warden(PostgresEngine(warehouse.reader_dsn, max_rows=2)))
+    server = create_server(
+        Warden(PostgresEngine(warehouse.reader_dsn, max_rows=2), audit=MemoryAuditSink())
+    )
     async with Client(server) as client:
         result = await client.call_tool(
             "run_query",
@@ -49,7 +52,9 @@ async def test_run_query_returns_real_values_as_json(warehouse: Warehouse) -> No
 
 
 async def test_database_errors_reach_the_agent(warehouse: Warehouse) -> None:
-    async with Client(create_server(Warden(PostgresEngine(warehouse.reader_dsn)))) as client:
+    async with Client(
+        create_server(Warden(PostgresEngine(warehouse.reader_dsn), audit=MemoryAuditSink()))
+    ) as client:
         result = await client.call_tool("run_query", {"sql": "select nope from products"})
     assert result.is_error is True
     assert result.structured_content is not None

@@ -17,6 +17,12 @@ warehouse:
   max_rows: 100                # rows returned per query; more are cut off and flagged
   connect_timeout_s: 5
 
+# Every request is recorded here before anything is returned. Always Postgres, on its own
+# instance; sql-warden won't start without it, and refuses queries while it is unreachable.
+audit:
+  dsn: postgresql://warden_audit:${WARDEN_AUDIT_PASSWORD:-warden_audit}@localhost:5434/audit
+  connect_timeout_s: 5
+
 shape:
   max_joins: 4                 # JOINs per query, comma joins included
   max_subquery_depth: 3        # how deep subqueries and CTEs may nest

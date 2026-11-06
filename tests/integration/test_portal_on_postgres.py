@@ -1,5 +1,6 @@
 import pytest
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.config import EVERYTHING
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.profiles import Access
@@ -13,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_the_portal_against_the_seeded_warehouse(warehouse: Warehouse) -> None:
-    warden = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=3))
+    warden = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=3), audit=MemoryAuditSink())
     with serving(create_portal_app(warden)) as base_url:
         client = PortalClient(base_url)
         client.connect()
@@ -31,9 +32,17 @@ def test_the_portal_against_the_seeded_warehouse(warehouse: Warehouse) -> None:
 def test_compare_public_and_admin_on_the_seeded_warehouse(warehouse: Warehouse) -> None:
     public = Access({("public", "products"): frozenset({"id", "name", "price_cents"})})
     wardens = {
-        "public": Warden(PostgresEngine(warehouse.public_dsn), profile="public", access=public),
+        "public": Warden(
+            PostgresEngine(warehouse.public_dsn),
+            audit=MemoryAuditSink(),
+            profile="public",
+            access=public,
+        ),
         "admin": Warden(
-            PostgresEngine(warehouse.reader_dsn), profile="admin", access=Access(EVERYTHING)
+            PostgresEngine(warehouse.reader_dsn),
+            audit=MemoryAuditSink(),
+            profile="admin",
+            access=Access(EVERYTHING),
         ),
     }
     sql = "select title, count(*) from employee_salaries group by title"

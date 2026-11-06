@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from mcp import Client, StdioServerParameters
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.server import create_http_app
 from sql_warden.warden import Warden
 from tests.support import serving
@@ -43,7 +44,7 @@ def engine() -> FakeEngine:
 
 @pytest.fixture
 def http_url(engine: FakeEngine) -> Iterator[str]:
-    with serving(create_http_app(Warden(engine))) as base_url:
+    with serving(create_http_app(Warden(engine, audit=MemoryAuditSink()))) as base_url:
         yield f"{base_url}/mcp"
 
 

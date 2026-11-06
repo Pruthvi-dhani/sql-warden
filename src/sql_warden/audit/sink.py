@@ -53,9 +53,14 @@ class AuditEvent:
 
 
 class AuditSink(Protocol):
+    def ping(self) -> None:
+        """Raise AuditError if events can't be recorded right now. Checked before a query
+        runs, so the warehouse isn't queried while the audit database is down."""
+        ...
+
     def record(self, event: AuditEvent) -> None:
-        """Store the event, or raise AuditError. A caller must not run a query it could not
-        record."""
+        """Store the event, or raise AuditError. A caller must not return anything it could
+        not record."""
         ...
 
 
@@ -67,6 +72,10 @@ class MemoryAuditSink:
         self._lock = threading.Lock()
         self.fail_with: AuditError | None = None
         """Set to make every record() fail, as an unreachable database would."""
+
+    def ping(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
 
     def record(self, event: AuditEvent) -> None:
         with self._lock:
@@ -111,6 +120,12 @@ class PostgresAuditSink:
         """Create audit_events if it doesn't exist. Safe to call from every server start."""
         with self._lock:
             self._attempt(self._apply_schema, "could not set up the audit table")
+
+    def ping(self) -> None:
+        with self._lock:
+            self._attempt(
+                lambda conn: conn.execute("SELECT 1"), "the audit database is unavailable"
+            )
 
     def record(self, event: AuditEvent) -> None:
         params = {

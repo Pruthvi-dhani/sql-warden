@@ -1,5 +1,6 @@
 """The decision sql-warden reaches about a query, and why."""
 
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -25,6 +26,8 @@ class RefusalCode(StrEnum):
     """* (or a whole-row reference) on a table the profile may read only some columns of."""
     CATALOG_UNAVAILABLE = "CATALOG_UNAVAILABLE"
     """The tables and columns could not be read, so access could not be checked."""
+    AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
+    """The request could not be recorded, so nothing it would return is returned."""
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """A check crashed. The query is refused rather than let through unchecked."""
 
@@ -57,10 +60,14 @@ class Decision:
     """How the checks changed the query, e.g. "added LIMIT 101"."""
     profile: str | None = None
     """The profile the query was checked for; the Warden always sets it."""
+    audit_id: uuid.UUID | None = None
+    """The audit record of this request; None only when it could not be written."""
 
     @property
     def refused_by(self) -> TraceEntry | None:
-        return next((entry for entry in self.trace if not entry.passed), None)
+        # The checks stop at the first refusal, so they refuse at most once. An audit failure
+        # comes after them, and is why nothing was returned, even for a query already refused.
+        return next((entry for entry in reversed(self.trace) if not entry.passed), None)
 
     @property
     def allowed(self) -> bool:

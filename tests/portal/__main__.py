@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 import uvicorn
 
-from sql_warden.cli import CliState, build_warden, engine_options, settings
+from sql_warden.cli import CliState, build_warden, engine_options, open_audit, settings
 from sql_warden.config import IMPLICIT_PROFILE
 from sql_warden.profiles import ProfileError, select_profile
 from tests.portal.app import create_portal_app
@@ -31,6 +31,7 @@ def main(
     max_rows: int | None,
     timeout_ms: int | None,
     profile: str | None,
+    audit_dsn: str | None,
     port: int,
     open_browser: bool,
 ) -> None:
@@ -38,7 +39,7 @@ def main(
 
     It serves every profile in the config; --profile is the one the page starts on."""
     logging.getLogger("sqlglot").setLevel(logging.ERROR)  # as the CLI does
-    config = settings(CliState(config_path), dsn, max_rows, timeout_ms)
+    config = settings(CliState(config_path), dsn, max_rows, timeout_ms, audit_dsn)
     names = list(config.profiles or [IMPLICIT_PROFILE])
     if profile is not None:
         try:
@@ -46,7 +47,8 @@ def main(
         except ProfileError as exc:
             raise click.ClickException(str(exc)) from exc
     start = profile or config.default_profile or names[0]
-    wardens = {name: build_warden(config, name) for name in names}
+    audit = open_audit(config)  # one audit log for every profile, as separate servers would share
+    wardens = {name: build_warden(config, name, audit=audit) for name in names}
     url = f"http://127.0.0.1:{port}/"
     click.echo(
         f"sql-warden test portal on {url}, profiles {', '.join(names)} (Ctrl+C stops it)",

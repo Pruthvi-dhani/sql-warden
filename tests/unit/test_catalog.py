@@ -7,6 +7,7 @@ import sqlglot
 from sqlglot.errors import OptimizeError
 from sqlglot.optimizer.qualify import qualify
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.catalog import Catalog, column_type
 from sql_warden.engines import Column, EngineUnavailable, Table
 from sql_warden.warden import Warden
@@ -106,7 +107,7 @@ class TestCaching:
             Catalog(engine, max_age_s=-1)
 
     def test_the_warden_lists_tables_from_its_catalog(self, engine: CountingEngine) -> None:
-        warden = Warden(engine)
+        warden = Warden(engine, audit=MemoryAuditSink())
         assert warden.tables() == warden.tables() == (PRODUCTS, MIXED, REPORTS)
         assert engine.reads == 1
 

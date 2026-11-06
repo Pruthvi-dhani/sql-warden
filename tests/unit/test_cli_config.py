@@ -116,6 +116,7 @@ class TestValidate:
             f"✓ {path} is valid",
             "  warehouse: postgres at db.internal:6000/sales as bot",
             "             statement timeout 750 ms, max 25 rows",
+            "  audit:     postgres at localhost:5434/audit as warden_audit",
             "  shape:     up to 4 joins, subqueries up to 3 deep",
             "             LIMIT added or lowered to the row cap",
             "  profiles:  ! none defined: every server uses the implicit profile 'all',",
@@ -131,7 +132,7 @@ class TestValidate:
         )
         outcome = CliRunner().invoke(cli, ["config", "validate", str(path)])
         assert outcome.exit_code == 0, outcome.output
-        assert outcome.output.splitlines()[3:6] == [
+        assert outcome.output.splitlines()[4:7] == [
             "  shape:     up to 2 joins, subqueries up to 1 deep",
             "             LIMIT required, up to the row cap",
             "             2 extra functions allowed, 1 extra denied",

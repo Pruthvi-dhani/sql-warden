@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from sql_warden import cli as cli_module
+from sql_warden.audit import AuditError, AuditEvent, MemoryAuditSink
 from sql_warden.engines import Column, EngineError, Result, Table
 
 ONE_ROW = Result(columns=("id",), rows=((1,),), truncated=False, duration_ms=1.0)
@@ -38,7 +39,7 @@ def isolated_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Run every unit test in an empty directory with no sql-warden env vars, so a local
     warden.yaml or SQL_WARDEN_* variable can never change what a test sees."""
     monkeypatch.chdir(tmp_path)
-    for name in ("SQL_WARDEN_CONFIG", "SQL_WARDEN_DSN"):
+    for name in ("SQL_WARDEN_CONFIG", "SQL_WARDEN_DSN", "SQL_WARDEN_AUDIT_DSN"):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
 
@@ -57,3 +58,43 @@ def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
 
     monkeypatch.setattr(cli_module, "PostgresEngine", factory)
     return built
+
+
+class FakeAuditSink(MemoryAuditSink):
+    """What the CLI gets instead of PostgresAuditSink: events in a list."""
+
+    def __init__(self, dsn: str, *, connect_timeout_s: int) -> None:
+        super().__init__()
+        self.dsn = dsn
+        self.connect_timeout_s = connect_timeout_s
+        self.schema_applied = False
+
+    def ensure_schema(self) -> None:
+        self.ping()
+        self.schema_applied = True
+
+
+@dataclass
+class AuditSinks:
+    built: list[FakeAuditSink] = field(default_factory=list)
+    fail_with: AuditError | None = None
+    """Set to make the sinks built from now on fail, as an unreachable database would."""
+
+    @property
+    def events(self) -> list[AuditEvent]:
+        return [event for sink in self.built for event in sink.events]
+
+
+@pytest.fixture(autouse=True)
+def audit_sinks(monkeypatch: pytest.MonkeyPatch) -> AuditSinks:
+    """Replace PostgresAuditSink in the CLI, so no unit test needs an audit database."""
+    sinks = AuditSinks()
+
+    def factory(dsn: str, *, connect_timeout_s: int) -> FakeAuditSink:
+        sink = FakeAuditSink(dsn, connect_timeout_s=connect_timeout_s)
+        sink.fail_with = sinks.fail_with
+        sinks.built.append(sink)
+        return sink
+
+    monkeypatch.setattr(cli_module, "PostgresAuditSink", factory)
+    return sinks

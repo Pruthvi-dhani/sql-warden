@@ -3,6 +3,7 @@ import time
 import psycopg
 import pytest
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.config import ShapeConfig
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.models import RefusalCode
@@ -36,12 +37,14 @@ pytestmark = pytest.mark.integration
 def test_regenerated_sql_runs_on_postgres(warehouse: Warehouse, sql: str) -> None:
     # The warden runs sqlglot's regeneration of the query, so it must be valid Postgres.
     shape = ShapeConfig(allowed_functions=("jsonb_build_object",))
-    outcome = Warden(PostgresEngine(warehouse.reader_dsn), shape=shape).run(sql)
+    outcome = Warden(
+        PostgresEngine(warehouse.reader_dsn), audit=MemoryAuditSink(), shape=shape
+    ).run(sql)
     assert outcome.result is not None, outcome.decision
 
 
 def test_added_limit_still_reports_truncation(warehouse: Warehouse) -> None:
-    outcome = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=5)).run(
+    outcome = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=5), audit=MemoryAuditSink()).run(
         "select id from orders order by id"
     )
     assert outcome.decision.sql == "SELECT id FROM orders ORDER BY id LIMIT 6"
@@ -51,7 +54,7 @@ def test_added_limit_still_reports_truncation(warehouse: Warehouse) -> None:
 
 
 def test_a_lowered_limit_still_reports_truncation(warehouse: Warehouse) -> None:
-    outcome = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=5)).run(
+    outcome = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=5), audit=MemoryAuditSink()).run(
         "select id from orders limit 1000000"
     )
     assert outcome.decision.rewrites == (
@@ -63,7 +66,7 @@ def test_a_lowered_limit_still_reports_truncation(warehouse: Warehouse) -> None:
 
 
 def test_a_limit_within_the_cap_is_not_truncated(warehouse: Warehouse) -> None:
-    outcome = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=5)).run(
+    outcome = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=5), audit=MemoryAuditSink()).run(
         "select id from orders limit 5"
     )
     assert outcome.result is not None
@@ -72,9 +75,9 @@ def test_a_limit_within_the_cap_is_not_truncated(warehouse: Warehouse) -> None:
 
 
 def test_small_results_are_complete(warehouse: Warehouse) -> None:
-    outcome = Warden(PostgresEngine(warehouse.reader_dsn, max_rows=100)).run(
-        "select id from employee_salaries"
-    )
+    outcome = Warden(
+        PostgresEngine(warehouse.reader_dsn, max_rows=100), audit=MemoryAuditSink()
+    ).run("select id from employee_salaries")
     assert outcome.result is not None
     assert len(outcome.result.rows) == 50
     assert outcome.result.truncated is False
@@ -82,7 +85,7 @@ def test_small_results_are_complete(warehouse: Warehouse) -> None:
 
 def test_shape_refusals_stop_queries_the_admin_role_could_run(warehouse: Warehouse) -> None:
     # The admin role can write, so only the shape check stands between it and the data here.
-    warden = Warden(PostgresEngine(warehouse.admin_dsn))
+    warden = Warden(PostgresEngine(warehouse.admin_dsn), audit=MemoryAuditSink())
     for sql, code in [
         ("with x as (delete from products returning id) select count(*) from x", "NOT_READ_ONLY"),
         ("select * from products for update", "NOT_READ_ONLY"),
@@ -98,6 +101,8 @@ def test_shape_refusals_stop_queries_the_admin_role_could_run(warehouse: Warehou
 
 def test_pg_sleep_is_refused_before_it_reaches_the_database(warehouse: Warehouse) -> None:
     started = time.perf_counter()
-    outcome = Warden(PostgresEngine(warehouse.reader_dsn)).run("select pg_sleep(10)")
+    outcome = Warden(PostgresEngine(warehouse.reader_dsn), audit=MemoryAuditSink()).run(
+        "select pg_sleep(10)"
+    )
     assert outcome.result is None
     assert time.perf_counter() - started < 1

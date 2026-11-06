@@ -18,10 +18,11 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def policy(warehouse: Warehouse, tmp_path: Path) -> Path:
+def policy(warehouse: Warehouse, audit_dsn: str, tmp_path: Path) -> Path:
     path = tmp_path / "warden.yaml"
     path.write_text(
         f"version: 1\nwarehouse:\n  dsn: {warehouse.reader_dsn}\n"
+        f"audit:\n  dsn: {audit_dsn}\n"
         f"default_profile: public\nprofiles:\n"
         f"  public:\n    dsn: {warehouse.public_dsn}\n"
         f"    tables:\n      public.products: [id, name, price_cents]\n"

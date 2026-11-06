@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from mcp import Client
 from mcp_types import TextContent
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.cli import EXIT_ERROR, cli
 from sql_warden.config import EVERYTHING
 from sql_warden.profiles import Access
@@ -19,7 +20,9 @@ from tests.unit.test_access_check import ADMIN, CATALOG, PUBLIC
 
 
 def _warden(access: Access | None, profile: str = "public") -> Warden:
-    return Warden(FakeEngine(catalog=CATALOG), profile=profile, access=access)
+    return Warden(
+        FakeEngine(catalog=CATALOG), audit=MemoryAuditSink(), profile=profile, access=access
+    )
 
 
 def _seen(warden: Warden) -> dict[str, list[str]]:

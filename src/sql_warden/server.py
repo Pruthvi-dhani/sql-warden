@@ -11,7 +11,7 @@ import uuid
 from decimal import Decimal
 from typing import Annotated, Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
@@ -22,7 +22,7 @@ from sql_warden import __version__
 from sql_warden.config import IMPLICIT_PROFILE
 from sql_warden.engines import EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
-from sql_warden.warden import Warden
+from sql_warden.warden import Warden, trace_step
 
 INSTRUCTIONS = """\
 sql-warden runs read-only SQL against a governed database. Every query goes through checks
@@ -70,6 +70,9 @@ class QueryResponse(BaseModel):
     result: QueryRows | None = None
     error: str | None = None
     """Set when the query was allowed but the database failed to run it."""
+    audit_id: str | None = None
+    """This request's audit record. Missing only when it could not be written, and then the
+    response is an AUDIT_UNAVAILABLE refusal."""
 
 
 class ColumnInfo(BaseModel):
@@ -129,16 +132,7 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
         reason=refusal.reason if refusal else None,
         sql=decision.sql,
         rewrites=list(decision.rewrites),
-        trace=[
-            TraceStep(
-                check=entry.check,
-                passed=entry.passed,
-                code=entry.refusal.code if entry.refusal else None,
-                reason=entry.refusal.reason if entry.refusal else None,
-                duration_ms=round(entry.duration_ms, 3),
-            )
-            for entry in decision.trace
-        ],
+        trace=[TraceStep.model_validate(trace_step(entry)) for entry in decision.trace],
         result=None
         if result is None
         else QueryRows(
@@ -149,6 +143,7 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
             duration_ms=round(result.duration_ms, 3),
         ),
         error=None if error is None else str(error),
+        audit_id=None if decision.audit_id is None else str(decision.audit_id),
     )
 
 
@@ -176,21 +171,22 @@ def create_server(warden: Warden) -> MCPServer:
     server = MCPServer("sql-warden", version=__version__, instructions=instructions(warden.profile))
 
     @server.tool(annotations=READ_ONLY)
-    def run_query(sql: str) -> Annotated[CallToolResult, QueryResponse]:
+    def run_query(sql: str, ctx: Context[Any, Any]) -> Annotated[CallToolResult, QueryResponse]:
         """Run one read-only SQL SELECT and return its rows.
 
         The query is checked first. If a check refuses it, nothing runs and the result says
         which check, with a code and a reason. The result is an error when the query was
         refused or the database failed to run it.
         """
-        outcome = warden.run(sql)
+        outcome = warden.run(sql, client=client_name(ctx))
         return tool_result(describe(outcome.decision, outcome), is_error=outcome.result is None)
 
     @server.tool(annotations=READ_ONLY)
-    def check_query(sql: str) -> Annotated[CallToolResult, QueryResponse]:
+    def check_query(sql: str, ctx: Context[Any, Any]) -> Annotated[CallToolResult, QueryResponse]:
         """Dry run: say whether a SQL query would be allowed, and the exact SQL that would run,
         without touching the database."""
-        return tool_result(describe(warden.check(sql)), is_error=False)
+        decision = warden.check(sql, client=client_name(ctx))
+        return tool_result(describe(decision), is_error=decision.audit_id is None)
 
     @server.tool(annotations=READ_ONLY)
     def list_tables() -> TablesResponse:
@@ -205,6 +201,15 @@ def create_server(warden: Warden) -> MCPServer:
         return describe_one_table(warden, table)
 
     return server
+
+
+def client_name(ctx: Context[Any, Any]) -> str | None:
+    """The client as it named itself when it connected, e.g. "claude-code 2.1.3", for the
+    audit record. Self-reported, so a label, not an identity: identities come with auth."""
+    params = ctx.session.client_params
+    if params is None:
+        return None
+    return f"{params.client_info.name} {params.client_info.version}"
 
 
 def table_info(warden: Warden, table: Table) -> TableInfo:

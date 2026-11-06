@@ -53,3 +53,11 @@ def audit_dsn() -> Iterator[str]:
     )
     with container:
         yield container.get_connection_url()
+
+
+@pytest.fixture(autouse=True)
+def audit_env(audit_dsn: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point the CLI at the test audit database, so no integration test ever records into the
+    demo stack's audit log, or depends on it running."""
+    monkeypatch.setenv("SQL_WARDEN_AUDIT_DSN", audit_dsn)
+    return audit_dsn

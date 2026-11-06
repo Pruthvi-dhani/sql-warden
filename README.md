@@ -24,8 +24,8 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 </picture>
 
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
-> work today, and agents see only the tables and columns their profile allows; that completes
-> Phase 2. Next: the audit database. See the [plan](docs/plan.md) for the roadmap.
+> work today, and every request is recorded in the audit database. Next: reading the audit
+> log from the CLI. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -103,6 +103,23 @@ HINT: Perhaps you meant to reference the column "products.name".
 ```bash
 uv run sql-warden query "select count(*) as n from orders" --json | jq '.result.rows'
 if ! uv run sql-warden check "$SQL" --json > decision.json; then jq -r .reason decision.json; fi
+```
+
+#### The audit log
+
+Every `check` and `query`, from the CLI or an agent, is recorded in the audit database before
+anything comes back: allowed, refused, failed or timed out, with the SQL as sent and as run,
+the profile, the client, the full trace, and how many rows came back. The result's `audit_id`
+(in `--json` and the MCP results) is the record's id.
+
+It fails closed. sql-warden won't start without its audit database. If the audit database
+goes away later, allowed queries are refused with `AUDIT_UNAVAILABLE` before they reach the
+warehouse; if a record can't be written after a query ran, its rows are withheld. Nothing is
+answered without a record.
+
+```bash
+docker exec -it sql-warden-demo-audit-1 psql -U warden_audit -d audit \
+  -c "select ts, client, profile, decision, code, sql from audit_events order by ts desc limit 5"
 ```
 
 #### The checks so far
@@ -265,16 +282,17 @@ uv run sql-warden config validate          # checks the file without connecting
 
 Which config is used, highest priority first:
 
-1. command-line flags (`--dsn`, `--max-rows`, `--timeout-ms`, `--profile`) and `SQL_WARDEN_DSN`,
-   `SQL_WARDEN_PROFILE`
+1. command-line flags (`--dsn`, `--max-rows`, `--timeout-ms`, `--profile`, `--audit-dsn`) and
+   `SQL_WARDEN_DSN`, `SQL_WARDEN_PROFILE`, `SQL_WARDEN_AUDIT_DSN`
 2. the file given by `--config PATH` or `SQL_WARDEN_CONFIG`
 3. `./warden.yaml`, if it exists
 4. built-in defaults for the local demo stack
 
 Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
-enforces it. Today that is `warehouse` (connection, timeout, row cap), `shape` (joins,
-nesting, LIMIT policy, function allow and deny lists) and `profiles`;
+enforces it. Today that is `warehouse` (connection, timeout, row cap), `audit` (the audit
+database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists) and
+`profiles`;
 [warden.example.yaml](warden.example.yaml) documents every key.
 
 ### Profiles

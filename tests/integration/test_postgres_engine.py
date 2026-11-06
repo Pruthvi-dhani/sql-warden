@@ -5,6 +5,7 @@ import psycopg
 import pytest
 from click.testing import CliRunner
 
+from sql_warden.audit import MemoryAuditSink
 from sql_warden.cli import cli
 from sql_warden.engines import EngineUnavailable, QueryFailed, QueryTimeout
 from sql_warden.engines.postgres import PostgresEngine
@@ -129,7 +130,7 @@ def test_cli_query_end_to_end(warehouse: Warehouse) -> None:
 
 
 def test_warden_runs_allowed_queries_and_stops_malformed_ones(warehouse: Warehouse) -> None:
-    warden = Warden(PostgresEngine(warehouse.reader_dsn))
+    warden = Warden(PostgresEngine(warehouse.reader_dsn), audit=MemoryAuditSink())
     allowed = warden.run("SELECT count(*) FROM products")
     assert allowed.result is not None
     assert allowed.result.rows == ((200,),)
