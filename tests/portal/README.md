@@ -20,7 +20,9 @@ plus `--port` and `--no-open`. The portal only listens on 127.0.0.1.
 - **Decision**: the verdict, then one line per check that ran (✓/✗, code, reason, time), any
   rewrites (such as an added LIMIT), and the SQL that ran or would run.
 - **Results**: the rows, with NULLs marked and a note when the row cap cut the result off.
-- **Tables**: from `list_tables`. Click a table to query it, a column to insert its name. The
+- **Tables**: from `list_tables`, so only what the server's profile may query. Click a table to
+  query it (`select *` where the profile may read every column, the allowed columns otherwise),
+  a column to insert its name. Start the portal with `--profile` to see another profile. The
   server re-reads the catalog at most once a minute, so a new table can take that long to show.
 - **History**: the last 50 queries, kept in this browser's localStorage. Click one to load it.
 - **Console**: every JSON-RPC request and response, newest first. Expand one to see the raw

@@ -66,7 +66,7 @@ async def test_the_example_entry_serves_the_warehouse(params: StdioServerParamet
 
     assert instructions is not None
     assert "read-only SQL" in instructions
-    assert names == {"run_query", "check_query", "list_tables"}
+    assert names == {"run_query", "check_query", "list_tables", "describe_table"}
     assert {t["name"] for t in tables["tables"]} == {
         "customers",
         "employee_salaries",

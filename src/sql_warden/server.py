@@ -20,7 +20,7 @@ from starlette.applications import Starlette
 
 from sql_warden import __version__
 from sql_warden.config import IMPLICIT_PROFILE
-from sql_warden.engines import EngineError
+from sql_warden.engines import EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
 from sql_warden.warden import Warden
 
@@ -30,7 +30,9 @@ before it runs; a refused query comes back with the check, a code and a reason, 
 fix it and try again. Only single SELECT statements are allowed. Results are capped: if a
 query has no LIMIT, or one above the cap, sql-warden adds or lowers it and says so in
 `rewrites`; `truncated` tells you whether rows were cut off. Use list_tables to see what you
-can query and check_query to test a query without running it."""
+can query, describe_table for one table's columns, and check_query to test a query without
+running it. Tables and columns that aren't listed can't be queried. SELECT * works only on
+tables with `all_columns: true`; elsewhere, name the columns."""
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 LOOPBACK_NAMES = ("localhost",)
@@ -81,6 +83,14 @@ class TableInfo(BaseModel):
     schema_name: str = Field(alias="schema")
     name: str
     columns: list[ColumnInfo]
+    """Only the columns you may read."""
+    all_columns: bool
+    """True if you may read every column, including ones added later, so SELECT * works."""
+
+
+class TableResponse(BaseModel):
+    profile: str
+    table: TableInfo
 
 
 class TablesResponse(BaseModel):
@@ -184,25 +194,50 @@ def create_server(warden: Warden) -> MCPServer:
 
     @server.tool(annotations=READ_ONLY)
     def list_tables() -> TablesResponse:
-        """List the tables and views you can query, with their columns and types."""
-        try:
-            tables = warden.tables()
-        except EngineError as exc:
-            # Engine messages are safe to show; anything else stays hidden by the SDK.
-            raise ToolError(str(exc)) from exc
-        return TablesResponse(
-            profile=warden.profile,
-            tables=[
-                TableInfo(
-                    schema_name=table.schema,
-                    name=table.name,
-                    columns=[ColumnInfo(name=c.name, type=c.type) for c in table.columns],
-                )
-                for table in tables
-            ],
-        )
+        """List the tables and views you can query, with the columns you may read."""
+        return describe_tables(warden)
+
+    @server.tool(annotations=READ_ONLY)
+    def describe_table(table: str) -> TableResponse:
+        """Describe one table you can query: its columns and types, and whether SELECT * works.
+
+        Name it as in SQL: `products` or `public.products`."""
+        return describe_one_table(warden, table)
 
     return server
+
+
+def table_info(warden: Warden, table: Table) -> TableInfo:
+    return TableInfo(
+        schema_name=table.schema,
+        name=table.name,
+        columns=[ColumnInfo(name=c.name, type=c.type) for c in table.columns],
+        all_columns=warden.all_columns(table),
+    )
+
+
+def describe_tables(warden: Warden) -> TablesResponse:
+    """What list_tables returns. Engine errors become tool errors."""
+    try:
+        tables = warden.tables()
+    except EngineError as exc:
+        # Engine messages are safe to show; anything else stays hidden by the SDK.
+        raise ToolError(str(exc)) from exc
+    return TablesResponse(
+        profile=warden.profile, tables=[table_info(warden, table) for table in tables]
+    )
+
+
+def describe_one_table(warden: Warden, name: str) -> TableResponse:
+    """What describe_table returns. A table the profile may not read gets the same error as
+    one that doesn't exist."""
+    try:
+        table = warden.table(name)
+    except EngineError as exc:
+        raise ToolError(str(exc)) from exc
+    if table is None:
+        raise ToolError(f"table {name} is not available to profile {warden.profile}")
+    return TableResponse(profile=warden.profile, table=table_info(warden, table))
 
 
 def is_loopback(host: str) -> bool:

@@ -24,7 +24,8 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 </picture>
 
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
-> work today. Next: `list_tables` showing only what a profile may read. See the [plan](docs/plan.md) for the roadmap.
+> work today, and agents see only the tables and columns their profile allows. Next: a profile
+> picker in the test portal. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -161,11 +162,12 @@ uv run sql-warden serve                      # stdio: for an agent that launches
 uv run sql-warden serve --transport http     # Streamable HTTP at http://127.0.0.1:8000/mcp
 ```
 
-| Tool          | What it does                                                                 |
-|---------------|------------------------------------------------------------------------------|
-| `run_query`   | checks the SQL and, if allowed, runs it and returns the rows                 |
-| `check_query` | dry run: the decision and the exact SQL that would run, nothing executed     |
-| `list_tables` | tables and views the role can read, with column types; cached for a minute   |
+| Tool             | What it does                                                                  |
+|------------------|-------------------------------------------------------------------------------|
+| `run_query`      | checks the SQL and, if allowed, runs it and returns the rows                  |
+| `check_query`    | dry run: the decision and the exact SQL that would run, nothing executed      |
+| `list_tables`    | the tables and columns the profile may query, with types; cached for a minute |
+| `describe_table` | one table's columns and types, and whether `SELECT *` works on it             |
 
 Results are structured, so an agent can tell why a query was refused and fix it:
 
@@ -198,7 +200,8 @@ cp .mcp.json.example .mcp.json
 ```
 
 Start `claude` in the repo and run `/mcp`: sql-warden should be listed as connected, with
-`run_query`, `check_query` and `list_tables` (`claude mcp list` checks it from the shell).
+`run_query`, `check_query`, `list_tables` and `describe_table` (`claude mcp list` checks it
+from the shell).
 Then ask in plain language and watch which tools Claude calls and what comes back:
 
 | Ask Claude                                              | What you should see                             |
@@ -303,6 +306,15 @@ The profile comes from `--profile`, else `SQL_WARDEN_PROFILE`, else `default_pro
 unknown name is an error, never a fallback. A profile's own `dsn` wins over `--dsn` and
 `SQL_WARDEN_DSN`, so a flag can't widen what it reads. Every decision names its profile: the
 CLI prints it, and `--json` and the MCP results carry `profile`.
+
+`list_tables`, `describe_table` and `sql-warden tables` show only what the profile may query,
+so an agent never learns that the other tables exist. Each table says `all_columns`: whether
+`SELECT *` works on it.
+
+```bash
+uv run sql-warden tables                     # public.products  id, name, price_cents  (some columns)
+uv run sql-warden tables products --json     # the same payload describe_table returns
+```
 
 Give a profile its own `dsn` as a role with matching grants, and Postgres enforces the same
 rules underneath (the demo's `warden_public` can read only those three product columns). The

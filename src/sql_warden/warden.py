@@ -1,11 +1,16 @@
 from collections.abc import Sequence
 from dataclasses import replace
 
+from sqlglot import exp
+from sqlglot.errors import SqlglotError
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+
 from sql_warden.catalog import Catalog
-from sql_warden.config import IMPLICIT_PROFILE, ShapeConfig
+from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, ShapeConfig
 from sql_warden.engines import Engine, EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
 from sql_warden.pipeline import AccessCheck, Check, CheckContext, ParseCheck, Pipeline, ShapeCheck
+from sql_warden.pipeline.access import DEFAULT_SCHEMAS
 from sql_warden.profiles import Access
 
 
@@ -26,6 +31,7 @@ class Warden:
         self.dialect = dialect
         self.profile = profile
         """The profile this Warden serves. Fixed for its lifetime."""
+        self.access = access
         self.catalog = Catalog(engine, dialect=dialect)
         shape_check = ShapeCheck(shape or ShapeConfig(), max_rows=engine.max_rows)
         # The implicit profile has no table rules, so there is nothing for an access check.
@@ -59,5 +65,37 @@ class Warden:
             return QueryOutcome(decision, result=None, error=exc)
 
     def tables(self) -> tuple[Table, ...]:
-        """What callers can see of the catalog."""
-        return self.catalog.tables()
+        """The tables and columns this profile may read, in catalog order. Anything else is
+        left out entirely, so a profile never learns that it exists."""
+        visible = []
+        for table in self.catalog.tables():
+            allowed = self._allowed(table)
+            if allowed == EVERYTHING:
+                visible.append(table)
+            elif allowed:
+                columns = tuple(column for column in table.columns if column.name in allowed)
+                visible.append(replace(table, columns=columns))
+        return tuple(visible)
+
+    def table(self, name: str) -> Table | None:
+        """The table name refers to, read as SQL would (`products` is public.products,
+        `"MixedCase"` keeps its case), if this profile may read it."""
+        try:
+            parsed = exp.to_table(name, dialect=self.dialect)
+        except SqlglotError:
+            return None
+        if parsed.catalog:
+            return None
+        normalize_identifiers(parsed, dialect=self.dialect)
+        schema = parsed.db or DEFAULT_SCHEMAS[self.dialect]
+        return next((t for t in self.tables() if (t.schema, t.name) == (schema, parsed.name)), None)
+
+    def all_columns(self, table: Table) -> bool:
+        """True if this profile may read every column of table, including ones added later,
+        so SELECT * on it is allowed."""
+        return self._allowed(table) == EVERYTHING
+
+    def _allowed(self, table: Table) -> frozenset[str] | str | None:
+        if self.access is None:
+            return EVERYTHING
+        return self.access.columns(table.schema, table.name)

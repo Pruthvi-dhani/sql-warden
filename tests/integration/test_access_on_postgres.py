@@ -95,3 +95,20 @@ def test_tables_are_pinned_to_the_schema_that_was_checked(
     assert outcome.decision.sql == "SELECT COUNT(*) FROM public.products LIMIT 1001"
     assert outcome.result is not None
     assert outcome.result.rows == ((200,),)
+
+
+def test_only_what_the_profile_may_query_is_listed(warehouse: Warehouse) -> None:
+    # The reader role sees every table; the profile's rules decide what is shown.
+    warden = Warden(PostgresEngine(warehouse.reader_dsn), profile="public", access=PUBLIC)
+    tables = warden.tables()
+    assert [(t.name, [c.name for c in t.columns]) for t in tables] == [
+        ("products", ["id", "name", "price_cents"])
+    ]
+    assert warden.all_columns(tables[0]) is False
+    assert warden.table("employee_salaries") is None
+    assert {t.name for t in _admin(warehouse).tables()} == {
+        "customers",
+        "employee_salaries",
+        "orders",
+        "products",
+    }

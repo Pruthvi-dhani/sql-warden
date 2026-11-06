@@ -37,7 +37,7 @@ def _payload(result: CallToolResult) -> dict[str, Any]:
 async def test_tools_are_listed_as_read_only() -> None:
     async with Client(create_server(Warden(FakeEngine()))) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-    assert set(tools) == {"run_query", "check_query", "list_tables"}
+    assert set(tools) == {"run_query", "check_query", "list_tables", "describe_table"}
     for tool in tools.values():
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True
@@ -158,6 +158,7 @@ class TestListTables:
                         {"name": "id", "type": "integer"},
                         {"name": "name", "type": "text"},
                     ],
+                    "all_columns": True,
                 }
             ],
         }

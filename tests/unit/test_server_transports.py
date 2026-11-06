@@ -54,7 +54,7 @@ class TestHttp:
         async with Client(http_url) as client:
             names = {tool.name for tool in (await client.list_tools()).tools}
             result = await client.call_tool("run_query", {"sql": "select 1 as id"})
-        assert names == {"run_query", "check_query", "list_tables"}
+        assert names == {"run_query", "check_query", "list_tables", "describe_table"}
         assert result.structured_content is not None
         assert result.structured_content["result"]["rows"] == [[1]]
         assert engine.executed == ["SELECT 1 AS id LIMIT 101"]
@@ -93,7 +93,7 @@ class TestStdio:
             names = {tool.name for tool in (await client.list_tools()).tools}
             checked = await client.call_tool("check_query", {"sql": "select 1"})
             ran = await client.call_tool("run_query", {"sql": "select 1"})
-        assert names == {"run_query", "check_query", "list_tables"}
+        assert names == {"run_query", "check_query", "list_tables", "describe_table"}
         assert _structured(checked)["sql"] == "SELECT 1 LIMIT 101"
         assert ran.is_error is True
         assert "could not connect to the database" in _structured(ran)["error"]

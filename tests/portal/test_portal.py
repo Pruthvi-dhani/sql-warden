@@ -144,6 +144,11 @@ def test_the_page_only_calls_tools_the_server_has() -> None:
     assert called == {"run_query", "check_query", "list_tables"}
 
 
+def test_a_table_click_writes_a_query_the_profile_allows() -> None:
+    # SELECT * only where every column may be read; else the listed columns.
+    assert 't.all_columns ? "*" : t.columns.map(c => c.name).join(", ")' in PAGE.read_text()
+
+
 def test_the_handshake_names_the_server(client: PortalClient) -> None:
     assert client.server_info["name"] == "sql-warden"
     assert client.session_id

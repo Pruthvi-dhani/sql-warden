@@ -2,6 +2,7 @@
 
 from sql_warden.engines import Result
 from sql_warden.models import Decision
+from sql_warden.server import TableResponse, TablesResponse
 
 
 def format_decision(decision: Decision, *, dry_run: bool) -> str:
@@ -60,3 +61,30 @@ def format_footer(result: Result, *, profile: str | None = None) -> str:
         footer += ", truncated at the row cap"
     footer += f", {result.duration_ms:.0f} ms"
     return footer + (f", profile {profile})" if profile else ")")
+
+
+def format_tables(response: TablesResponse) -> str:
+    """One line per table with the columns the profile may read."""
+    names = [f"{table.schema_name}.{table.name}" for table in response.tables]
+    width = max((len(name) for name in names), default=0)
+    lines = [
+        f"{name.ljust(width)}  {', '.join(c.name for c in table.columns)}"
+        + ("" if table.all_columns else "  (some columns)")
+        for name, table in zip(names, response.tables, strict=True)
+    ]
+    count = len(response.tables)
+    lines.append(f"({count} table{'' if count == 1 else 's'}, profile {response.profile})")
+    return "\n".join(lines)
+
+
+def format_table_detail(response: TableResponse) -> str:
+    table = response.table
+    width = max(len(column.name) for column in table.columns)
+    lines = [f"{table.schema_name}.{table.name} (profile {response.profile})"]
+    lines += [f"  {column.name.ljust(width)}  {column.type}" for column in table.columns]
+    lines.append(
+        "SELECT * is allowed"
+        if table.all_columns
+        else "SELECT * is not allowed: the profile may read only these columns, so name them"
+    )
+    return "\n".join(lines)

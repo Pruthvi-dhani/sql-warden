@@ -284,7 +284,7 @@ profiles:
   problem reported at once); profile selection precedence (flag > env > default); a profile's
   own DSN reaches the engine.
 
-**2.3 Access check** ✅ done
+**2.3 Access check** ✅ done (`cd6c95a`)
 - Adds `tables` to each profile: either `"*"`, or a map of schema-qualified table → `"*"` or a
   list of columns. A profile without `tables` can read nothing (fail closed).
 - `sqlglot.optimizer.qualify` with the catalog resolves aliases, CTEs, subqueries, quoting and
@@ -322,10 +322,16 @@ profiles:
   Integration: the `public` profile's own DB role refuses `employee_salaries` even if the
   access check is bypassed (defence in depth).
 
-**2.4 Discoverability**
+**2.4 Discoverability** ✅ done
 - `list_tables` and the new `describe_table` (MCP and CLI `tables`) show only what the active
   profile allows, with masked columns flagged once Phase 5 lands. A `public` agent never
   learns that `employee_salaries` exists.
+- Each table carries `all_columns` (the profile has `"*"` for it, so `SELECT *` works), which
+  the server's instructions explain and the portal uses: clicking a table writes
+  `select * from …` or the allowed columns. `describe_table` reads the name as SQL does
+  (`products` → `public.products`, quoted names keep their case), and a missing table gets
+  the same error as a forbidden one. `sql-warden tables [NAME] [--json]` prints the same
+  payloads.
 - Tests: unit tests (unapproved objects never appear, per profile) and a CLI snapshot.
 
 **2.5 Portal: profile picker**

@@ -372,7 +372,7 @@ function renderTables(result) {
     return;
   }
   if (!payload.tables.length) {
-    box.replaceChildren(el("span", { class: "empty" }, "No tables visible to the warehouse role."));
+    box.replaceChildren(el("span", { class: "empty" }, `No tables available to profile ${payload.profile}.`));
     return;
   }
   box.replaceChildren(...payload.tables.map(t => {
@@ -380,8 +380,10 @@ function renderTables(result) {
     return el("details", {},
       el("summary", {}, el("button", { class: "link", title: "Query this table", onclick: e => {
         e.preventDefault();
-        setSql(`select * from ${name}`);
-      } }, name)),
+        // SELECT * only works where the profile may read every column; else name them.
+        const columns = t.all_columns ? "*" : t.columns.map(c => c.name).join(", ");
+        setSql(`select ${columns} from ${name}`);
+      } }, name, t.all_columns ? "" : el("span", { class: "type", title: "the profile may read only some columns" }, " (some columns)"))),
       el("ul", {}, t.columns.map(c => el("li", {},
         el("button", { class: "link", title: "Insert at the cursor", onclick: () => insertAtCursor(c.name) }, c.name),
         el("span", { class: "type" }, c.type),

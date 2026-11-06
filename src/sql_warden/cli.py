@@ -6,6 +6,7 @@ from typing import Any
 
 import click
 import uvicorn
+from mcp.server.mcpserver.exceptions import ToolError
 
 from sql_warden import __version__
 from sql_warden.config import (
@@ -20,8 +21,20 @@ from sql_warden.config import (
 )
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.profiles import ProfileError, select_profile
-from sql_warden.render import format_decision, format_rewrites, format_table
-from sql_warden.server import create_http_app, create_server, describe
+from sql_warden.render import (
+    format_decision,
+    format_rewrites,
+    format_table,
+    format_table_detail,
+    format_tables,
+)
+from sql_warden.server import (
+    create_http_app,
+    create_server,
+    describe,
+    describe_one_table,
+    describe_tables,
+)
 from sql_warden.warden import Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
@@ -224,6 +237,33 @@ def query(
             click.echo(note)
 
 
+@cli.command("tables")
+@click.argument("name", required=False)
+@engine_options
+@json_option
+@click.pass_obj
+def tables_command(
+    state: CliState,
+    name: str | None,
+    dsn: str | None,
+    max_rows: int | None,
+    timeout_ms: int | None,
+    profile: str | None,
+    as_json: bool,
+) -> None:
+    """List the tables the profile may query, or describe one: `tables products`."""
+    warden = build_warden(settings(state, dsn, max_rows, timeout_ms), profile)
+    try:
+        if name is None:
+            listed = describe_tables(warden)
+            click.echo(listed.model_dump_json(by_alias=True) if as_json else format_tables(listed))
+        else:
+            one = describe_one_table(warden, name)
+            click.echo(one.model_dump_json(by_alias=True) if as_json else format_table_detail(one))
+    except ToolError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @cli.command()
 @click.option(
     "--transport",
@@ -308,7 +348,7 @@ def validate(state: CliState, path: Path | None) -> None:
         click.echo(line)
 
 
-def describe_tables(profile: ProfileConfig) -> list[str]:
+def describe_profile_tables(profile: ProfileConfig) -> list[str]:
     if profile.tables == EVERYTHING:
         return ["reads every table its role can"]
     assert isinstance(profile.tables, dict)
@@ -337,7 +377,7 @@ def describe_profiles(config: WardenConfig) -> list[str]:
             else "connects with warehouse.dsn"
         )
         lines.append(f"{label}{name}{default}: {where}")
-        lines += [f"               {line}" for line in describe_tables(profile)]
+        lines += [f"               {line}" for line in describe_profile_tables(profile)]
     if config.default_profile is None:
         lines.append("             no default_profile: servers must be given --profile")
     return lines
