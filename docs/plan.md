@@ -366,7 +366,7 @@ profiles:
   that uses it, and nothing records events until 3.2.
 - Tests: integration with a second Testcontainer.
 
-**3.2 Record every request, fail-closed** ✅ done
+**3.2 Record every request, fail-closed** ✅ done (`da2fea4`)
 - Adds the `audit` config section (`dsn`, from the demo stack's `audit` service by default) and
   `ensure_schema()` at startup.
 - Every outcome writes exactly one event: allowed, refused, execution error, timeout. If the
@@ -390,8 +390,23 @@ profiles:
   name and version, e.g. `claude-code 2.1.3`). `session_id` stays empty until 6.1.
   `list_tables` and `describe_table` are not recorded: they run no query.
 
-**3.3 `sql-warden audit tail|show <id>`**
+**3.3 `sql-warden audit tail|show <id>`** ✅ done
 - Tests: CLI output against seeded audit rows.
+- As built: `audit/reader.py` has `AuditReader` (`recent`, `since`, `find`), which turns rows
+  back into `AuditEvent`s. `tail` prints the last `-n` events (20 by default), oldest first,
+  one fixed-width line each (id prefix, local time, query/check, profile, client, result, SQL
+  on one line), with `--profile`, `--decision` and `--json` (one object per line).
+  `tail -f` polls every second. Each poll looks back 10 s and skips ids already printed: an
+  event's time is set when its request finishes, so an event can be written after a later
+  one. `show` takes an id or its first 4+ characters (an ambiguous prefix is an error) and
+  prints everything: the SQL as sent and as run, rewrites, and the trace. A missing table reads
+  as an empty log. Reading needs only the audit DSN; once 9.6 makes the warden's role
+  INSERT-only, `audit` will need a role that can read.
+- Also fixed (from 3.2): a unit test started `sql-warden serve` as a subprocess, which can't
+  get the tests' fake audit sink, so it recorded into the demo stack's audit database, and
+  would fail where there is none (CI). It moved to the integration tests, against the test
+  audit container. The unit test left in its place checks that `serve` exits 1 without an
+  audit database.
 
 ## Phase 4 — Cost gate via the planner
 **4.1 `explain()` for Postgres**

@@ -1,3 +1,4 @@
+from sql_warden.audit.reader import AuditReader
 from sql_warden.audit.sink import (
     AuditError,
     AuditEvent,
@@ -10,6 +11,7 @@ from sql_warden.audit.sink import (
 __all__ = [
     "AuditError",
     "AuditEvent",
+    "AuditReader",
     "AuditSink",
     "Decision",
     "MemoryAuditSink",

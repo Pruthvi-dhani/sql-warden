@@ -1,5 +1,9 @@
+import sys
+from typing import Any
+
+import psycopg
 import pytest
-from mcp import Client
+from mcp import Client, StdioServerParameters
 
 from sql_warden.audit import MemoryAuditSink
 from sql_warden.engines import Column
@@ -63,3 +67,33 @@ async def test_database_errors_reach_the_agent(warehouse: Warehouse) -> None:
         "  SELECT nope FROM products LIMIT 1001",  # the engine's default row cap
         "         ^",
     ]
+
+
+async def test_the_cli_serves_over_stdio(audit_dsn: str) -> None:
+    # No warehouse: listing tools and dry runs work, a real query reports the failure, and both
+    # are recorded, under the name the client gave.
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "sql_warden", "serve", "--dsn", "postgresql://nobody:x@127.0.0.1:1/none"],
+        env={"SQL_WARDEN_AUDIT_DSN": audit_dsn},
+    )
+    async with Client(params) as client:
+        names = {tool.name for tool in (await client.list_tools()).tools}
+        checked = await client.call_tool("check_query", {"sql": "select 1"})
+        ran = await client.call_tool("run_query", {"sql": "select 1"})
+    assert names == {"run_query", "check_query", "list_tables", "describe_table"}
+    assert _structured(checked)["sql"] == "SELECT 1 LIMIT 101"
+    assert ran.is_error is True
+    assert "could not connect to the database" in _structured(ran)["error"]
+    with psycopg.connect(audit_dsn) as conn:
+        recorded = conn.execute(
+            "SELECT dry_run, decision, client FROM audit_events WHERE id = ANY(%s) ORDER BY ts",
+            ([_structured(checked)["audit_id"], _structured(ran)["audit_id"]],),
+        ).fetchall()
+    assert recorded == [(True, "allowed", "mcp 0.1.0"), (False, "failed", "mcp 0.1.0")]
+
+
+def _structured(result: Any) -> dict[str, Any]:
+    assert result.structured_content is not None
+    content: dict[str, Any] = result.structured_content
+    return content

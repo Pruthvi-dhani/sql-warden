@@ -24,8 +24,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 </picture>
 
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
-> work today, and every request is recorded in the audit database. Next: reading the audit
-> log from the CLI. See the [plan](docs/plan.md) for the roadmap.
+> work today, and every request is recorded in the audit database, readable with
+> `sql-warden audit`; that completes Phase 3. Next: the cost check. See the
+> [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -117,9 +118,29 @@ goes away later, allowed queries are refused with `AUDIT_UNAVAILABLE` before the
 warehouse; if a record can't be written after a query ran, its rows are withheld. Nothing is
 answered without a record.
 
+Read it back with `sql-warden audit`:
+
+```text
+$ uv run sql-warden audit tail -n 3
+ID        TIME                 KIND   PROFILE   CLIENT            RESULT                       SQL
+c622c15e  2026-11-06 22:35:32  query  admin     sql-warden-port…  1 row                        select count(*) from employee_salaries
+cd02f965  2026-11-06 22:42:49  query  public    cli               1 row                        select id, name from products where id = 3
+5019a2f1  2026-11-06 22:42:50  check  public    cli               refused TABLE_NOT_ALLOWED    select email from customers
+
+$ uv run sql-warden audit show 5019a2f1
+event    5019a2f1-...
+profile  public
+client   cli
+kind     check (dry run, nothing was executed)
+result   refused by access: TABLE_NOT_ALLOWED (31 ms)
+...
+```
+
 ```bash
-docker exec -it sql-warden-demo-audit-1 psql -U warden_audit -d audit \
-  -c "select ts, client, profile, decision, code, sql from audit_events order by ts desc limit 5"
+uv run sql-warden audit tail -f                          # follow along as an agent works (Ctrl+C stops)
+uv run sql-warden audit tail --profile public --decision refused -n 50
+uv run sql-warden audit tail --json | jq -r .sql          # one JSON object per event
+uv run sql-warden audit show 5019a2f1 --json             # an id, or its first few characters
 ```
 
 #### The checks so far

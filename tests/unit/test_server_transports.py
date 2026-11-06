@@ -1,6 +1,7 @@
 """The MCP server over its real transports: HTTP on a local port, and stdio in a subprocess."""
 
 import json
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -8,7 +9,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from mcp import Client, StdioServerParameters
+from mcp import Client
 
 from sql_warden.audit import MemoryAuditSink
 from sql_warden.server import create_http_app
@@ -84,20 +85,20 @@ class TestHttp:
 
 
 class TestStdio:
-    async def test_the_cli_serves_over_stdio(self) -> None:
-        # No database: listing tools and dry runs work, a real query reports the failure.
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "sql_warden", "serve", "--dsn", UNREACHABLE_DSN],
+    def test_serve_wont_start_without_its_audit_database(self) -> None:
+        # Serving over stdio itself is tested against real databases, in the integration tests.
+        done = subprocess.run(
+            [sys.executable, "-m", "sql_warden", "serve", "--audit-dsn", UNREACHABLE_DSN],
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
         )
-        async with Client(params) as client:
-            names = {tool.name for tool in (await client.list_tools()).tools}
-            checked = await client.call_tool("check_query", {"sql": "select 1"})
-            ran = await client.call_tool("run_query", {"sql": "select 1"})
-        assert names == {"run_query", "check_query", "list_tables", "describe_table"}
-        assert _structured(checked)["sql"] == "SELECT 1 LIMIT 101"
-        assert ran.is_error is True
-        assert "could not connect to the database" in _structured(ran)["error"]
+        assert done.returncode == 1
+        assert done.stdout == ""  # it never spoke MCP
+        assert done.stderr.startswith("Error: audit database at 127.0.0.1:1/none as nobody: ")
+        assert "won't run without its audit database" in done.stderr
 
 
 def _post(url: str, **headers: str) -> tuple[int, dict[str, str]]:

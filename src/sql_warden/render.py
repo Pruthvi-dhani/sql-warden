@@ -1,5 +1,10 @@
 """Plain-text output for the CLI."""
 
+import dataclasses
+import re
+from typing import Any
+
+from sql_warden.audit import AuditEvent
 from sql_warden.engines import Result
 from sql_warden.models import Decision
 from sql_warden.server import TableResponse, TablesResponse
@@ -88,3 +93,109 @@ def format_table_detail(response: TableResponse) -> str:
         else "SELECT * is not allowed: the profile may read only these columns, so name them"
     )
     return "\n".join(lines)
+
+
+# audit tail: fixed widths, so lines printed later by --follow line up with the first ones.
+_AUDIT_COLUMNS = (("ID", 8), ("TIME", 19), ("KIND", 5), ("PROFILE", 8), ("CLIENT", 16))
+_RESULT_WIDTH = 27
+_SQL_WIDTH = 60
+AUDIT_HEADER = "  ".join(
+    [*(name.ljust(width) for name, width in _AUDIT_COLUMNS), "RESULT".ljust(_RESULT_WIDTH), "SQL"]
+)
+
+
+def _clip(text: str, width: int) -> str:
+    """text, cut to width characters with an ellipsis if longer."""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _fit(text: str, width: int) -> str:
+    """text in exactly width characters: padded, or cut with an ellipsis."""
+    return _clip(text, width).ljust(width)
+
+
+def _one_line(sql: str) -> str:
+    return re.sub(r"\s+", " ", sql).strip()
+
+
+def _rows(count: int) -> str:
+    return f"{count} row{'' if count == 1 else 's'}"
+
+
+def audit_result(event: AuditEvent) -> str:
+    """What came of the request, in a few words."""
+    if event.decision == "refused":
+        return f"refused {event.code}"
+    if event.decision == "failed":
+        return "failed"
+    if event.dry_run:
+        return "allowed"
+    rows = _rows(event.rows_returned or 0)
+    return f"{rows}, truncated" if event.truncated else rows
+
+
+def format_audit_line(event: AuditEvent) -> str:
+    """One event as a line of audit tail, under AUDIT_HEADER."""
+    values = (
+        str(event.id)[:8],
+        event.ts.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        "check" if event.dry_run else "query",
+        event.profile,
+        event.client or "-",
+    )
+    cells = [_fit(value, width) for value, (_, width) in zip(values, _AUDIT_COLUMNS, strict=True)]
+    cells.append(_fit(audit_result(event), _RESULT_WIDTH))
+    cells.append(_clip(_one_line(event.sql), _SQL_WIDTH))
+    return "  ".join(cells)
+
+
+def format_audit_event(event: AuditEvent) -> str:
+    """Everything recorded about one request, for audit show."""
+    lines = [f"event    {event.id}"]
+    lines.append(f"time     {event.ts.astimezone().isoformat(sep=' ', timespec='milliseconds')}")
+    lines.append(f"profile  {event.profile}")
+    lines.append(f"client   {event.client or '-'}")
+    if event.session_id is not None:
+        lines.append(f"session  {event.session_id}")
+    kind = "check (dry run, nothing was executed)" if event.dry_run else "query"
+    lines.append(f"kind     {kind}")
+    if event.decision == "refused":
+        result = f"refused by {event.refused_by}: {event.code}"
+    elif event.decision == "failed":
+        result = f"failed: {event.error}"
+    elif event.dry_run:
+        result = "allowed"
+    else:
+        result = f"allowed, {audit_result(event)}"
+    lines.append(f"result   {result} ({event.duration_ms:.0f} ms)")
+    if event.cost_estimate is not None:
+        lines.append(f"cost     {event.cost_estimate:g}")
+    if event.masked_columns:
+        lines.append(f"masked   {', '.join(event.masked_columns)}")
+    lines.append("sql, as sent:")
+    lines += [f"  {line}" for line in event.sql.strip().splitlines()]
+    if event.executed_sql is not None:
+        lines.append("sql, as it would run:" if event.dry_run else "sql, as run:")
+        lines.append(f"  {event.executed_sql}")
+    lines += [f"note: {rewrite}" for rewrite in event.rewrites]
+    lines.append("trace:")
+    width = max((len(str(step["check"])) for step in event.trace), default=0)
+    for step in event.trace:
+        name = str(step["check"]).ljust(width)
+        if step["passed"]:
+            lines.append(f"  ✓ {name}  {float(step['duration_ms']):.1f} ms")
+        else:
+            lines.append(f"  ✗ {name}  {step['code']}: {step['reason']}")
+    return "\n".join(lines)
+
+
+def audit_json(event: AuditEvent) -> dict[str, Any]:
+    """One event as JSON: the audit_events row, with the id and time as strings."""
+    return {
+        **dataclasses.asdict(event),
+        "id": str(event.id),
+        "ts": event.ts.isoformat(),
+        "rewrites": list(event.rewrites),
+        "masked_columns": list(event.masked_columns),
+        "trace": list(event.trace),
+    }

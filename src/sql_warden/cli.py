@@ -1,4 +1,7 @@
+import datetime
+import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +12,7 @@ import uvicorn
 from mcp.server.mcpserver.exceptions import ToolError
 
 from sql_warden import __version__
-from sql_warden.audit import AuditError, AuditEvent, AuditSink, PostgresAuditSink
+from sql_warden.audit import AuditError, AuditEvent, AuditReader, AuditSink, PostgresAuditSink
 from sql_warden.config import (
     EVERYTHING,
     IMPLICIT_PROFILE,
@@ -23,6 +26,10 @@ from sql_warden.config import (
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.profiles import ProfileError, select_profile
 from sql_warden.render import (
+    AUDIT_HEADER,
+    audit_json,
+    format_audit_event,
+    format_audit_line,
     format_decision,
     format_rewrites,
     format_table,
@@ -63,12 +70,16 @@ def resolve_config(path: Path | None) -> tuple[WardenConfig, str]:
         raise click.ClickException(str(exc)) from exc
 
 
-def engine_options[F: Callable[..., Any]](command: F) -> F:
-    command = click.option(
+def audit_dsn_option[F: Callable[..., Any]](command: F) -> F:
+    return click.option(
         "--audit-dsn",
         envvar="SQL_WARDEN_AUDIT_DSN",
         help="Audit database connection string; overrides audit.dsn (env: SQL_WARDEN_AUDIT_DSN).",
     )(command)
+
+
+def engine_options[F: Callable[..., Any]](command: F) -> F:
+    command = audit_dsn_option(command)
     command = click.option(
         "--profile",
         envvar="SQL_WARDEN_PROFILE",
@@ -358,6 +369,117 @@ def serve(
         err=True,
     )
     uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+FOLLOW_INTERVAL_S = 1.0
+FOLLOW_LOOKBACK = datetime.timedelta(seconds=10)
+"""How far back each --follow poll looks. An event's time is set when its request finishes, so
+one can be written after a later one; looking back (and skipping ids already printed) catches
+it."""
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)  # a function of its own, so tests can stand in for the wait
+
+
+def _open_reader(state: CliState, audit_dsn: str | None) -> tuple[AuditReader, str]:
+    config = settings(state, None, None, None, audit_dsn)
+    reader = AuditReader(config.audit.dsn, connect_timeout_s=config.audit.connect_timeout_s)
+    return reader, describe_dsn(config.audit.dsn)
+
+
+@cli.group("audit")
+def audit_group() -> None:
+    """Read the audit log: every query and check sql-warden has answered."""
+
+
+@audit_group.command()
+@click.option(
+    "-n", "--lines", "limit", type=click.IntRange(1, 10_000), default=20, show_default=True
+)
+@click.option("--profile", help="Only events for this profile.")
+@click.option(
+    "--decision",
+    type=click.Choice(["allowed", "refused", "failed"]),
+    help="Only events with this outcome.",
+)
+@click.option(
+    "-f", "--follow", is_flag=True, help="Keep printing events as they are recorded (Ctrl+C stops)."
+)
+@click.option("--json", "as_json", is_flag=True, help="One JSON object per event, one per line.")
+@audit_dsn_option
+@click.pass_obj
+def tail(
+    state: CliState,
+    limit: int,
+    profile: str | None,
+    decision: Any,
+    follow: bool,
+    as_json: bool,
+    audit_dsn: str | None,
+) -> None:
+    """The most recent events, oldest first. `audit show ID` has the details of one."""
+    reader, where = _open_reader(state, audit_dsn)
+
+    def emit(event: AuditEvent) -> None:
+        click.echo(json.dumps(audit_json(event)) if as_json else format_audit_line(event))
+
+    try:
+        events = reader.recent(limit, profile=profile, decision=decision)
+        if not as_json:
+            if events or follow:
+                click.echo(AUDIT_HEADER)
+            else:
+                click.echo("(no audit events)")
+        for event in events:
+            emit(event)
+        if not follow:
+            return
+        # Everything already in the window counts as printed: only new events follow.
+        start = max([e.ts for e in events] + [datetime.datetime.now(datetime.UTC)])
+        seen = {e.id: e.ts for e in reader.since(start - FOLLOW_LOOKBACK, profile=profile)}
+        seen.update({e.id: e.ts for e in events})
+        newest = start
+        while True:
+            _sleep(FOLLOW_INTERVAL_S)
+            for event in reader.since(newest - FOLLOW_LOOKBACK, profile=profile, decision=decision):
+                if event.id not in seen:
+                    emit(event)
+                    seen[event.id] = event.ts
+                    newest = max(newest, event.ts)
+            seen = {id_: ts for id_, ts in seen.items() if ts >= newest - FOLLOW_LOOKBACK}
+    except AuditError as exc:
+        raise click.ClickException(f"audit database at {where}: {exc}") from exc
+    except KeyboardInterrupt:
+        pass  # Ctrl+C is how --follow ends
+    finally:
+        reader.close()
+
+
+@audit_group.command()
+@click.argument("event_id")
+@click.option("--json", "as_json", is_flag=True, help="Print the event as one line of JSON.")
+@audit_dsn_option
+@click.pass_obj
+def show(state: CliState, event_id: str, as_json: bool, audit_dsn: str | None) -> None:
+    """Everything recorded about one request: EVENT_ID is its audit_id, or the start of it."""
+    reader, where = _open_reader(state, audit_dsn)
+    try:
+        matches = reader.find(event_id)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AuditError as exc:
+        raise click.ClickException(f"audit database at {where}: {exc}") from exc
+    finally:
+        reader.close()
+    if not matches:
+        raise click.ClickException(f"no audit event {event_id}")
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"more than one audit event id starts with {event_id}; give more of it"
+        )
+    (event,) = matches
+    click.echo(json.dumps(audit_json(event)) if as_json else format_audit_event(event))
 
 
 @cli.group()
