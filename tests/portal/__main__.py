@@ -9,6 +9,8 @@ import click
 import uvicorn
 
 from sql_warden.cli import CliState, build_warden, engine_options, settings
+from sql_warden.config import IMPLICIT_PROFILE
+from sql_warden.profiles import ProfileError, select_profile
 from tests.portal.app import create_portal_app
 
 
@@ -32,16 +34,28 @@ def main(
     port: int,
     open_browser: bool,
 ) -> None:
-    """Serve the sql-warden test portal on http://127.0.0.1:PORT/ (loopback only)."""
+    """Serve the sql-warden test portal on http://127.0.0.1:PORT/ (loopback only).
+
+    It serves every profile in the config; --profile is the one the page starts on."""
     logging.getLogger("sqlglot").setLevel(logging.ERROR)  # as the CLI does
-    warden = build_warden(settings(CliState(config_path), dsn, max_rows, timeout_ms), profile)
+    config = settings(CliState(config_path), dsn, max_rows, timeout_ms)
+    names = list(config.profiles or [IMPLICIT_PROFILE])
+    if profile is not None:
+        try:
+            select_profile(config, profile)
+        except ProfileError as exc:
+            raise click.ClickException(str(exc)) from exc
+    start = profile or config.default_profile or names[0]
+    wardens = {name: build_warden(config, name) for name in names}
     url = f"http://127.0.0.1:{port}/"
     click.echo(
-        f"sql-warden test portal on {url}, profile {warden.profile} (Ctrl+C stops it)", err=True
+        f"sql-warden test portal on {url}, profiles {', '.join(names)} (Ctrl+C stops it)",
+        err=True,
     )
     if open_browser:
         threading.Timer(0.5, webbrowser.open, (url,)).start()
-    uvicorn.run(create_portal_app(warden), host="127.0.0.1", port=port, log_level="warning")
+    app = create_portal_app(wardens, default=start)
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 
 if __name__ == "__main__":

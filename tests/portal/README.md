@@ -10,13 +10,27 @@ uv run python -m tests.portal                      # opens http://127.0.0.1:8765
 ```
 
 Options are the same as `sql-warden`'s: `--config`, `--dsn`, `--max-rows`, `--timeout-ms`,
-plus `--port` and `--no-open`. The portal only listens on 127.0.0.1.
+`--profile`, plus `--port` and `--no-open`. The portal only listens on 127.0.0.1.
+
+It serves every profile in the config at once. With the example config:
+
+```bash
+uv run python -m tests.portal --config warden.example.yaml                  # starts on public
+uv run python -m tests.portal --config warden.example.yaml --profile admin  # starts on admin
+```
+
+The **profile** picker in the header switches the page to another profile's server (a new
+session; the choice is remembered), and **Compare** shows side by side what each profile would
+decide about the query.
 
 ## Panels
 
 - **Query**: the SQL editor. **Run** calls `run_query`, **Check** calls `check_query` (a dry
   run). ⌘/Ctrl+Enter runs, ⇧⌘/Ctrl+Shift+Enter checks. **Examples** has a query for each kind
-  of refusal.
+  of refusal. **Compare** calls `check_query` under every profile at once, so nothing runs N
+  times.
+- **Compare**: one row per profile: allowed (with the SQL that would run) or refused (with the
+  check, code and reason). The profile the page is on is marked.
 - **Decision**: the verdict, then one line per check that ran (✓/✗, code, reason, time), any
   rewrites (such as an added LIMIT), and the SQL that ran or would run.
 - **Results**: the rows, with NULLs marked and a note when the row cap cut the result off.
@@ -28,17 +42,20 @@ plus `--port` and `--no-open`. The portal only listens on 127.0.0.1.
 - **Console**: every JSON-RPC request and response, newest first. Expand one to see the raw
   JSON.
 
-`?sql=...` in the URL fills the editor, and `&tool=run` or `&tool=check` also submits it, so a
-test query can be bookmarked:
+`?sql=...` in the URL fills the editor, and `&tool=run`, `&tool=check` or `&tool=compare` also
+submits it; `&profile=admin` picks the profile. So a test query can be bookmarked:
 `http://127.0.0.1:8765/?sql=select%20pg_sleep(1)&tool=check`.
 
 ## How it works
 
-`__main__.py` builds the same `Warden` as the CLI and serves `app.py`: the MCP app from
-`sql_warden.server.create_http_app` at `/mcp`, and `index.html` at `/`. Page and endpoint share
-one origin, so no CORS is involved, and the MCP endpoint's loopback-only `Host`/`Origin` checks
-apply to the page like any other client. The page is read on every request, so edits show up
-on reload.
+`__main__.py` builds the same `Warden` as the CLI for every profile, each with its own
+connection and catalog, and serves `app.py`: one MCP app from
+`sql_warden.server.create_http_app` per profile at `/p/<profile>/mcp`, the starting profile's
+also at `/mcp`, the profile list at `/profiles`, and `index.html` at `/`. Page and endpoints
+share one origin, so no CORS is involved, and the MCP endpoints' loopback-only
+`Host`/`Origin` checks apply to the page like any other client. A session belongs to one
+profile's server: another profile's endpoint doesn't know it. The page is read on every
+request, so edits show up on reload.
 
 The page does `initialize`, then `notifications/initialized`, then `tools/call` with the
 `Mcp-Session-Id` it was given. If the server forgets the session (a restart), the next call gets

@@ -24,8 +24,8 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 </picture>
 
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
-> work today, and agents see only the tables and columns their profile allows. Next: a profile
-> picker in the test portal. See the [plan](docs/plan.md) for the roadmap.
+> work today, and agents see only the tables and columns their profile allows; that completes
+> Phase 2. Next: the audit database. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -227,9 +227,13 @@ A browser page for trying sql-warden by hand. It is a real MCP client of the sam
 use, so a query it allows or refuses is allowed or refused for an agent too.
 
 ```bash
-docker compose -f dev/docker-compose.yml up -d     # the demo warehouse, if it isn't running
-uv run python -m tests.portal                      # opens http://127.0.0.1:8765/
+docker compose -f dev/docker-compose.yml up -d              # the demo warehouse, if it isn't running
+uv run python -m tests.portal                               # opens http://127.0.0.1:8765/
+uv run python -m tests.portal --config warden.example.yaml  # with the public and admin profiles
 ```
+
+With profiles, a picker in the header switches between them, and **Compare** shows what every
+profile would decide about the query, side by side.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-allowed-dark.png">

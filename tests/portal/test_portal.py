@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import uvicorn
 from click.testing import CliRunner
 
 from sql_warden.warden import Warden
@@ -22,6 +23,7 @@ from tests.portal.__main__ import main
 from tests.portal.app import PAGE, create_portal_app
 from tests.support import serving
 from tests.unit.conftest import FakeEngine
+from tests.unit.test_access_check import ADMIN, CATALOG, PUBLIC
 
 
 @dataclass
@@ -29,6 +31,8 @@ class PortalClient:
     """Does what index.html does: initialize, notifications/initialized, then tools/call."""
 
     base_url: str
+    endpoint: str = "/mcp"
+    """/mcp for the default profile, /p/<profile>/mcp for any profile."""
     session_id: str | None = None
     protocol_version: str = "2025-06-18"
     next_id: int = 1
@@ -44,7 +48,7 @@ class PortalClient:
             headers["Mcp-Session-Id"] = self.session_id
             headers["MCP-Protocol-Version"] = self.protocol_version
         request = urllib.request.Request(
-            f"{self.base_url}/mcp", json.dumps(message).encode(), headers, method="POST"
+            f"{self.base_url}{self.endpoint}", json.dumps(message).encode(), headers, method="POST"
         )
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
@@ -220,3 +224,117 @@ def test_launcher_reports_a_broken_config(tmp_path: Path) -> None:
     outcome = CliRunner().invoke(main, ["--config", str(bad), "--no-open"])
     assert outcome.exit_code == 1
     assert "version: Input should be 1" in outcome.output
+
+
+@pytest.fixture
+def profiles_url() -> Iterator[str]:
+    wardens = {
+        "public": Warden(FakeEngine(catalog=CATALOG), profile="public", access=PUBLIC),
+        "admin": Warden(FakeEngine(catalog=CATALOG), profile="admin", access=ADMIN),
+    }
+    with serving(create_portal_app(wardens, default="public")) as base_url:
+        yield base_url
+
+
+def _get_json(url: str) -> Any:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return json.loads(response.read())
+
+
+class TestProfiles:
+    def test_the_page_learns_the_profiles(self, profiles_url: str) -> None:
+        assert _get_json(f"{profiles_url}/profiles") == {
+            "profiles": ["public", "admin"],
+            "default": "public",
+        }
+
+    @pytest.mark.parametrize(
+        ("profile", "tables"),
+        [("public", ["products", "orders", "daily"]), ("admin", [t.name for t in CATALOG])],
+    )
+    def test_each_profile_has_its_own_server(
+        self, profiles_url: str, profile: str, tables: list[str]
+    ) -> None:
+        client = PortalClient(profiles_url, endpoint=f"/p/{profile}/mcp")
+        client.connect()
+        listed = client.call_tool("list_tables")["structuredContent"]
+        assert listed["profile"] == profile
+        assert [t["name"] for t in listed["tables"]] == tables
+
+    def test_compare_is_a_check_under_each_profile(self, profiles_url: str) -> None:
+        decisions = {}
+        for profile in ("public", "admin"):
+            client = PortalClient(profiles_url, endpoint=f"/p/{profile}/mcp")
+            client.connect()
+            payload = client.call_tool("check_query", sql="select * from employee_salaries")
+            decisions[profile] = payload["structuredContent"].get("code", "ALLOWED")
+        assert decisions == {"public": "TABLE_NOT_ALLOWED", "admin": "ALLOWED"}
+
+    def test_mcp_is_the_default_profile(self, profiles_url: str) -> None:
+        client = PortalClient(profiles_url)
+        client.connect()
+        assert client.call_tool("list_tables")["structuredContent"]["profile"] == "public"
+
+    def test_a_session_belongs_to_one_profile(self, profiles_url: str) -> None:
+        public = PortalClient(profiles_url, endpoint="/p/public/mcp")
+        public.connect()
+        borrowed = PortalClient(profiles_url, endpoint="/p/admin/mcp", session_id=public.session_id)
+        status, _, _ = borrowed.post(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_tables"}}
+        )
+        assert status == 404
+
+    def test_an_unknown_profile_has_no_server(self, profiles_url: str) -> None:
+        status, _, _ = PortalClient(profiles_url, endpoint="/p/root/mcp").post({})
+        assert status == 404
+
+    def test_the_page_has_the_picker_and_compare(self) -> None:
+        page = PAGE.read_text()
+        for needle in ('id="profile"', 'id="compare"', "/p/${encodeURIComponent(profile)}/mcp"):
+            assert needle in page
+
+
+class TestLauncherProfiles:
+    @pytest.fixture
+    def served(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        apps: list[Any] = []
+        monkeypatch.setattr(uvicorn, "run", lambda app, **_: apps.append(app))
+        return apps
+
+    @pytest.fixture
+    def policy(self, tmp_path: Path) -> Path:
+        path = tmp_path / "warden.yaml"
+        path.write_text(
+            "version: 1\ndefault_profile: public\nprofiles:\n"
+            "  public:\n    tables:\n      public.products: [id]\n"
+            '  admin:\n    tables: "*"\n'
+        )
+        return path
+
+    def test_it_serves_every_profile(self, served: list[Any], policy: Path) -> None:
+        outcome = CliRunner().invoke(main, ["--config", str(policy), "--no-open"])
+        assert outcome.exit_code == 0, outcome.output
+        assert "profiles public, admin" in outcome.output
+        with serving(served[0]) as base_url:
+            assert _get_json(f"{base_url}/profiles") == {
+                "profiles": ["public", "admin"],
+                "default": "public",
+            }
+
+    def test_profile_picks_where_the_page_starts(self, served: list[Any], policy: Path) -> None:
+        CliRunner().invoke(main, ["--config", str(policy), "--no-open", "--profile", "admin"])
+        with serving(served[0]) as base_url:
+            assert _get_json(f"{base_url}/profiles")["default"] == "admin"
+
+    def test_an_unknown_profile_is_an_error(self, served: list[Any], policy: Path) -> None:
+        outcome = CliRunner().invoke(main, ["--config", str(policy), "--no-open", "--profile", "x"])
+        assert outcome.exit_code == 1
+        assert "unknown profile 'x': the config defines public, admin" in outcome.output
+        assert served == []
+
+    def test_without_profiles_there_is_one(self, served: list[Any], tmp_path: Path) -> None:
+        empty = tmp_path / "warden.yaml"
+        empty.write_text("version: 1\n")
+        CliRunner().invoke(main, ["--config", str(empty), "--no-open"])
+        with serving(served[0]) as base_url:
+            assert _get_json(f"{base_url}/profiles") == {"profiles": ["all"], "default": "all"}

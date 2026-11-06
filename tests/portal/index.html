@@ -62,6 +62,11 @@
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
   .hint { color: var(--muted); font-size: 12px; }
   .verdict .profile { font-weight: normal; opacity: .8; }
+  .picker { color: var(--muted); font-size: 12px; }
+  .picker select { padding: 2px 4px; }
+  table.compare td { vertical-align: top; }
+  table.compare code { white-space: pre-wrap; word-break: break-word; }
+  table.compare tr.current td:first-child { box-shadow: inset 3px 0 var(--accent); }
   select { font: inherit; padding: 5px; border-radius: 6px; max-width: 100%;
     border: 1px solid var(--border); background: var(--panel); color: var(--text); }
   code, pre { font-family: var(--mono); font-size: 12.5px; }
@@ -117,6 +122,7 @@
 <header>
   <div class="title">
     <h1>test portal</h1>
+    <label class="picker">profile <select id="profile" aria-label="Profile"></select></label>
     <span id="status">connecting…</span>
     <button id="reconnect" class="link">reconnect</button>
   </div>
@@ -143,11 +149,17 @@
       <div class="row">
         <button id="run" class="primary">Run</button>
         <button id="check">Check</button>
+        <button id="compare" title="Check this query under every profile">Compare</button>
         <select id="examples" aria-label="Example queries">
           <option value="">Examples…</option>
         </select>
         <span class="hint">⌘/Ctrl+Enter runs · ⇧⌘/Ctrl+Shift+Enter checks</span>
       </div>
+    </section>
+
+    <section id="compare-section" hidden>
+      <h2>Compare <span class="hint">a dry run under every profile</span></h2>
+      <div id="compare-results"></div>
     </section>
 
     <section>
@@ -162,7 +174,7 @@
 
     <section>
       <h2>Console <button id="clear-console" class="link">clear</button></h2>
-      <p class="hint">Every JSON-RPC message exchanged with <code>/mcp</code>, newest first.</p>
+      <p class="hint">Every JSON-RPC message exchanged with the profiles' servers (<code>/p/&lt;profile&gt;/mcp</code>), newest first.</p>
       <div id="console" class="console"></div>
     </section>
   </div>
@@ -186,27 +198,12 @@ const EXAMPLES = [
   ["Error: statement timeout", "select count(*) from orders a cross join orders b"],
 ];
 const HISTORY_KEY = "sql-warden-portal-history";
+const PROFILE_KEY = "sql-warden-portal-profile";
+const params = new URLSearchParams(location.search);
 const HISTORY_MAX = 50;
 const CONSOLE_MAX = 200;
 
 // ---------------------------------------------------------------- MCP over Streamable HTTP
-
-const mcp = {
-  sessionId: null,
-  protocolVersion: "2025-06-18",
-  serverInfo: null,
-  nextId: 1,
-  connecting: null,
-};
-
-function headers() {
-  const h = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" };
-  if (mcp.sessionId) {
-    h["Mcp-Session-Id"] = mcp.sessionId;
-    h["MCP-Protocol-Version"] = mcp.protocolVersion;
-  }
-  return h;
-}
 
 // A response is JSON, or a short SSE stream whose data lines carry JSON-RPC messages.
 function parseMessages(contentType, text) {
@@ -220,65 +217,97 @@ function parseMessages(contentType, text) {
   return messages;
 }
 
-async function post(message) {
-  const tool = message.params && message.params.name;
-  logConsole("out", tool ? `${message.method} ${tool}` : message.method, message);
-  let response;
-  try {
-    response = await fetch("/mcp", { method: "POST", headers: headers(), body: JSON.stringify(message) });
-  } catch (exc) {
-    setStatus("cannot reach the portal server — is it still running?", true);
-    logConsole("err", "network error", String(exc));
-    throw exc;
+// One client per profile: each profile's server is at /p/<profile>/mcp, with its own session.
+class McpClient {
+  constructor(profile) {
+    this.profile = profile;
+    this.endpoint = `/p/${encodeURIComponent(profile)}/mcp`;
+    this.sessionId = null;
+    this.protocolVersion = "2025-06-18";
+    this.serverInfo = null;
+    this.nextId = 1;
+    this.connecting = null;
   }
-  const text = await response.text();
-  const messages = response.ok ? parseMessages(response.headers.get("content-type") || "", text) : [];
-  if (!response.ok) logConsole("err", `HTTP ${response.status}`, text || response.statusText);
-  for (const m of messages) logConsole(m.error ? "err" : "in", m.error ? "error" : "result", m);
-  return { response, messages };
-}
 
-async function connect() {
-  mcp.sessionId = null;
-  const { response, messages } = await post({
-    jsonrpc: "2.0", id: mcp.nextId++, method: "initialize",
-    params: {
-      protocolVersion: mcp.protocolVersion,
-      capabilities: {},
-      clientInfo: { name: "sql-warden-portal", version: "1" },
-    },
-  });
-  const reply = messages.find(m => m.result);
-  if (!response.ok || !reply) throw new Error(`initialize failed (HTTP ${response.status})`);
-  mcp.sessionId = response.headers.get("mcp-session-id");
-  mcp.protocolVersion = reply.result.protocolVersion;
-  mcp.serverInfo = reply.result.serverInfo;
-  await post({ jsonrpc: "2.0", method: "notifications/initialized" });
-  const info = mcp.serverInfo ? `${mcp.serverInfo.name} ${mcp.serverInfo.version}` : "server";
-  setStatus(`connected to ${info} · MCP protocol ${mcp.protocolVersion} · session ${(mcp.sessionId || "none").slice(0, 8)}`);
-}
-
-function ensureConnected() {
-  if (mcp.sessionId) return Promise.resolve();
-  mcp.connecting ??= connect().finally(() => { mcp.connecting = null; });
-  return mcp.connecting;
-}
-
-async function callTool(name, args, retried = false) {
-  await ensureConnected();
-  const id = mcp.nextId++;
-  const { response, messages } = await post({
-    jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args },
-  });
-  if (response.status === 404 && !retried) {
-    // The server forgot the session (it restarted, or the session expired): start a new one.
-    mcp.sessionId = null;
-    return callTool(name, args, true);
+  headers() {
+    const h = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" };
+    if (this.sessionId) {
+      h["Mcp-Session-Id"] = this.sessionId;
+      h["MCP-Protocol-Version"] = this.protocolVersion;
+    }
+    return h;
   }
-  const reply = messages.find(m => m.id === id);
-  if (!reply) throw new Error(`no reply to tools/call (HTTP ${response.status})`);
-  if (reply.error) throw new Error(reply.error.message);
-  return reply.result;
+
+  async post(message) {
+    const tool = message.params && message.params.name;
+    const label = `${this.profile} · ${tool ? `${message.method} ${tool}` : message.method}`;
+    logConsole("out", label, message);
+    let response;
+    try {
+      response = await fetch(this.endpoint, { method: "POST", headers: this.headers(), body: JSON.stringify(message) });
+    } catch (exc) {
+      setStatus("cannot reach the portal server — is it still running?", true);
+      logConsole("err", `${this.profile} · network error`, String(exc));
+      throw exc;
+    }
+    const text = await response.text();
+    const messages = response.ok ? parseMessages(response.headers.get("content-type") || "", text) : [];
+    if (!response.ok) logConsole("err", `${this.profile} · HTTP ${response.status}`, text || response.statusText);
+    for (const m of messages) logConsole(m.error ? "err" : "in", `${this.profile} · ${m.error ? "error" : "result"}`, m);
+    return { response, messages };
+  }
+
+  async connect() {
+    this.sessionId = null;
+    const { response, messages } = await this.post({
+      jsonrpc: "2.0", id: this.nextId++, method: "initialize",
+      params: {
+        protocolVersion: this.protocolVersion,
+        capabilities: {},
+        clientInfo: { name: "sql-warden-portal", version: "1" },
+      },
+    });
+    const reply = messages.find(m => m.result);
+    if (!response.ok || !reply) throw new Error(`initialize failed (HTTP ${response.status})`);
+    this.sessionId = response.headers.get("mcp-session-id");
+    this.protocolVersion = reply.result.protocolVersion;
+    this.serverInfo = reply.result.serverInfo;
+    await this.post({ jsonrpc: "2.0", method: "notifications/initialized" });
+  }
+
+  ensureConnected() {
+    if (this.sessionId) return Promise.resolve();
+    this.connecting ??= this.connect().finally(() => { this.connecting = null; });
+    return this.connecting;
+  }
+
+  async callTool(name, args, retried = false) {
+    await this.ensureConnected();
+    const id = this.nextId++;
+    const { response, messages } = await this.post({
+      jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args },
+    });
+    if (response.status === 404 && !retried) {
+      // The server forgot the session (it restarted, or the session expired): start a new one.
+      this.sessionId = null;
+      return this.callTool(name, args, true);
+    }
+    const reply = messages.find(m => m.id === id);
+    if (!reply) throw new Error(`no reply to tools/call (HTTP ${response.status})`);
+    if (reply.error) throw new Error(reply.error.message);
+    return reply.result;
+  }
+}
+
+const portal = { profiles: [], current: null, clients: new Map() };
+
+function client(profile = portal.current) {
+  if (!portal.clients.has(profile)) portal.clients.set(profile, new McpClient(profile));
+  return portal.clients.get(profile);
+}
+
+function callTool(name, args) {
+  return client().callTool(name, args);
 }
 
 // ---------------------------------------------------------------- DOM helpers
@@ -482,10 +511,71 @@ async function refreshTables() {
 }
 
 async function reconnect() {
-  mcp.sessionId = null;
+  const current = client();
+  current.sessionId = null;
   setStatus("connecting…");
-  try { await ensureConnected(); await refreshTables(); }
-  catch (exc) { setStatus(`not connected: ${exc.message || exc}`, true); }
+  try {
+    await current.ensureConnected();
+    const info = current.serverInfo ? `${current.serverInfo.name} ${current.serverInfo.version}` : "server";
+    setStatus(`connected to ${info} · MCP protocol ${current.protocolVersion} · session ${(current.sessionId || "none").slice(0, 8)}`);
+    await refreshTables();
+  } catch (exc) {
+    setStatus(`not connected: ${exc.message || exc}`, true);
+  }
+}
+
+// ---------------------------------------------------------------- Profiles
+
+async function loadProfiles() {
+  const response = await fetch("/profiles");
+  const { profiles, default: fallback } = await response.json();
+  portal.profiles = profiles;
+  let stored = null;
+  try { stored = localStorage.getItem(PROFILE_KEY); } catch { /* private mode */ }
+  const wanted = params.get("profile") || stored;
+  portal.current = profiles.includes(wanted) ? wanted : fallback;
+  $("profile").replaceChildren(...profiles.map(name => el("option", { value: name }, name)));
+  $("profile").value = portal.current;
+  $("profile").disabled = profiles.length < 2;
+  $("compare").disabled = profiles.length < 2;
+}
+
+function switchProfile(name) {
+  portal.current = name;
+  try { localStorage.setItem(PROFILE_KEY, name); } catch { /* private mode */ }
+  const url = new URL(location.href);
+  url.searchParams.set("profile", name);
+  history.replaceState(null, "", url);
+  reconnect();
+}
+
+// Check the query under every profile at once: a dry run, so nothing runs N times.
+async function compare() {
+  const sql = $("sql").value;
+  if (!sql.trim()) return;
+  $("compare-section").hidden = false;
+  const box = $("compare-results");
+  box.replaceChildren(el("span", { class: "empty" }, "checking under every profile…"));
+  const outcomes = await Promise.all(portal.profiles.map(async profile => {
+    try { return [profile, await client(profile).callTool("check_query", { sql })]; }
+    catch (exc) { return [profile, exc]; }
+  }));
+  box.replaceChildren(el("table", { class: "compare" },
+    el("thead", {}, el("tr", {}, el("th", {}, "profile"), el("th", {}, "decision"), el("th", {}, "why, or what would run"))),
+    el("tbody", {}, outcomes.map(([profile, result]) => {
+      const payload = result instanceof Error ? null : result.structuredContent;
+      const [tone, verdict, detail] = !payload
+        ? ["bad", "error", result instanceof Error ? result.message : textOf(result)]
+        : payload.refused
+          ? ["bad", `✗ ${payload.code}`, `${payload.check}: ${payload.reason}`]
+          : ["ok", "✓ allowed", payload.sql];
+      return el("tr", { class: profile === portal.current ? "current" : "" },
+        el("td", {}, el("strong", {}, profile)),
+        el("td", {}, el("span", { class: `tag ${tone}` }, verdict)),
+        el("td", {}, el("code", {}, detail)),
+      );
+    })),
+  ));
 }
 
 // ---------------------------------------------------------------- Wiring
@@ -501,17 +591,21 @@ $("sql").addEventListener("keydown", e => {
   }
 });
 $("refresh-tables").addEventListener("click", refreshTables);
+$("profile").addEventListener("change", e => switchProfile(e.target.value));
+$("compare").addEventListener("click", compare);
 $("reconnect").addEventListener("click", reconnect);
 $("clear-history").addEventListener("click", () => { saveHistory([]); renderHistory(); });
 $("clear-console").addEventListener("click", () => $("console").replaceChildren());
 
 renderHistory();
-// ?sql=... fills the editor; &tool=run or &tool=check also submits it, for bookmarkable tests.
-const params = new URLSearchParams(location.search);
+// ?sql=... fills the editor; &tool=run, check or compare also submits it, and &profile=...
+// picks the profile, for bookmarkable tests.
 if (params.has("sql")) $("sql").value = params.get("sql");
-reconnect().then(() => {
+loadProfiles().then(reconnect).then(() => {
+  if (!params.has("sql")) return;
+  if (params.get("tool") === "compare") return compare();
   const tool = { run: "run_query", check: "check_query" }[params.get("tool")];
-  if (tool && params.has("sql")) submit(tool);
+  if (tool) submit(tool);
 });
 </script>
 </body>

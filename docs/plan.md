@@ -322,7 +322,7 @@ profiles:
   Integration: the `public` profile's own DB role refuses `employee_salaries` even if the
   access check is bypassed (defence in depth).
 
-**2.4 Discoverability** ✅ done
+**2.4 Discoverability** ✅ done (`3c220ce`)
 - `list_tables` and the new `describe_table` (MCP and CLI `tables`) show only what the active
   profile allows, with masked columns flagged once Phase 5 lands. A `public` agent never
   learns that `employee_salaries` exists.
@@ -334,12 +334,17 @@ profiles:
   payloads.
 - Tests: unit tests (unapproved objects never appear, per profile) and a CLI snapshot.
 
-**2.5 Portal: profile picker**
+**2.5 Portal: profile picker** ✅ done
 - The portal serves one MCP endpoint per profile (`/p/<profile>/mcp`, each its own `Warden`),
   and a picker in the header switches between them, starting a new session. The Tables panel
   follows the picked profile.
 - A **Compare** button runs the current query under every profile and shows one row each
   (allowed / refused with code and reason), so `public` and `admin` can be seen side by side.
+- As built: `/mcp` stays the starting profile's (so existing clients work), `/profiles` lists
+  them for the picker, and the launcher builds a `Warden` per profile (own DSN and catalog);
+  `--profile` picks where the page starts. Compare uses `check_query`, a dry run, so a slow
+  query doesn't run once per profile. The picker's choice is remembered and `?profile=` /
+  `&tool=compare` make it bookmarkable. A session belongs to one profile's server.
 - Tests: the portal HTTP tests call each profile's endpoint and get that profile's tables and
   decisions; an integration test runs the comparison against the Testcontainer.
 

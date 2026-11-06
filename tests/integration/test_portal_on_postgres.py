@@ -1,6 +1,8 @@
 import pytest
 
+from sql_warden.config import EVERYTHING
 from sql_warden.engines.postgres import PostgresEngine
+from sql_warden.profiles import Access
 from sql_warden.warden import Warden
 from tests.integration.conftest import Warehouse
 from tests.portal.app import create_portal_app
@@ -24,3 +26,22 @@ def test_the_portal_against_the_seeded_warehouse(warehouse: Warehouse) -> None:
     assert rows["rows"] == [[1, "Product 1"], [2, "Product 2"], [3, "Product 3"]]
     assert rows["truncated"] is True
     assert refused["structuredContent"]["code"] == "FUNCTION_NOT_ALLOWED"
+
+
+def test_compare_public_and_admin_on_the_seeded_warehouse(warehouse: Warehouse) -> None:
+    public = Access({("public", "products"): frozenset({"id", "name", "price_cents"})})
+    wardens = {
+        "public": Warden(PostgresEngine(warehouse.public_dsn), profile="public", access=public),
+        "admin": Warden(
+            PostgresEngine(warehouse.reader_dsn), profile="admin", access=Access(EVERYTHING)
+        ),
+    }
+    sql = "select title, count(*) from employee_salaries group by title"
+    outcomes = {}
+    with serving(create_portal_app(wardens)) as base_url:
+        for profile in wardens:
+            client = PortalClient(base_url, endpoint=f"/p/{profile}/mcp")
+            client.connect()
+            outcomes[profile] = client.call_tool("run_query", sql=sql)["structuredContent"]
+    assert outcomes["public"]["code"] == "TABLE_NOT_ALLOWED"
+    assert outcomes["admin"]["result"]["row_count"] > 0
