@@ -198,7 +198,7 @@ class TestCli:
     def test_validate_lists_the_profiles(self, policy: Path) -> None:
         outcome = CliRunner().invoke(cli, ["config", "validate"])
         assert outcome.exit_code == 0, outcome.output
-        assert outcome.output.splitlines()[6:] == [
+        assert outcome.output.splitlines()[7:] == [
             "  profiles:  public (default): connects to db/warehouse as warden_public",
             "               reads public.products (id, name, price_cents)",
             "             admin: connects with warehouse.dsn",

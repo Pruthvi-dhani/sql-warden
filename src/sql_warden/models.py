@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sql_warden.engines import EngineError, Result
+from sql_warden.engines import CostEstimate, EngineError, Result
 
 
 class RefusalCode(StrEnum):
@@ -26,6 +26,14 @@ class RefusalCode(StrEnum):
     """* (or a whole-row reference) on a table the profile may read only some columns of."""
     CATALOG_UNAVAILABLE = "CATALOG_UNAVAILABLE"
     """The tables and columns could not be read, so access could not be checked."""
+    COST_TOO_HIGH = "COST_TOO_HIGH"
+    """The planner estimates the query costs more than the profile's max_total_cost."""
+    COST_UNAVAILABLE = "COST_UNAVAILABLE"
+    """The database couldn't be reached, or took too long to plan the query, so its cost is
+    unknown. Worth retrying later."""
+    PLAN_FAILED = "PLAN_FAILED"
+    """The database rejected the query while planning it: a type error, a table its role
+    can't read, a constant like 1/0. Its error says why; retrying won't help."""
     AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
     """The request could not be recorded, so nothing it would return is returned."""
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -60,6 +68,10 @@ class Decision:
     """How the checks changed the query, e.g. "added LIMIT 101"."""
     profile: str | None = None
     """The profile the query was checked for; the Warden always sets it."""
+    cost: CostEstimate | None = None
+    """The planner's estimate, once the cost check got one, whether or not it refused."""
+    cost_limit: float | None = None
+    """The profile's max_total_cost, when there is an estimate to hold against it."""
     audit_id: uuid.UUID | None = None
     """The audit record of this request; None only when it could not be written."""
 

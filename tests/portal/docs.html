@@ -153,11 +153,12 @@
       <tbody>
         <tr data-field="refused"><td><code>refused</code></td><td>Whether a check refused the query. Nothing runs when it did.</td></tr>
         <tr data-field="profile"><td><code>profile</code></td><td>The profile the query was checked for.</td></tr>
-        <tr data-field="check"><td><code>check</code></td><td>The check that refused it: <code>parse</code>, <code>shape</code>, <code>access</code> or <code>audit</code>.</td></tr>
+        <tr data-field="check"><td><code>check</code></td><td>The check that refused it: <code>parse</code>, <code>shape</code>, <code>access</code>, <code>cost</code> or <code>audit</code>.</td></tr>
         <tr data-field="code"><td><code>code</code></td><td>Why, as a code an agent can act on: see <a href="#codes">Refusal codes</a>.</td></tr>
         <tr data-field="reason"><td><code>reason</code></td><td>Why, in a sentence, naming the offending table, column or function.</td></tr>
         <tr data-field="sql"><td><code>sql</code></td><td>The SQL that ran, or would run: regenerated from the checked query, comments dropped, rewrites applied.</td></tr>
         <tr data-field="rewrites"><td><code>rewrites</code></td><td>How sql-warden changed the query, e.g. <code>added LIMIT 101 (row cap 100 + 1 to detect truncation)</code>.</td></tr>
+        <tr data-field="cost"><td><code>cost</code></td><td>The database planner's estimate, from <code>EXPLAIN</code> (never run): <code>total_cost</code> against the profile's <code>max_total_cost</code>, <code>est_rows</code> (rows it expects to return) and <code>top_node</code>, the step that adds the most cost. On an allowed query, and on one the cost check refused.</td></tr>
         <tr data-field="trace"><td><code>trace</code></td><td>One step per check that ran, in order: <code>check</code>, <code>passed</code>, <code>code</code>, <code>reason</code>, <code>duration_ms</code>. Checks after a refusal don't run.</td></tr>
         <tr data-field="result"><td><code>result</code></td><td><code>run_query</code> only: <code>columns</code>, <code>rows</code>, <code>row_count</code>, <code>truncated</code> (more rows than the row cap; only the first are here) and <code>duration_ms</code>. Exact numbers come as strings, times in ISO 8601.</td></tr>
         <tr data-field="error"><td><code>error</code></td><td>The database's error, when the query was allowed but failed to run (a timeout, a division by zero).</td></tr>
@@ -186,6 +187,9 @@
         <tr data-code="COLUMN_NOT_ALLOWED"><td><code>COLUMN_NOT_ALLOWED</code></td><td>access</td><td>A column the profile may not read, in any clause.</td></tr>
         <tr data-code="STAR_NOT_ALLOWED"><td><code>STAR_NOT_ALLOWED</code></td><td>access</td><td><code>*</code> (or a whole-row reference) on a table the profile may read only some columns of. The reason lists them.</td></tr>
         <tr data-code="CATALOG_UNAVAILABLE"><td><code>CATALOG_UNAVAILABLE</code></td><td>access</td><td>The tables and columns couldn't be read, so access couldn't be checked.</td></tr>
+        <tr data-code="COST_TOO_HIGH"><td><code>COST_TOO_HIGH</code></td><td>cost</td><td>The planner estimates the query costs more than the profile's <code>max_total_cost</code>. The reason gives the estimate, the limit and the costliest step, e.g. <code>Nested Loop</code> for a cross join.</td></tr>
+        <tr data-code="COST_UNAVAILABLE"><td><code>COST_UNAVAILABLE</code></td><td>cost</td><td>The database couldn't be reached, or took too long to plan the query, so its cost is unknown. Worth retrying later.</td></tr>
+        <tr data-code="PLAN_FAILED"><td><code>PLAN_FAILED</code></td><td>cost</td><td>The database rejected the query while planning it, before anything ran: a type error, a table its role can't read, a constant like <code>1/0</code>. Its error says why; retrying won't help.</td></tr>
         <tr data-code="AUDIT_UNAVAILABLE"><td><code>AUDIT_UNAVAILABLE</code></td><td>audit</td><td>The request couldn't be recorded in the audit log, so nothing it would return is returned.</td></tr>
         <tr data-code="INTERNAL_ERROR"><td><code>INTERNAL_ERROR</code></td><td>any</td><td>A check crashed. The query is refused rather than let through unchecked.</td></tr>
       </tbody>

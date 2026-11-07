@@ -95,7 +95,7 @@ def _refusal(sql: str, access: Access | None = PUBLIC) -> tuple[str, str]:
 def test_allowed(sql: str, runs: str | None) -> None:
     decision = _decide(sql)
     assert decision.allowed, decision.refused_by
-    assert [step.check for step in decision.trace] == ["parse", "shape", "access"]
+    assert [step.check for step in decision.trace] == ["parse", "shape", "access", "cost"]
     if runs is not None:
         assert decision.sql == runs
 
@@ -193,7 +193,7 @@ class TestEveryTable:
 class TestNoRules:
     def test_the_implicit_profile_has_no_access_check(self) -> None:
         decision = _decide("select * from employee_salaries", access=None, profile="all")
-        assert [step.check for step in decision.trace] == ["parse", "shape"]
+        assert [step.check for step in decision.trace] == ["parse", "shape", "cost"]
         assert decision.sql == "SELECT * FROM employee_salaries LIMIT 101"
 
     def test_a_profile_that_lists_no_tables_reads_nothing(self) -> None:

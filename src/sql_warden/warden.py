@@ -8,10 +8,18 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sql_warden.audit import AuditError, AuditEvent, AuditSink
 from sql_warden.catalog import Catalog
-from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, ShapeConfig
+from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, CostConfig, ShapeConfig
 from sql_warden.engines import Engine, EngineError, Table
 from sql_warden.models import Decision, QueryOutcome, Refusal, RefusalCode, TraceEntry
-from sql_warden.pipeline import AccessCheck, Check, CheckContext, ParseCheck, Pipeline, ShapeCheck
+from sql_warden.pipeline import (
+    AccessCheck,
+    Check,
+    CheckContext,
+    CostCheck,
+    ParseCheck,
+    Pipeline,
+    ShapeCheck,
+)
 from sql_warden.pipeline.access import DEFAULT_SCHEMAS
 from sql_warden.profiles import Access
 
@@ -35,6 +43,7 @@ class Warden:
         checks: Sequence[Check] = (),
         profile: str = IMPLICIT_PROFILE,
         access: Access | None = None,
+        cost: CostConfig | None = None,
     ) -> None:
         self.engine = engine
         self.audit = audit
@@ -50,7 +59,11 @@ class Warden:
             if access is not None
             else []
         )
-        self.pipeline = Pipeline([ParseCheck(), shape_check, *access_checks, *checks])
+        # Last of the built-in checks: the planner sees only SQL the others approved.
+        self.cost_check = CostCheck(engine, cost or CostConfig(), profile=profile)
+        self.pipeline = Pipeline(
+            [ParseCheck(), shape_check, *access_checks, self.cost_check, *checks]
+        )
 
     def check(self, sql: str, *, client: str | None = None) -> Decision:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
@@ -88,12 +101,12 @@ class Warden:
     def _decide(self, sql: str) -> Decision:
         ctx = CheckContext(sql=sql, dialect=self.dialect)
         decision = replace(self.pipeline.run(ctx), profile=self.profile)
+        if ctx.cost is not None:  # kept on a refusal too: the audit record shows the estimate
+            limit = self.cost_check.limits.max_total_cost
+            decision = replace(decision, cost=ctx.cost, cost_limit=limit)
         if not decision.allowed:
             return decision
-        # What runs is the tree the checks approved, regenerated, never the raw text: nothing
-        # the parser read differently from the database, or skipped as a comment, gets through.
-        final_sql = ctx.statements[0].sql(dialect=self.dialect, comments=False)
-        return replace(decision, sql=final_sql, rewrites=tuple(ctx.rewrites))
+        return replace(decision, sql=ctx.sql_to_run(), rewrites=tuple(ctx.rewrites))
 
     def _recorded(
         self,
@@ -150,6 +163,7 @@ class Warden:
             reason=refusal.reason if refusal else None,
             error=None if error is None else str(error),
             client=client,
+            cost_estimate=None if decision.cost is None else decision.cost.total_cost,
             rows_returned=None if result is None else len(result.rows),
             truncated=None if result is None else result.truncated,
         )

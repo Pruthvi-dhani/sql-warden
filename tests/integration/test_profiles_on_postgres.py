@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from mcp import Client
 
 from sql_warden.catalog import Catalog
-from sql_warden.cli import EXIT_ERROR, EXIT_REFUSED, build_warden, cli
+from sql_warden.cli import EXIT_REFUSED, build_warden, cli
 from sql_warden.config import load_config
 from sql_warden.engines import QueryFailed
 from sql_warden.engines.postgres import PostgresEngine
@@ -83,8 +83,11 @@ class TestCli:
     def test_the_role_still_refuses_when_the_rules_are_too_wide(self, policy: Path) -> None:
         # Defence in depth: loose's rules allow * on products, its role has three columns.
         code, output = self._query(policy, "select * from products", "--profile", "loose")
-        assert code == EXIT_ERROR
-        assert "Error: permission denied for table products" in output
+        assert code == EXIT_REFUSED  # by the database, while the cost check had it planned
+        assert (
+            "PLAN_FAILED: the database rejected the query while planning it: permission denied "
+            "for table products"
+        ) in output
 
     def test_admin_can(self, policy: Path) -> None:
         code, output = self._query(
@@ -100,7 +103,7 @@ class TestCli:
         code, output = self._query(
             policy, "select * from products", "--profile", "loose", "--dsn", warehouse.admin_dsn
         )
-        assert code == EXIT_ERROR
+        assert code == EXIT_REFUSED
         assert "permission denied for table products" in output
 
 

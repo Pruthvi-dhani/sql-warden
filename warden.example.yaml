@@ -17,6 +17,14 @@ warehouse:
   max_rows: 100                # rows returned per query; more are cut off and flagged
   connect_timeout_s: 5
 
+# A query the database's planner estimates above max_total_cost is refused before it runs
+# (COST_TOO_HIGH). sql-warden asks with EXPLAIN, which plans a query without running it. The
+# units are the planner's own: in Postgres, reading one page from disk in sequence costs 1. On
+# the demo data, a full scan of the 1M-row orders table costs about 20,000, and a count over
+# orders cross-joined with itself about 10^10.
+cost:
+  max_total_cost: 1000000
+
 # Every request is recorded here before anything is returned. Always Postgres, on its own
 # instance; sql-warden won't start without it, and refuses queries while it is unreachable.
 audit:
@@ -44,6 +52,10 @@ shape:
 # tables is what a profile may query: "*" for every table its role can read, or
 # schema.table → "*" (every column, including ones added later) or a list of columns.
 # A profile that lists no tables can read nothing. SELECT * needs "*" for the table.
+#
+# A profile can also set its own max_rows (instead of warehouse.max_rows) and its own cost
+# limits (any it leaves out come from the cost section). Like its dsn, they are policy:
+# --max-rows doesn't change a profile's own row cap.
 default_profile: public
 profiles:
   public:          # an agent released to customers
@@ -51,5 +63,9 @@ profiles:
     dsn: postgresql://warden_public:${WARDEN_PUBLIC_PASSWORD:-warden_public}@localhost:5433/warehouse
     tables:
       public.products: [id, name, price_cents]
+    max_rows: 50
+    cost:
+      max_total_cost: 10000
   admin:           # internal admins
     tables: "*"
+    max_rows: 1000

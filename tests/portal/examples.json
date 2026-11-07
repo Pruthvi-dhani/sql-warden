@@ -119,6 +119,38 @@
       "expect": "PARSE_ERROR"
     },
     {
+      "group": "Refused by the cost check",
+      "title": "Counting a cross join",
+      "profile": "admin",
+      "sql": "select count(*) from orders a cross join orders b",
+      "expect": "COST_TOO_HIGH",
+      "look": "The planner prices it at about 10^10 before anything runs; the reason names the costliest step, the Nested Loop."
+    },
+    {
+      "group": "Refused by the cost check",
+      "title": "A full scan is fine",
+      "profile": "admin",
+      "sql": "select sum(quantity) from orders",
+      "expect": "allowed",
+      "look": "The Decision panel's estimated cost: about 15,000 of the 1,000,000 allowed."
+    },
+    {
+      "group": "Refused by the cost check",
+      "title": "A tighter limit for public",
+      "profile": "public",
+      "sql": "select count(*) from products a, products b, products c",
+      "expect": "COST_TOO_HIGH",
+      "look": "public may spend 10,000; press Compare: admin's limit of 1,000,000 lets it through."
+    },
+    {
+      "group": "Refused by the cost check",
+      "title": "An error the database finds while planning",
+      "profile": "admin",
+      "sql": "select 1 / 0",
+      "expect": "PLAN_FAILED",
+      "look": "Postgres works out the constant while planning it, so the query is refused before it runs."
+    },
+    {
       "group": "Access: the public profile",
       "title": "The columns public may read",
       "profile": "public",
@@ -166,18 +198,11 @@
     },
     {
       "group": "Fails when run",
-      "title": "A statement timeout",
-      "profile": "admin",
-      "sql": "select count(*) from orders a cross join orders b",
-      "expect": "failed",
-      "look": "Allowed, then cancelled after warehouse.statement_timeout_ms (5 s)."
-    },
-    {
-      "group": "Fails when run",
       "title": "A database error",
       "profile": "admin",
-      "sql": "select 1 / 0",
-      "expect": "failed"
+      "sql": "select 100 / (id - 1) from products order by id",
+      "expect": "failed",
+      "look": "Allowed and planned, then the database fails on the first row: the error comes back as is."
     }
   ]
 }

@@ -35,8 +35,9 @@ decide about the query.
   every profile at once, so nothing runs N times.
 - **Compare**: one row per profile: allowed (with the SQL that would run) or refused (with the
   check, code and reason). The profile the page is on is marked.
-- **Decision**: the verdict, then one line per check that ran (✓/✗, code, reason, time), any
-  rewrites (such as an added LIMIT), and the SQL that ran or would run.
+- **Decision**: the verdict, then one line per check that ran (✓/✗, code, reason, time), the
+  planner's estimated cost against the profile's limit (with the costliest step), any rewrites
+  (such as an added LIMIT), and the SQL that ran or would run.
 - **Results**: the rows, with NULLs marked and a note when the row cap cut the result off.
 - **Tables**: from `list_tables`, so only what the server's profile may query. Click a table to
   query it (`select *` where the profile may read every column, the allowed columns otherwise),

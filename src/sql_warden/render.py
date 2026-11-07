@@ -7,6 +7,7 @@ from typing import Any
 from sql_warden.audit import AuditEvent
 from sql_warden.engines import Result
 from sql_warden.models import Decision
+from sql_warden.pipeline.cost import format_cost
 from sql_warden.server import TableResponse, TablesResponse
 
 
@@ -30,10 +31,24 @@ def format_decision(decision: Decision, *, dry_run: bool) -> str:
         )
     else:
         lines.append("→ allowed" + (f" ({profile})" if profile else ""))
+    if decision.allowed:
+        lines += format_cost_line(decision)
     lines += [f"  {note}" for note in format_rewrites(decision)]
     if dry_run and decision.sql is not None:
         lines.append(f"  would run: {decision.sql}")
     return "\n".join(lines)
+
+
+def format_cost_line(decision: Decision) -> list[str]:
+    """The planner's estimate against the limit, for an allowed query. A refusal by the cost
+    check says it in its reason."""
+    cost, limit = decision.cost, decision.cost_limit
+    if cost is None or limit is None:
+        return []
+    return [
+        f"  cost: {format_cost(cost.total_cost)} of {format_cost(limit)} allowed "
+        f"(most of it: {cost.top_node})"
+    ]
 
 
 def format_rewrites(decision: Decision) -> list[str]:
@@ -169,7 +184,7 @@ def format_audit_event(event: AuditEvent) -> str:
         result = f"allowed, {audit_result(event)}"
     lines.append(f"result   {result} ({event.duration_ms:.0f} ms)")
     if event.cost_estimate is not None:
-        lines.append(f"cost     {event.cost_estimate:g}")
+        lines.append(f"cost     {format_cost(event.cost_estimate)}")
     if event.masked_columns:
         lines.append(f"masked   {', '.join(event.masked_columns)}")
     lines.append("sql, as sent:")

@@ -39,15 +39,22 @@ def test_a_refused_query_never_reaches_the_database_and_exits_2(warehouse: Wareh
     assert output.splitlines()[2] == "1000000"
 
 
-def test_a_database_error_is_clean_and_exits_1(warehouse: Warehouse) -> None:
+def test_an_error_found_while_planning_is_a_refusal(warehouse: Warehouse) -> None:
     code, output = _invoke(warehouse, "query", "select nope from products")
-    assert code == EXIT_ERROR
-    assert output.splitlines() == [
-        'Error: column "nope" does not exist',
+    assert code == EXIT_REFUSED
+    assert output.splitlines()[2:6] == [
+        '✗ cost   PLAN_FAILED: the database rejected the query while planning it: column "nope" '
+        "does not exist",
         "  SELECT nope FROM products LIMIT 101",
         "         ^",
         'HINT: Perhaps you meant to reference the column "products.name".',
     ]
+
+
+def test_an_error_found_while_running_is_clean_and_exits_1(warehouse: Warehouse) -> None:
+    code, output = _invoke(warehouse, "query", "select 100 / (id - 1) from products order by id")
+    assert code == EXIT_ERROR
+    assert output.splitlines() == ["Error: division by zero"]
 
 
 def test_json_output_for_a_script(warehouse: Warehouse) -> None:
@@ -61,5 +68,10 @@ def test_json_output_for_a_script(warehouse: Warehouse) -> None:
     assert payload["result"]["rows"] == [[10000]]
 
     code, output = _invoke(warehouse, "query", "select 1 / 0", "--json")
+    assert code == EXIT_REFUSED  # Postgres works out the constant while planning
+    assert json.loads(output)["code"] == "PLAN_FAILED"
+    code, output = _invoke(
+        warehouse, "query", "select 100 / (id - 1) from products order by id", "--json"
+    )
     assert code == EXIT_ERROR
     assert json.loads(output)["error"] == "division by zero"

@@ -119,6 +119,7 @@ class TestValidate:
             "  audit:     postgres at localhost:5434/audit as warden_audit",
             "  shape:     up to 4 joins, subqueries up to 3 deep",
             "             LIMIT added or lowered to the row cap",
+            "  cost:      refused above an estimated 1,000,000",
             "  profiles:  ! none defined: every server uses the implicit profile 'all',",
             "             which can read everything the warehouse role can",
         ]

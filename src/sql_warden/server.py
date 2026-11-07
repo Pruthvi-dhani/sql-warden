@@ -29,7 +29,9 @@ sql-warden runs read-only SQL against a governed database. Every query goes thro
 before it runs; a refused query comes back with the check, a code and a reason, so you can
 fix it and try again. Only single SELECT statements are allowed. Results are capped: if a
 query has no LIMIT, or one above the cap, sql-warden adds or lowers it and says so in
-`rewrites`; `truncated` tells you whether rows were cut off. Use list_tables to see what you
+`rewrites`; `truncated` tells you whether rows were cut off. A query the database's planner
+estimates as too expensive is refused (COST_TOO_HIGH), with the costliest step named:
+filter on indexed columns or aggregate less. Use list_tables to see what you
 can query, describe_table for one table's columns, and check_query to test a query without
 running it. Tables and columns that aren't listed can't be queried. SELECT * works only on
 tables with `all_columns: true`; elsewhere, name the columns."""
@@ -44,6 +46,17 @@ class TraceStep(BaseModel):
     code: str | None = None
     reason: str | None = None
     duration_ms: float
+
+
+class CostInfo(BaseModel):
+    total_cost: float
+    """The planner's estimate for the whole query, in its own units."""
+    max_total_cost: float
+    """The profile's limit: a query estimated above it is refused with COST_TOO_HIGH."""
+    est_rows: int
+    """The rows the planner expects the query to return."""
+    top_node: str
+    """The step of the plan that adds the most cost, e.g. "Seq Scan on orders"."""
 
 
 class QueryRows(BaseModel):
@@ -66,6 +79,9 @@ class QueryResponse(BaseModel):
     sql: str | None = None
     """The SQL that ran, or would run: the checked query, regenerated, with any rewrites."""
     rewrites: list[str] = []
+    cost: CostInfo | None = None
+    """The planner's estimate, once the cost check got one: on an allowed query, and on one
+    the cost check refused."""
     trace: list[TraceStep]
     result: QueryRows | None = None
     error: str | None = None
@@ -132,6 +148,14 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
         reason=refusal.reason if refusal else None,
         sql=decision.sql,
         rewrites=list(decision.rewrites),
+        cost=None
+        if decision.cost is None or decision.cost_limit is None
+        else CostInfo(
+            total_cost=round(decision.cost.total_cost, 2),
+            max_total_cost=decision.cost_limit,
+            est_rows=decision.cost.est_rows,
+            top_node=decision.cost.top_node,
+        ),
         trace=[TraceStep.model_validate(trace_step(entry)) for entry in decision.trace],
         result=None
         if result is None
@@ -183,8 +207,8 @@ def create_server(warden: Warden) -> MCPServer:
 
     @server.tool(annotations=READ_ONLY)
     def check_query(sql: str, ctx: Context[Any, Any]) -> Annotated[CallToolResult, QueryResponse]:
-        """Dry run: say whether a SQL query would be allowed, and the exact SQL that would run,
-        without touching the database."""
+        """Dry run: say whether a SQL query would be allowed, its estimated cost, and the exact
+        SQL that would run, without running it. The database only plans it."""
         decision = warden.check(sql, client=client_name(ctx))
         return tool_result(describe(decision), is_error=decision.audit_id is None)
 

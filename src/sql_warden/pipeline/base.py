@@ -5,6 +5,7 @@ from typing import Protocol
 
 from sqlglot import exp
 
+from sql_warden.engines import CostEstimate
 from sql_warden.models import Decision, Refusal, RefusalCode, TraceEntry
 
 
@@ -17,6 +18,14 @@ class CheckContext:
     statements: list[exp.Expr] = field(default_factory=list)
     rewrites: list[str] = field(default_factory=list)
     """Checks that change the tree say how here."""
+    cost: CostEstimate | None = None
+    """The planner's estimate, set by the cost check."""
+
+    def sql_to_run(self) -> str:
+        """The SQL that runs if the query is allowed: the tree as the checks left it,
+        regenerated, never the raw text, so nothing the parser read differently from the
+        database, or skipped as a comment, gets through."""
+        return self.statements[0].sql(dialect=self.dialect, comments=False)
 
 
 class Check(Protocol):

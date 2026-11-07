@@ -5,10 +5,16 @@ can change it: the tools take SQL, never a profile.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
-from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, ProfileConfig, WardenConfig
+from sql_warden.config import (
+    EVERYTHING,
+    IMPLICIT_PROFILE,
+    CostConfig,
+    ProfileConfig,
+    WardenConfig,
+)
 
 Columns = Literal["*"] | frozenset[str]
 """Every column of a table, including ones added later, or just these."""
@@ -55,6 +61,17 @@ class Profile:
     """True when warden.yaml defines no profiles and this is the implicit `all`."""
     access: Access | None = None
     """What the profile may read; None for the implicit `all`, which has no table rules."""
+    max_rows: int | None = None
+    """The profile's row cap; None to use warehouse.max_rows."""
+    cost: CostConfig = field(default_factory=CostConfig)
+    """The cost limits: the profile's own, filled in from the top-level cost section."""
+
+
+def profile_cost(config: WardenConfig, profile: ProfileConfig) -> CostConfig:
+    """The profile's cost limits: what it sets, and the top-level section's for the rest."""
+    if profile.cost is None:
+        return config.cost
+    return config.cost.model_copy(update=profile.cost.model_dump(exclude_unset=True))
 
 
 def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
@@ -67,7 +84,9 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
                 f"unknown profile '{name}': no profiles are configured, so the only one is "
                 f"'{IMPLICIT_PROFILE}'"
             )
-        return Profile(IMPLICIT_PROFILE, warehouse_dsn, own_dsn=False, implicit=True)
+        return Profile(
+            IMPLICIT_PROFILE, warehouse_dsn, own_dsn=False, implicit=True, cost=config.cost
+        )
 
     known = ", ".join(config.profiles)
     name = name or config.default_profile
@@ -84,4 +103,6 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
         profile.dsn or warehouse_dsn,
         own_dsn=profile.dsn is not None,
         access=Access.from_config(profile),
+        max_rows=profile.max_rows,
+        cost=profile_cost(config, profile),
     )

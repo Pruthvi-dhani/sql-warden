@@ -24,7 +24,8 @@ from sql_warden.config import (
     load_config,
 )
 from sql_warden.engines.postgres import PostgresEngine
-from sql_warden.profiles import ProfileError, select_profile
+from sql_warden.pipeline.cost import format_cost
+from sql_warden.profiles import ProfileError, profile_cost, select_profile
 from sql_warden.render import (
     AUDIT_HEADER,
     audit_json,
@@ -161,7 +162,8 @@ def build_warden(
     engine = PostgresEngine(
         active.dsn,
         statement_timeout_ms=warehouse.statement_timeout_ms,
-        max_rows=warehouse.max_rows,
+        # Like its dsn, a profile's own row cap is policy: --max-rows doesn't change it.
+        max_rows=active.max_rows or warehouse.max_rows,
         connect_timeout_s=warehouse.connect_timeout_s,
     )
     return Warden(
@@ -171,6 +173,7 @@ def build_warden(
         shape=config.shape,
         profile=active.name,
         access=active.access,
+        cost=active.cost,
     )
 
 
@@ -521,6 +524,7 @@ def validate(state: CliState, path: Path | None) -> None:
             f"             {len(shape.allowed_functions)} extra functions allowed, "
             f"{len(shape.denied_functions)} extra denied"
         )
+    click.echo(f"  cost:      refused above an estimated {format_cost(loaded.cost.max_total_cost)}")
     for line in describe_profiles(loaded):
         click.echo(line)
 
@@ -555,6 +559,13 @@ def describe_profiles(config: WardenConfig) -> list[str]:
         )
         lines.append(f"{label}{name}{default}: {where}")
         lines += [f"               {line}" for line in describe_profile_tables(profile)]
+        if profile.max_rows is not None:
+            lines.append(f"               max {profile.max_rows} rows")
+        if profile.cost is not None:
+            cost = profile_cost(config, profile)
+            lines.append(
+                f"               refused above an estimated {format_cost(cost.max_total_cost)}"
+            )
     if config.default_profile is None:
         lines.append("             no default_profile: servers must be given --profile")
     return lines

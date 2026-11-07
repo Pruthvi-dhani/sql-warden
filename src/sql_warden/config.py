@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeInt,
+    PositiveFloat,
     PositiveInt,
     ValidationError,
     field_validator,
@@ -132,6 +133,15 @@ class ShapeConfig(_Section):
         return next((pattern for pattern in patterns if fnmatchcase(name, pattern)), None)
 
 
+class CostConfig(_Section):
+    """Limits on what a query may cost, from the database planner's estimate (EXPLAIN): a
+    query estimated above them is refused before it runs."""
+
+    max_total_cost: PositiveFloat = 1_000_000
+    """In the planner's units (Postgres: reading one page in sequence costs 1). A full scan of
+    a 1M-row table costs about 20,000; a cross join of two, about 10^10."""
+
+
 class AuditConfig(_Section):
     """Where every request is recorded. Always Postgres, whatever the warehouse engine, and on
     its own instance: the warehouse role must not be able to touch the audit log. There is no
@@ -155,6 +165,10 @@ class ProfileConfig(_Section):
     tables: Literal["*"] | dict[str, ColumnRule] = Field(default_factory=dict)
     """What the profile may read: "*" for every table, or schema.table → "*" or columns.
     A profile that lists no tables can read nothing."""
+    max_rows: PositiveInt | None = None
+    """The profile's row cap, instead of warehouse.max_rows."""
+    cost: CostConfig | None = None
+    """The profile's cost limits; any it leaves out come from the top-level cost section."""
 
     @field_validator("tables", mode="before")
     @classmethod
@@ -203,6 +217,7 @@ class WardenConfig(_Section):
     version: Literal[1]
     warehouse: WarehouseConfig = WarehouseConfig()
     shape: ShapeConfig = ShapeConfig()
+    cost: CostConfig = CostConfig()
     audit: AuditConfig = AuditConfig()
     profiles: dict[str, ProfileConfig] | None = None
     """None: no profiles are defined, and the one profile is the implicit `all`."""

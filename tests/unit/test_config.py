@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from sql_warden.config import (
     DEFAULT_DSN,
     ConfigError,
+    CostConfig,
     ShapeConfig,
     WardenConfig,
     default_config,
@@ -125,6 +126,7 @@ def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) 
     )
     assert example.default_profile == "public"
     assert example.profiles is not None
+    assert example.cost == defaults.cost
     assert {name: (p.dsn, p.tables) for name, p in example.profiles.items()} == {
         "public": (
             "postgresql://warden_public:warden_public@localhost:5433/warehouse",
@@ -132,6 +134,9 @@ def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) 
         ),
         "admin": (None, "*"),
     }
+    public, admin = example.profiles["public"], example.profiles["admin"]
+    assert (public.max_rows, public.cost) == (50, CostConfig(max_total_cost=10_000))
+    assert (admin.max_rows, admin.cost) == (1000, None)
 
 
 def test_config_is_immutable() -> None:

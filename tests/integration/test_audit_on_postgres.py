@@ -23,10 +23,13 @@ from tests.integration.conftest import Warehouse
 pytestmark = pytest.mark.integration
 
 
-def _invoke(warehouse: Warehouse, *args: str) -> tuple[int, dict[str, Any]]:
-    outcome = CliRunner().invoke(
-        cli, [*args, "--json"], env={"SQL_WARDEN_DSN": warehouse.reader_dsn}
-    )
+def _invoke(
+    warehouse: Warehouse, *args: str, config: Path | None = None
+) -> tuple[int, dict[str, Any]]:
+    env = {"SQL_WARDEN_DSN": warehouse.reader_dsn}
+    if config is not None:
+        env["SQL_WARDEN_CONFIG"] = str(config)
+    outcome = CliRunner().invoke(cli, [*args, "--json"], env=env)
     return outcome.exit_code, json.loads(outcome.output)
 
 
@@ -92,17 +95,41 @@ def test_a_dry_run_is_one_row(warehouse: Warehouse, audit_dsn: str) -> None:
 
 
 def test_a_database_error_is_one_row(warehouse: Warehouse, audit_dsn: str) -> None:
-    sql = _tagged("select 1 / 0")
+    sql = _tagged("select 100 / (id - 1) from products order by id")
     code, payload = _invoke(warehouse, "query", sql)
     assert code == EXIT_ERROR
     (row,) = _rows(audit_dsn, sql)
     assert (row["decision"], row["error"]) == ("failed", "division by zero")
     assert str(row["id"]) == payload["audit_id"]
+    assert 0 < row["cost_estimate"] < 100  # planned before it ran
 
 
-def test_a_timeout_is_one_row(warehouse: Warehouse, audit_dsn: str) -> None:
+def test_a_query_too_costly_is_one_row(warehouse: Warehouse, audit_dsn: str) -> None:
     sql = _tagged("select count(*) from orders a cross join orders b")
-    code, payload = _invoke(warehouse, "query", sql, "--timeout-ms", "100")
+    code, payload = _invoke(warehouse, "query", sql)
+    assert code == EXIT_REFUSED
+    (row,) = _rows(audit_dsn, sql)
+    assert (row["decision"], row["refused_by"], row["code"]) == ("refused", "cost", "COST_TOO_HIGH")
+    assert row["cost_estimate"] > 1e9
+    assert row["cost_estimate"] == payload["cost"]["total_cost"]
+    assert row["executed_sql"] is None
+
+
+def test_an_error_while_planning_is_one_row(warehouse: Warehouse, audit_dsn: str) -> None:
+    sql = _tagged("select 1 / 0")
+    code, payload = _invoke(warehouse, "query", sql)
+    assert code == EXIT_REFUSED
+    (row,) = _rows(audit_dsn, sql)
+    assert (row["decision"], row["code"], row["cost_estimate"]) == ("refused", "PLAN_FAILED", None)
+    assert row["reason"] == payload["reason"]
+
+
+def test_a_timeout_is_one_row(warehouse: Warehouse, audit_dsn: str, tmp_path: Path) -> None:
+    # A limit high enough to let the cross join through the cost check, to the timeout.
+    config = tmp_path / "warden.yaml"
+    config.write_text("version: 1\ncost:\n  max_total_cost: 1000000000000000\n")
+    sql = _tagged("select count(*) from orders a cross join orders b")
+    code, payload = _invoke(warehouse, "query", sql, "--timeout-ms", "100", config=config)
     assert code == EXIT_ERROR
     (row,) = _rows(audit_dsn, sql)
     assert row["decision"] == "failed"

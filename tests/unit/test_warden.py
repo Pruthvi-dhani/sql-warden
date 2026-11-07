@@ -17,11 +17,11 @@ class RefuseEverything:
         return Refusal(RefusalCode.INTERNAL_ERROR, "test refusal")
 
 
-def test_parse_and_shape_always_run_first() -> None:
+def test_the_built_in_checks_always_run_first() -> None:
     decision = Warden(FakeEngine(), audit=MemoryAuditSink(), checks=[RefuseEverything()]).check(
         "select 1"
     )
-    assert [entry.check for entry in decision.trace] == ["parse", "shape", "refuse-all"]
+    assert [entry.check for entry in decision.trace] == ["parse", "shape", "cost", "refuse-all"]
 
 
 def test_check_never_executes() -> None:

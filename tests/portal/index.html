@@ -90,6 +90,8 @@
   .trace .ms { color: var(--muted); font-size: 12px; font-family: var(--mono); }
   .label { color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
   .notes { margin: 0; padding-left: 18px; color: var(--warn); }
+  .cost { font-size: 13px; } .cost.over strong { color: var(--bad); }
+  .cost code { font-size: 12px; }
   .table-wrap { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: 6px; }
   table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12.5px; }
   th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -346,6 +348,15 @@ function renderDecision(tool, result) {
     el("span", { class: "ms" }, `${step.duration_ms.toFixed(2)} ms`),
   ))));
 
+  if (payload.cost) {
+    const c = payload.cost;
+    const over = c.total_cost > c.max_total_cost;
+    box.append(el("div", { class: "label" }, "Estimated cost (from the planner; nothing runs to get it)"),
+      el("div", { class: `cost ${over ? "over" : ""}` },
+        el("strong", {}, formatCost(c.total_cost)), ` of ${formatCost(c.max_total_cost)} allowed`,
+        el("span", { class: "hint" }, ` · about ${c.est_rows.toLocaleString()} ${c.est_rows === 1 ? "row" : "rows"} · costliest step: `),
+        el("code", {}, c.top_node)));
+  }
   if (payload.error) box.append(el("div", { class: "label" }, "Database error"), el("pre", {}, payload.error));
   if (payload.rewrites && payload.rewrites.length) {
     box.append(el("div", { class: "label" }, "Rewrites"), el("ul", { class: "notes" }, payload.rewrites.map(r => el("li", {}, r))));
@@ -353,6 +364,13 @@ function renderDecision(tool, result) {
   if (payload.sql) {
     box.append(el("div", { class: "label" }, tool === "check_query" ? "Would run" : "Ran"), el("pre", {}, payload.sql));
   }
+}
+
+// As the CLI prints costs: 8.44, 500, 14,543, 12,847,522,946.
+function formatCost(value) {
+  return value < 1000 && !Number.isInteger(value)
+    ? value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : Math.round(value).toLocaleString("en-US");
 }
 
 function renderResults(tool, result) {

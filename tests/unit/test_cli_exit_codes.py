@@ -86,7 +86,7 @@ class TestJson:
         assert payload["refused"] is False
         assert payload["sql"] == "SELECT 1 LIMIT 101"
         assert payload["rewrites"] == ["added LIMIT 101 (row cap 100 + 1 to detect truncation)"]
-        assert [step["check"] for step in payload["trace"]] == ["parse", "shape"]
+        assert [step["check"] for step in payload["trace"]] == ["parse", "shape", "cost"]
         assert "result" not in payload
         assert engines[0].executed == []
 

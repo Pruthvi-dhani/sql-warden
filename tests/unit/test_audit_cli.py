@@ -159,7 +159,7 @@ class TestShow:
             _event(session_id="s-1", cost_estimate=1234.5, masked_columns=("customers.ssn",))
         )
         assert "session  s-1" in text
-        assert "cost     1234.5" in text
+        assert "cost     1,234" in text
         assert "masked   customers.ssn" in text
         assert "session" not in format_audit_event(_event())
 

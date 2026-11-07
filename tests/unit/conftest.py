@@ -22,6 +22,8 @@ class FakeEngine:
     error: EngineError | None = None
     catalog: tuple[Table, ...] = (PRODUCTS,)
     estimate: CostEstimate = CHEAP
+    explain_error: EngineError | None = None
+    """Raised by explain(); error is for execute() and tables()."""
     executed: list[str] = field(default_factory=list)
     explained: list[str] = field(default_factory=list)
 
@@ -38,8 +40,8 @@ class FakeEngine:
 
     def explain(self, sql: str) -> CostEstimate:
         self.explained.append(sql)
-        if self.error is not None:
-            raise self.error
+        if self.explain_error is not None:
+            raise self.explain_error
         return self.estimate
 
 

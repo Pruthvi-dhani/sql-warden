@@ -409,7 +409,7 @@ profiles:
   audit database.
 
 ## Phase 4 — Cost gate via the planner
-**4.1 `explain()` for Postgres** ✅ done
+**4.1 `explain()` for Postgres** ✅ done (`6748f67`)
 - Runs `EXPLAIN (FORMAT JSON)`, never ANALYZE, inside a read-only transaction, on the
   regenerated SQL, and returns `CostEstimate(total_cost, est_rows, top_node, raw)`.
 - Tests: integration on the 1M-row `orders` table. An indexed lookup is cheap, a cross join is
@@ -431,14 +431,38 @@ profiles:
   `execute()`'s named cursor was never affected; a new test pins that down too.
 - Not called by the `Warden` yet: that's 4.2. Open for 4.2: with the LIMIT always injected,
   the root's `est_rows` is never above the row cap + 1, so `max_estimated_rows` needs a
-  different number to mean anything.
+  different number to mean anything (decided in 4.2: dropped).
 
-**4.2 Cost check**
+**4.2 Cost check** ✅ done
 - Uses the policy values `max_total_cost` and `max_estimated_rows` (new `cost` config
   section, with per-profile overrides, so `public` can be held to tighter limits than `admin`). It refuses with `COST_TOO_HIGH`, giving the estimate against the limit and the
   dominant plan node (e.g. "Seq Scan on orders"). The estimate is written to the audit record.
 - Tests: unit tests with a fake engine at the boundaries (equal to the limit passes);
   integration tests where the cartesian join is refused and the filtered query passes.
+- As built: `max_estimated_rows` was dropped. The rows a query returns are already capped
+  exactly by `max_rows` (the LIMIT is always added or lowered), so an estimate of them adds
+  nothing, and the planner's cost already includes the rows a query works through. Rows across
+  queries are Phase 6's budget. Instead, a profile can set its own `max_rows` (it wins over
+  `--max-rows`, like its `dsn`), so `public` returns 50 rows where `admin` returns 1000.
+- `cost.max_total_cost` defaults to 1,000,000: a full scan of the 1M-row `orders` costs about
+  15–30k, the cross-join count about 10^10. A profile's `cost` replaces the top-level values
+  it names. There is no switch to turn the check off.
+- `pipeline/cost.py`'s `CostCheck` runs after shape and access, so only approved SQL reaches
+  even the planner, and it explains exactly the SQL that would run (`CheckContext.sql_to_run()`,
+  which the `Warden` now uses too). Equal to the limit passes. The decision carries the
+  estimate and the limit, on a refusal by the cost check too; the audit record's
+  `cost_estimate`, the MCP response's `cost` (`total_cost`, `max_total_cost`, `est_rows`,
+  `top_node`), the CLI (`cost: 8.44 of 1,000,000 allowed (most of it: …)`) and the portal's
+  Decision panel show it.
+- Two more codes, because EXPLAIN can fail. `PLAN_FAILED`: the database rejected the query while
+  planning it (types, privileges, constants like `1/0`): the error running it would have
+  given, now before anything runs, so such errors are refusals (exit 2) rather than failures
+  (exit 1). `COST_UNAVAILABLE`: the database couldn't be reached or planning timed out;
+  worth retrying. Either way the query doesn't run. A dry run (`check`, `check_query`) now
+  connects to the database to plan the query; it still executes nothing.
+- The portal's examples gained a cost group (the cross-join count, a full scan, public's tighter
+  limit, a plan-time error); the timeout example went, since the cost check now stops that
+  query first. `config validate` shows the limit and each profile's own.
 
 ## Phase 5 — Masking sensitive columns
 **5.1 Mask strategies**

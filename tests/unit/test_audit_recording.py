@@ -60,7 +60,7 @@ class TestOneEventPerRequest:
         assert event.rewrites == ("added LIMIT 101 (row cap 100 + 1 to detect truncation)",)
         assert (event.rows_returned, event.truncated) == (1, False)
         assert (event.refused_by, event.code, event.reason, event.error) == (None,) * 4
-        assert [step["check"] for step in event.trace] == ["parse", "shape"]
+        assert [step["check"] for step in event.trace] == ["parse", "shape", "cost"]
         assert event.duration_ms > 0
 
     def test_a_dry_run(self) -> None:
@@ -176,7 +176,8 @@ class TestFailClosed:
         assert refused.refusal.reason == (
             "could not record the audit event: gone; the query ran, but its results are withheld"
         )
-        assert [entry.check for entry in outcome.decision.trace] == ["parse", "shape", "audit"]
+        checks = [entry.check for entry in outcome.decision.trace]
+        assert checks == ["parse", "shape", "cost", "audit"]
 
     def test_a_failed_database_error_is_withheld_too(self) -> None:
         engine = FakeEngine(error=QueryFailed("relation does not exist"))

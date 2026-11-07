@@ -233,7 +233,13 @@ def test_run_returns_what_the_page_renders(client: PortalClient, engine: FakeEng
     assert result["isError"] is False
     assert payload["sql"] == "SELECT 1 AS id LIMIT 101"
     assert payload["rewrites"]
-    assert [step["check"] for step in payload["trace"]] == ["parse", "shape"]
+    assert [step["check"] for step in payload["trace"]] == ["parse", "shape", "cost"]
+    assert payload["cost"] == {
+        "total_cost": 1.0,
+        "max_total_cost": 1_000_000,
+        "est_rows": 1,
+        "top_node": "Result",
+    }
     assert payload["result"]["rows"] == [[1]]
     assert engine.executed == ["SELECT 1 AS id LIMIT 101"]
 

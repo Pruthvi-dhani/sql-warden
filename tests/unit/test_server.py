@@ -69,7 +69,7 @@ class TestRunQuery:
             "truncated": False,
             "duration_ms": 1.0,
         }
-        assert [step["check"] for step in payload["trace"]] == ["parse", "shape"]
+        assert [step["check"] for step in payload["trace"]] == ["parse", "shape", "cost"]
         assert all(step["passed"] for step in payload["trace"])
         assert engine.executed == ["SELECT 1 AS id LIMIT 101"]
 

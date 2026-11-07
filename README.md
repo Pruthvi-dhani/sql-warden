@@ -24,8 +24,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 </picture>
 
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
-> work today, and every request is recorded in the audit database, readable with
-> `sql-warden audit`; that completes Phase 3. Next: the cost check. See the
+> work today; every request is recorded in the audit database, readable with
+> `sql-warden audit`; and the database planner's cost estimate gates every query before it
+> runs, which completes Phase 4. Next: masking sensitive columns. See the
 > [plan](docs/plan.md) for the roadmap.
 
 ## Development
@@ -69,24 +70,31 @@ this stack running.
 uv run sql-warden check "select id, name from products"          # dry run: one line per check
 uv run sql-warden check "select (1"                              # ✗ parse  PARSE_ERROR: Expecting ) ...
 uv run sql-warden query "select id, name, price_cents from products order by id" --max-rows 5
-uv run sql-warden query "select count(*) from orders a cross join orders b" --timeout-ms 500
+uv run sql-warden check "select count(*) from orders a cross join orders b"  # ✗ cost  COST_TOO_HIGH ...
 ```
 
-`check` runs the checks without touching the database. `query` runs the same checks and, if
-they all pass, executes the SQL. Every query runs in a read-only transaction with a statement
-timeout and a row cap.
+`check` runs the checks and executes nothing: the database only plans the query, for the cost
+check. `query` runs the same checks and, if they all pass, executes the SQL. Every query runs
+in a read-only transaction with a statement timeout and a row cap.
 
 What runs is the query as sql-warden parsed and checked it, regenerated from that tree, not
 the text that was sent. Comments are dropped, so nothing the parser skipped over can reach the
-database. A database error points into that SQL:
+database. A database error points into that SQL. Postgres finds many while it plans a query,
+which the cost check has it do first, so they come back as a refusal before anything runs:
 
 ```text
 $ uv run sql-warden query "select nope from products"
-Error: column "nope" does not exist
+✓ parse  0.2 ms
+✓ shape  0.1 ms
+✗ cost   PLAN_FAILED: the database rejected the query while planning it: column "nope" does not exist
   SELECT nope FROM products LIMIT 101
          ^
 HINT: Perhaps you meant to reference the column "products.name".
+→ refused by cost (profile all)
 ```
+
+An error only found while running, such as a division by zero on some row, is reported as
+the database gave it (`Error: division by zero`, exit 1).
 
 #### In scripts
 
@@ -188,10 +196,29 @@ uv run sql-warden audit show 5019a2f1 --json             # an id, or its first f
   $ uv run sql-warden check "select id from orders"
   ✓ parse  0.3 ms
   ✓ shape  0.1 ms
-  → allowed (dry run, nothing was executed)
+  ✓ cost   1.4 ms
+  → allowed (profile all; dry run, nothing was executed)
+    cost: 1.85 of 1,000,000 allowed (most of it: Seq Scan on orders)
     note: added LIMIT 101 (row cap 100 + 1 to detect truncation)
     would run: SELECT id FROM orders LIMIT 101
   ```
+- **cost**: the database planner's estimate for the SQL that would run, from `EXPLAIN`, which
+  plans a query without running it (never `EXPLAIN ANALYZE`). A query estimated above
+  `cost.max_total_cost` (1,000,000 by default; a profile can set its own) is refused before it
+  runs, and the reason names the step that costs the most. The estimate is in the response
+  (`cost`) and the audit record. On the demo data:
+
+  | Try                                                           | Estimate        | Result                  |
+  |---------------------------------------------------------------|-----------------|-------------------------|
+  | `select * from orders where id = 42`                          | about 8         | allowed                 |
+  | `select sum(quantity) from orders` (a full scan)              | about 15,000    | allowed                 |
+  | `select count(*) from orders a cross join orders b`           | about 10^10     | `COST_TOO_HIGH` (Nested Loop) |
+  | `select 1 / 0`                                                | none: Postgres fails it while planning | `PLAN_FAILED` |
+
+  A LIMIT is priced in: `select * from orders a cross join orders b` with the added
+  `LIMIT 101` stops after 101 rows, and the planner knows it (cost about 2). If the database
+  can't be reached to plan the query, it's refused with `COST_UNAVAILABLE`: a query whose cost
+  is unknown doesn't run.
 
 ### MCP server
 
@@ -312,8 +339,8 @@ Which config is used, highest priority first:
 Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
 enforces it. Today that is `warehouse` (connection, timeout, row cap), `audit` (the audit
-database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists) and
-`profiles`;
+database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists), `cost`
+(`max_total_cost`) and `profiles`;
 [warden.example.yaml](warden.example.yaml) documents every key.
 
 ### Profiles
@@ -329,8 +356,12 @@ profiles:
     dsn: postgresql://warden_public:${WARDEN_PUBLIC_PASSWORD:-warden_public}@localhost:5433/warehouse
     tables:
       public.products: [id, name, price_cents]
+    max_rows: 50                 # its own row cap
+    cost:
+      max_total_cost: 10000      # and a tighter cost limit
   admin:       # internal admins: connects with warehouse.dsn
     tables: "*"
+    max_rows: 1000
 ```
 
 ```bash
@@ -347,8 +378,10 @@ profile that lists no tables can read nothing. `SELECT *` (and a whole-row refer
 
 The profile comes from `--profile`, else `SQL_WARDEN_PROFILE`, else `default_profile`. An
 unknown name is an error, never a fallback. A profile's own `dsn` wins over `--dsn` and
-`SQL_WARDEN_DSN`, so a flag can't widen what it reads. Every decision names its profile: the
-CLI prints it, and `--json` and the MCP results carry `profile`.
+`SQL_WARDEN_DSN`, so a flag can't widen what it reads. Its own `max_rows` wins over
+`--max-rows` in the same way. Its `cost` limits replace the top-level ones it names, and the
+rest come from the `cost` section. Every decision names its profile: the CLI prints it, and
+`--json` and the MCP results carry `profile`.
 
 `list_tables`, `describe_table` and `sql-warden tables` show only what the profile may query,
 so an agent never learns that the other tables exist. Each table says `all_columns`: whether
