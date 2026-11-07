@@ -1,0 +1,183 @@
+{
+  "about": "The test portal's example queries, shown on /docs. Each names the profile it is for (from warden.example.yaml) and what sql-warden does with it: allowed, failed (allowed, but the database fails to run it) or the refusal code. tests/integration/test_portal_on_postgres.py checks every one against the seeded warehouse.",
+  "examples": [
+    {
+      "group": "Allowed",
+      "title": "A simple select",
+      "profile": "admin",
+      "sql": "select id, name, price_cents from products order by id",
+      "expect": "allowed",
+      "look": "The Decision panel: parse, shape and access all pass, and a LIMIT 101 is added."
+    },
+    {
+      "group": "Allowed",
+      "title": "A join and an aggregate",
+      "profile": "admin",
+      "sql": "select p.name, sum(o.quantity) as sold\nfrom orders o join products p on p.id = o.product_id\ngroup by p.name order by sold desc limit 10",
+      "expect": "allowed"
+    },
+    {
+      "group": "Allowed",
+      "title": "A LIMIT above the row cap is lowered",
+      "profile": "admin",
+      "sql": "select id from orders limit 5000",
+      "expect": "allowed",
+      "look": "The rewrite note, and the Results footer saying the rows were cut off."
+    },
+    {
+      "group": "Allowed",
+      "title": "Comments never reach the database",
+      "profile": "admin",
+      "sql": "select name from products where id = 7 /* ; delete from orders */",
+      "expect": "allowed",
+      "look": "The SQL that ran: regenerated from the checked query, without the comment."
+    },
+    {
+      "group": "Allowed",
+      "title": "A profile that may read everything",
+      "profile": "admin",
+      "sql": "select title, count(*) from employee_salaries group by title order by title",
+      "expect": "allowed",
+      "look": "Press Compare: public may not read this table."
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "DELETE",
+      "profile": "admin",
+      "sql": "delete from orders",
+      "expect": "NOT_A_SELECT"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "Stacked statements",
+      "profile": "admin",
+      "sql": "select 1; delete from orders",
+      "expect": "MULTIPLE_STATEMENTS"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "A data-modifying CTE",
+      "profile": "admin",
+      "sql": "with gone as (delete from orders returning *)\nselect count(*) from gone",
+      "expect": "NOT_READ_ONLY"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "FOR UPDATE",
+      "profile": "admin",
+      "sql": "select id from orders for update",
+      "expect": "NOT_READ_ONLY"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "pg_sleep",
+      "profile": "admin",
+      "sql": "select pg_sleep(60)",
+      "expect": "FUNCTION_NOT_ALLOWED"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "SQL hidden in a string",
+      "profile": "admin",
+      "sql": "select query_to_xml('select * from employee_salaries', true, true, '')",
+      "expect": "FUNCTION_NOT_ALLOWED"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "A function that isn't standard SQL",
+      "profile": "admin",
+      "sql": "select age(created_at) from customers",
+      "expect": "FUNCTION_NOT_ALLOWED",
+      "look": "The reason says how to allow it: shape.allowed_functions in warden.yaml."
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "Too many joins",
+      "profile": "admin",
+      "sql": "select count(*)\nfrom orders o\njoin customers c on c.id = o.customer_id\njoin products p on p.id = o.product_id\njoin orders o2 on o2.id = o.id\njoin customers c2 on c2.id = o2.customer_id\njoin products p2 on p2.id = o2.product_id",
+      "expect": "TOO_MANY_JOINS"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "Subqueries nested too deep",
+      "profile": "admin",
+      "sql": "select * from (select * from (select * from (select * from (select id from products) a) b) c) d",
+      "expect": "SUBQUERY_TOO_DEEP"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "A LIMIT it can't enforce",
+      "profile": "admin",
+      "sql": "select id from orders limit all",
+      "expect": "INVALID_LIMIT"
+    },
+    {
+      "group": "Refused by the shape check",
+      "title": "A parse error",
+      "profile": "admin",
+      "sql": "select (1",
+      "expect": "PARSE_ERROR"
+    },
+    {
+      "group": "Access: the public profile",
+      "title": "The columns public may read",
+      "profile": "public",
+      "sql": "select name, price_cents from products order by price_cents desc limit 5",
+      "expect": "allowed"
+    },
+    {
+      "group": "Access: the public profile",
+      "title": "A table public may not read",
+      "profile": "public",
+      "sql": "select * from employee_salaries",
+      "expect": "TABLE_NOT_ALLOWED",
+      "look": "Press Compare: admin may."
+    },
+    {
+      "group": "Access: the public profile",
+      "title": "A column public may not read",
+      "profile": "public",
+      "sql": "select id, category from products",
+      "expect": "COLUMN_NOT_ALLOWED"
+    },
+    {
+      "group": "Access: the public profile",
+      "title": "A column used only in WHERE",
+      "profile": "public",
+      "sql": "select name from products where category = 'Books'",
+      "expect": "COLUMN_NOT_ALLOWED",
+      "look": "Filtering on a column reveals it too, so every clause is checked."
+    },
+    {
+      "group": "Access: the public profile",
+      "title": "SELECT * where only some columns are allowed",
+      "profile": "public",
+      "sql": "select * from products",
+      "expect": "STAR_NOT_ALLOWED",
+      "look": "The reason lists the columns public may read."
+    },
+    {
+      "group": "Access: the public profile",
+      "title": "A CTE named after an allowed table",
+      "profile": "public",
+      "sql": "with products as (select id, email as name from customers)\nselect name from products",
+      "expect": "TABLE_NOT_ALLOWED",
+      "look": "The check sees through the CTE to the customers table it reads."
+    },
+    {
+      "group": "Fails when run",
+      "title": "A statement timeout",
+      "profile": "admin",
+      "sql": "select count(*) from orders a cross join orders b",
+      "expect": "failed",
+      "look": "Allowed, then cancelled after warehouse.statement_timeout_ms (5 s)."
+    },
+    {
+      "group": "Fails when run",
+      "title": "A database error",
+      "profile": "admin",
+      "sql": "select 1 / 0",
+      "expect": "failed"
+    }
+  ]
+}

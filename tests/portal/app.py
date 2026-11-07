@@ -11,18 +11,31 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import BaseRoute, Mount, Route
 
 from sql_warden.server import create_http_app
 from sql_warden.warden import Warden
 
 PAGE = Path(__file__).with_name("index.html")
+DOCS = Path(__file__).with_name("docs.html")
+EXAMPLES = Path(__file__).with_name("examples.json")
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+# Each file is read on every request, so edits show up on reload.
 
 
 async def index(request: Request) -> HTMLResponse:
-    # Read on every request, so edits to the page show up on reload.
-    return HTMLResponse(PAGE.read_text(), headers={"Cache-Control": "no-store"})
+    return HTMLResponse(PAGE.read_text(), headers=NO_STORE)
+
+
+async def docs(request: Request) -> HTMLResponse:
+    return HTMLResponse(DOCS.read_text(), headers=NO_STORE)
+
+
+async def examples(request: Request) -> Response:
+    return Response(EXAMPLES.read_text(), media_type="application/json", headers=NO_STORE)
 
 
 def create_portal_app(
@@ -45,7 +58,12 @@ def create_portal_app(
                 await stack.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
             yield
 
-    routes: list[BaseRoute] = [Route("/", index), Route("/profiles", profiles)]
+    routes: list[BaseRoute] = [
+        Route("/", index),
+        Route("/docs", docs),
+        Route("/examples.json", examples),
+        Route("/profiles", profiles),
+    ]
     routes += [Mount(f"/p/{name}", app=mcp_app) for name, mcp_app in mcp_apps.items()]
     routes.append(Mount("/", app=mcp_apps[default]))
     return Starlette(routes=routes, lifespan=lifespan)

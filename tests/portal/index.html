@@ -64,6 +64,8 @@
   .verdict .profile { font-weight: normal; opacity: .8; }
   .picker { color: var(--muted); font-size: 12px; }
   .picker select { padding: 2px 4px; }
+  .docs-link { margin-left: auto; font-size: 13px; color: var(--accent); text-decoration: none; }
+  .docs-link:hover { text-decoration: underline; }
   table.compare td { vertical-align: top; }
   table.compare code { white-space: pre-wrap; word-break: break-word; }
   table.compare tr.current td:first-child { box-shadow: inset 3px 0 var(--accent); }
@@ -125,6 +127,7 @@
     <label class="picker">profile <select id="profile" aria-label="Profile"></select></label>
     <span id="status">connecting…</span>
     <button id="reconnect" class="link">reconnect</button>
+    <a id="docs-link" class="docs-link" href="/docs">docs &amp; examples</a>
   </div>
   <p class="intro">Try queries through the same MCP server agents use, and see exactly what they get back.</p>
 </header>
@@ -150,9 +153,6 @@
         <button id="run" class="primary">Run</button>
         <button id="check">Check</button>
         <button id="compare" title="Check this query under every profile">Compare</button>
-        <select id="examples" aria-label="Example queries">
-          <option value="">Examples…</option>
-        </select>
         <span class="hint">⌘/Ctrl+Enter runs · ⇧⌘/Ctrl+Shift+Enter checks</span>
       </div>
     </section>
@@ -183,20 +183,6 @@
 <script>
 "use strict";
 
-const EXAMPLES = [
-  ["Allowed: a simple select", "select id, name, price_cents from products order by id"],
-  ["Allowed: join and aggregate", "select p.name, sum(o.quantity) as sold\nfrom orders o join products p on p.id = o.product_id\ngroup by p.name order by sold desc limit 10"],
-  ["Rewritten: LIMIT lowered", "select id from orders limit 5000"],
-  ["Refused: DELETE", "delete from orders"],
-  ["Refused: stacked statements", "select 1; delete from orders"],
-  ["Refused: data-modifying CTE", "with gone as (delete from orders returning *)\nselect count(*) from gone"],
-  ["Refused: pg_sleep", "select pg_sleep(60)"],
-  ["Refused: SQL hidden in a string", "select query_to_xml('select * from employee_salaries', true, true, '')"],
-  ["Refused: unknown function", "select age(created_at) from customers"],
-  ["Refused: FOR UPDATE", "select * from orders for update"],
-  ["Refused: parse error", "select (1"],
-  ["Error: statement timeout", "select count(*) from orders a cross join orders b"],
-];
 const HISTORY_KEY = "sql-warden-portal-history";
 const PROFILE_KEY = "sql-warden-portal-profile";
 const params = new URLSearchParams(location.search);
@@ -536,8 +522,12 @@ async function loadProfiles() {
   portal.current = profiles.includes(wanted) ? wanted : fallback;
   $("profile").replaceChildren(...profiles.map(name => el("option", { value: name }, name)));
   $("profile").value = portal.current;
-  $("profile").disabled = profiles.length < 2;
-  $("compare").disabled = profiles.length < 2;
+  const single = profiles.length < 2;
+  $("profile").disabled = $("compare").disabled = single;
+  // With one profile there is nothing to pick or compare: say so, rather than look broken.
+  const why = single ? `the config defines only ${portal.current}: start the portal with --config warden.example.yaml for public and admin` : "";
+  $("profile").title = why;
+  $("compare").title = why || "Check this query under every profile";
 }
 
 function switchProfile(name) {
@@ -580,8 +570,6 @@ async function compare() {
 
 // ---------------------------------------------------------------- Wiring
 
-for (const [label, sql] of EXAMPLES) $("examples").append(el("option", { value: sql }, label));
-$("examples").addEventListener("change", e => { if (e.target.value) setSql(e.target.value); e.target.value = ""; });
 $("run").addEventListener("click", () => submit("run_query"));
 $("check").addEventListener("click", () => submit("check_query"));
 $("sql").addEventListener("keydown", e => {

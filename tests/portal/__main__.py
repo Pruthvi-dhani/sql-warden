@@ -8,10 +8,19 @@ from pathlib import Path
 import click
 import uvicorn
 
-from sql_warden.cli import CliState, build_warden, engine_options, open_audit, settings
-from sql_warden.config import IMPLICIT_PROFILE
+from sql_warden.cli import (
+    DEFAULT_CONFIG_PATH,
+    CliState,
+    build_warden,
+    engine_options,
+    open_audit,
+    settings,
+)
+from sql_warden.config import IMPLICIT_PROFILE, WardenConfig
 from sql_warden.profiles import ProfileError, select_profile
 from tests.portal.app import create_portal_app
+
+EXAMPLE_CONFIG = Path(__file__).parents[2] / "warden.example.yaml"
 
 
 @click.command()
@@ -40,20 +49,46 @@ def main(
     It serves every profile in the config; --profile is the one the page starts on."""
     logging.getLogger("sqlglot").setLevel(logging.ERROR)  # as the CLI does
     config = settings(CliState(config_path), dsn, max_rows, timeout_ms, audit_dsn)
-    names = list(config.profiles or [IMPLICIT_PROFILE])
-    if profile is not None:
+    # The config each profile comes from.
+    sources: dict[str, WardenConfig] = {
+        name: config for name in config.profiles or [IMPLICIT_PROFILE]
+    }
+    borrowed = []
+    if config_path is None and not DEFAULT_CONFIG_PATH.is_file() and EXAMPLE_CONFIG.is_file():
+        # No config file, so only the implicit profile: add the example config's, so there are
+        # profiles to switch between and compare.
+        example = settings(CliState(EXAMPLE_CONFIG), dsn, max_rows, timeout_ms, audit_dsn)
+        borrowed = [name for name in example.profiles or {} if name not in sources]
+        sources |= {name: example for name in borrowed}
+    names = list(sources)
+    if profile is not None and profile not in borrowed:
         try:
             select_profile(config, profile)
         except ProfileError as exc:
+            if borrowed:  # the config's own message would leave out the borrowed profiles
+                raise click.ClickException(
+                    f"unknown profile '{profile}': the portal serves {', '.join(names)}"
+                ) from exc
             raise click.ClickException(str(exc)) from exc
     start = profile or config.default_profile or names[0]
     audit = open_audit(config)  # one audit log for every profile, as separate servers would share
-    wardens = {name: build_warden(config, name, audit=audit) for name in names}
+    wardens = {name: build_warden(sources[name], name, audit=audit) for name in names}
     url = f"http://127.0.0.1:{port}/"
     click.echo(
         f"sql-warden test portal on {url}, profiles {', '.join(names)} (Ctrl+C stops it)",
         err=True,
     )
+    if borrowed:
+        click.echo(
+            f"no config file, so {', '.join(borrowed)} come from {EXAMPLE_CONFIG.name}",
+            err=True,
+        )
+    elif not config.profiles:
+        click.echo(
+            f"the config has no profiles, so the page has only '{IMPLICIT_PROFILE}' to pick: "
+            "for public and admin, start it with --config warden.example.yaml",
+            err=True,
+        )
     if open_browser:
         threading.Timer(0.5, webbrowser.open, (url,)).start()
     app = create_portal_app(wardens, default=start)

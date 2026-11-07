@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>portal docs</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #dde1e6; --text: #1d2228; --muted: #66707a;
+    --accent: #2f6fde; --ok: #1f8a4c; --ok-bg: #e6f4ec; --bad: #c4352b; --bad-bg: #fbeae8;
+    --warn: #9a6a00; --warn-bg: #fdf3dc; --code-bg: #f1f3f5;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b; --panel: #1c2026; --border: #2e343c; --text: #e3e7ec; --muted: #8f99a3;
+      --accent: #6c9cf0; --ok: #4cc283; --ok-bg: #16301f; --bad: #f07167; --bad-bg: #3a1c1a;
+      --warn: #e3b341; --warn-bg: #352a10; --code-bg: #242931;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header .title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 16px; }
+  header h1 { font-size: 16px; margin: 0; }
+  header nav { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; margin-top: 4px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; }
+  section {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 16px; min-width: 0;
+  }
+  h2 { font-size: 15px; margin: 4px 0 8px; }
+  h3 { font-size: 13px; margin: 16px 0 6px; }
+  p { margin: 6px 0; }
+  .hint { color: var(--muted); font-size: 12px; }
+  code, pre { font-family: var(--mono); font-size: 12.5px; }
+  pre {
+    margin: 4px 0; padding: 8px 10px; background: var(--code-bg); border-radius: 6px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; }
+  td:first-child code { white-space: nowrap; }
+  select { font: inherit; padding: 2px 4px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-family: var(--mono); white-space: nowrap; }
+  .tag.ok { background: var(--ok-bg); color: var(--ok); }
+  .tag.bad { background: var(--bad-bg); color: var(--bad); }
+  .tag.warn { background: var(--warn-bg); color: var(--warn); }
+  .tag.plain { background: var(--code-bg); color: var(--muted); }
+  .tool { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
+  .tool:first-of-type { border-top: none; }
+  .tool h3 { margin: 0 0 4px; font-family: var(--mono); font-size: 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .example { border-top: 1px solid var(--border); padding: 10px 0; }
+  .example:first-of-type { border-top: none; }
+  .example .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .example .head strong { margin-right: auto; }
+  .example .links { display: flex; gap: 14px; font-size: 13px; margin-top: 4px; flex-wrap: wrap; }
+  .example .missing { color: var(--warn); font-size: 12px; }
+  .empty { color: var(--muted); font-style: italic; }
+  details summary { cursor: pointer; margin: 6px 0 4px; }
+  .error { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">
+    <h1>test portal · docs</h1>
+    <a href="/">← back to the portal</a>
+  </div>
+  <nav>
+    <a href="#api">The API</a>
+    <a href="#tools">Tools</a>
+    <a href="#responses">Responses</a>
+    <a href="#codes">Refusal codes</a>
+    <a href="#examples">Examples</a>
+  </nav>
+</header>
+
+<main>
+  <section id="api">
+    <h2>The API</h2>
+    <p>Agents reach sql-warden only through <strong>MCP</strong> (the Model Context Protocol):
+      there is no REST API. A server serves one profile, chosen when it starts; the tools take
+      only SQL, so an agent can't change what it may read.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Transport</th><th>Started with</th><th>Used by</th></tr></thead>
+      <tbody>
+        <tr><td>stdio</td><td><code>sql-warden serve</code></td><td>an agent that launches sql-warden itself, such as Claude Code</td></tr>
+        <tr><td>Streamable HTTP</td><td><code>sql-warden serve --transport http</code> → <code>http://127.0.0.1:8000/mcp</code></td><td>local tools. Loopback only, with no authentication yet</td></tr>
+        <tr><td>this portal</td><td><code>uv run python -m tests.portal</code></td><td>you: one server per profile at <code>/p/&lt;profile&gt;/mcp</code>, the starting profile's also at <code>/mcp</code></td></tr>
+      </tbody>
+    </table></div>
+    <h3>A session</h3>
+    <p>Every client does the same three steps, which the portal's Console panel shows:</p>
+    <ol>
+      <li><code>initialize</code>: the reply carries an <code>Mcp-Session-Id</code> header, and the server's instructions to the agent (below).</li>
+      <li><code>notifications/initialized</code>.</li>
+      <li><code>tools/call</code> with the session id, as often as needed. A server that forgot the session (it restarted) answers 404, and the client starts a new one.</li>
+    </ol>
+    <h3>The same from the command line</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Tool</th><th>CLI</th></tr></thead>
+      <tbody>
+        <tr><td><code>run_query</code></td><td><code>sql-warden query "&lt;sql&gt;" [--json]</code></td></tr>
+        <tr><td><code>check_query</code></td><td><code>sql-warden check "&lt;sql&gt;" [--json]</code></td></tr>
+        <tr><td><code>list_tables</code></td><td><code>sql-warden tables</code></td></tr>
+        <tr><td><code>describe_table</code></td><td><code>sql-warden tables &lt;name&gt;</code></td></tr>
+        <tr><td>(the audit log)</td><td><code>sql-warden audit tail [-f]</code>, <code>sql-warden audit show &lt;id&gt;</code></td></tr>
+      </tbody>
+    </table></div>
+    <p class="hint">Every CLI command takes <code>--config</code>, <code>--profile</code>, <code>--dsn</code> and <code>--audit-dsn</code>. Exit codes: 0 allowed, 2 refused, 1 error.</p>
+  </section>
+
+  <section id="tools">
+    <h2>Tools</h2>
+    <p>Read live from the server with <code>tools/list</code>, exactly as an agent gets them,
+      for profile <select id="profile" aria-label="Profile"></select>.</p>
+    <h3>What the agent is told when it connects</h3>
+    <pre id="instructions" class="empty">loading…</pre>
+    <div id="tool-list"><span class="empty">loading…</span></div>
+  </section>
+
+  <section id="responses">
+    <h2>Responses</h2>
+    <p><code>run_query</code> and <code>check_query</code> return the same object, as
+      structured content and as JSON text. Fields that don't apply are left out. The result is
+      marked an error when the query was refused, or (for <code>run_query</code>) when the
+      database failed to run it.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Field</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr data-field="refused"><td><code>refused</code></td><td>Whether a check refused the query. Nothing runs when it did.</td></tr>
+        <tr data-field="profile"><td><code>profile</code></td><td>The profile the query was checked for.</td></tr>
+        <tr data-field="check"><td><code>check</code></td><td>The check that refused it: <code>parse</code>, <code>shape</code>, <code>access</code> or <code>audit</code>.</td></tr>
+        <tr data-field="code"><td><code>code</code></td><td>Why, as a code an agent can act on: see <a href="#codes">Refusal codes</a>.</td></tr>
+        <tr data-field="reason"><td><code>reason</code></td><td>Why, in a sentence, naming the offending table, column or function.</td></tr>
+        <tr data-field="sql"><td><code>sql</code></td><td>The SQL that ran, or would run: regenerated from the checked query, comments dropped, rewrites applied.</td></tr>
+        <tr data-field="rewrites"><td><code>rewrites</code></td><td>How sql-warden changed the query, e.g. <code>added LIMIT 101 (row cap 100 + 1 to detect truncation)</code>.</td></tr>
+        <tr data-field="trace"><td><code>trace</code></td><td>One step per check that ran, in order: <code>check</code>, <code>passed</code>, <code>code</code>, <code>reason</code>, <code>duration_ms</code>. Checks after a refusal don't run.</td></tr>
+        <tr data-field="result"><td><code>result</code></td><td><code>run_query</code> only: <code>columns</code>, <code>rows</code>, <code>row_count</code>, <code>truncated</code> (more rows than the row cap; only the first are here) and <code>duration_ms</code>. Exact numbers come as strings, times in ISO 8601.</td></tr>
+        <tr data-field="error"><td><code>error</code></td><td>The database's error, when the query was allowed but failed to run (a timeout, a division by zero).</td></tr>
+        <tr data-field="audit_id"><td><code>audit_id</code></td><td>This request's record in the audit log: <code>sql-warden audit show &lt;audit_id&gt;</code>. Missing only when the record couldn't be written, and then the response is an <code>AUDIT_UNAVAILABLE</code> refusal.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="hint"><code>list_tables</code> returns <code>{profile, tables}</code> and <code>describe_table</code> returns <code>{profile, table}</code>. Each table has <code>schema</code>, <code>name</code>, the <code>columns</code> the profile may read (name and type) and <code>all_columns</code>, which is true when <code>SELECT *</code> works.</p>
+  </section>
+
+  <section id="codes">
+    <h2>Refusal codes</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Code</th><th>Check</th><th>Refused when</th></tr></thead>
+      <tbody>
+        <tr data-code="PARSE_ERROR"><td><code>PARSE_ERROR</code></td><td>parse</td><td>The SQL is empty or doesn't parse.</td></tr>
+        <tr data-code="MULTIPLE_STATEMENTS"><td><code>MULTIPLE_STATEMENTS</code></td><td>shape</td><td>More than one statement.</td></tr>
+        <tr data-code="NOT_A_SELECT"><td><code>NOT_A_SELECT</code></td><td>shape</td><td>Anything but a SELECT, UNION or CTE query.</td></tr>
+        <tr data-code="NOT_READ_ONLY"><td><code>NOT_READ_ONLY</code></td><td>shape</td><td>A SELECT that writes or locks: a data-modifying CTE, <code>SELECT … INTO</code>, <code>FOR UPDATE</code>/<code>SHARE</code>.</td></tr>
+        <tr data-code="FUNCTION_NOT_ALLOWED"><td><code>FUNCTION_NOT_ALLOWED</code></td><td>shape</td><td>A dangerous built-in (<code>pg_sleep</code>, <code>pg_read_file</code>, <code>dblink</code>, <code>query_to_xml</code>, …), a function in <code>shape.denied_functions</code>, or one that isn't standard SQL and isn't in <code>shape.allowed_functions</code>.</td></tr>
+        <tr data-code="TOO_MANY_JOINS"><td><code>TOO_MANY_JOINS</code></td><td>shape</td><td>More joins than <code>shape.max_joins</code>.</td></tr>
+        <tr data-code="SUBQUERY_TOO_DEEP"><td><code>SUBQUERY_TOO_DEEP</code></td><td>shape</td><td>Subqueries or CTEs nested deeper than <code>shape.max_subquery_depth</code>.</td></tr>
+        <tr data-code="LIMIT_REQUIRED"><td><code>LIMIT_REQUIRED</code></td><td>shape</td><td>No LIMIT, with <code>shape.limit: require</code>. (With <code>inject</code>, the default, one is added.)</td></tr>
+        <tr data-code="LIMIT_TOO_HIGH"><td><code>LIMIT_TOO_HIGH</code></td><td>shape</td><td>A LIMIT above the row cap, with <code>shape.limit: require</code>. (With <code>inject</code>, it is lowered.)</td></tr>
+        <tr data-code="INVALID_LIMIT"><td><code>INVALID_LIMIT</code></td><td>shape</td><td>A LIMIT it can't enforce: <code>LIMIT ALL</code>, an expression, <code>FETCH … PERCENT</code> or <code>WITH TIES</code>.</td></tr>
+        <tr data-code="TABLE_NOT_ALLOWED"><td><code>TABLE_NOT_ALLOWED</code></td><td>access</td><td>A table the profile may not read, or one that doesn't exist: the two look the same.</td></tr>
+        <tr data-code="COLUMN_NOT_ALLOWED"><td><code>COLUMN_NOT_ALLOWED</code></td><td>access</td><td>A column the profile may not read, in any clause.</td></tr>
+        <tr data-code="STAR_NOT_ALLOWED"><td><code>STAR_NOT_ALLOWED</code></td><td>access</td><td><code>*</code> (or a whole-row reference) on a table the profile may read only some columns of. The reason lists them.</td></tr>
+        <tr data-code="CATALOG_UNAVAILABLE"><td><code>CATALOG_UNAVAILABLE</code></td><td>access</td><td>The tables and columns couldn't be read, so access couldn't be checked.</td></tr>
+        <tr data-code="AUDIT_UNAVAILABLE"><td><code>AUDIT_UNAVAILABLE</code></td><td>audit</td><td>The request couldn't be recorded in the audit log, so nothing it would return is returned.</td></tr>
+        <tr data-code="INTERNAL_ERROR"><td><code>INTERNAL_ERROR</code></td><td>any</td><td>A check crashed. The query is refused rather than let through unchecked.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="examples">
+    <h2>Examples</h2>
+    <p>A query for each kind of decision. <strong>Open</strong> puts it in the portal's editor,
+      under its profile; <strong>Check</strong>, <strong>Run</strong> and
+      <strong>Compare</strong> also submit it. The profiles are the ones in
+      <code>warden.example.yaml</code>.</p>
+    <p id="profile-note" class="missing" hidden></p>
+    <div id="example-list"><span class="empty">loading…</span></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child !== null && child !== undefined) node.append(child instanceof Node ? child : String(child));
+  }
+  return node;
+}
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- tools/list, over MCP
+
+// A response is JSON, or a short SSE stream whose data lines carry JSON-RPC messages.
+function parseMessages(contentType, text) {
+  if (!text.trim()) return [];
+  if (!contentType.includes("text/event-stream")) return [JSON.parse(text)];
+  const messages = [];
+  for (const event of text.split(/\r?\n\r?\n/)) {
+    const data = event.split(/\r?\n/).filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart());
+    if (data.length) messages.push(JSON.parse(data.join("\n")));
+  }
+  return messages;
+}
+
+// initialize, notifications/initialized, tools/list: what an agent does to learn the tools.
+async function discover(profile) {
+  const endpoint = `/p/${encodeURIComponent(profile)}/mcp`;
+  const headers = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" };
+  const post = async message => {
+    const response = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(message) });
+    if (!response.ok) throw new Error(`${message.method}: HTTP ${response.status}`);
+    return { response, messages: parseMessages(response.headers.get("content-type") || "", await response.text()) };
+  };
+  const init = await post({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "sql-warden-portal-docs", version: "1" } },
+  });
+  const initialized = init.messages.find(m => m.id === 1).result;
+  headers["Mcp-Session-Id"] = init.response.headers.get("mcp-session-id");
+  headers["MCP-Protocol-Version"] = initialized.protocolVersion;
+  await post({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const listed = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  fetch(endpoint, { method: "DELETE", headers }).catch(() => {});  // done: end the session
+  return { instructions: initialized.instructions, tools: listed.messages.find(m => m.id === 2).result.tools };
+}
+
+// A JSON Schema type, short: "string", "string | null", "TraceStep[]".
+function typeOf(schema) {
+  if (!schema) return "";
+  if (schema.$ref) return schema.$ref.split("/").pop();
+  if (schema.anyOf) return schema.anyOf.map(typeOf).join(" | ");
+  if (schema.type === "array") return `${typeOf(schema.items) || "any"}[]`;
+  return schema.type || "any";
+}
+
+function fieldTable(schema, emptyText) {
+  const properties = Object.entries((schema && schema.properties) || {});
+  if (!properties.length) return el("p", { class: "hint" }, emptyText);
+  const required = new Set(schema.required || []);
+  return el("div", { class: "table-wrap" }, el("table", {},
+    el("thead", {}, el("tr", {}, el("th", {}, "name"), el("th", {}, "type"), el("th", {}, ""))),
+    el("tbody", {}, properties.map(([name, prop]) => el("tr", {},
+      el("td", {}, el("code", {}, name)),
+      el("td", {}, el("code", {}, typeOf(prop))),
+      el("td", { class: "hint" }, required.has(name) ? "required" : (prop.description || ""))))),
+  ));
+}
+
+// A Python docstring as written: the first line, then the rest without its common indent.
+function cleandoc(text) {
+  const [first, ...rest] = (text || "").trim().split("\n");
+  const indents = rest.filter(l => l.trim()).map(l => l.match(/^ */)[0].length);
+  const cut = indents.length ? Math.min(...indents) : 0;
+  return [first, ...rest.map(l => l.slice(cut))].join("\n");
+}
+
+function renderTool(tool) {
+  const readOnly = tool.annotations && tool.annotations.readOnlyHint;
+  return el("div", { class: "tool" },
+    el("h3", {}, tool.name, readOnly ? el("span", { class: "tag ok" }, "read-only") : null),
+    el("pre", {}, cleandoc(tool.description)),
+    el("p", { class: "hint" }, "Arguments"),
+    fieldTable(tool.inputSchema, "none"),
+    el("details", {},
+      el("summary", { class: "hint" }, `Result: ${tool.outputSchema ? Object.keys(tool.outputSchema.properties || {}).join(", ") : "no schema"}`),
+      fieldTable(tool.outputSchema, "no schema")),
+  );
+}
+
+async function showTools(profile) {
+  $("instructions").textContent = "loading…";
+  $("tool-list").replaceChildren(el("span", { class: "empty" }, "loading…"));
+  try {
+    const { instructions, tools } = await discover(profile);
+    $("instructions").className = "";
+    $("instructions").textContent = instructions || "(none)";
+    $("tool-list").replaceChildren(...tools.map(renderTool));
+  } catch (exc) {
+    $("instructions").textContent = "";
+    $("tool-list").replaceChildren(el("p", { class: "error" }, `Couldn't list the tools: ${exc.message}. Is the portal still running?`));
+  }
+}
+
+// ---------------------------------------------------------------- examples
+
+function expectTag(expect) {
+  if (expect === "allowed") return el("span", { class: "tag ok" }, "allowed");
+  if (expect === "failed") return el("span", { class: "tag warn" }, "fails when run");
+  return el("span", { class: "tag bad" }, `refused · ${expect}`);
+}
+
+function portalLink(example, tool) {
+  const params = new URLSearchParams({ sql: example.sql, profile: example.profile });
+  if (tool) params.set("tool", tool);
+  return `/?${params}`;
+}
+
+function renderExamples(examples, served) {
+  const groups = new Map();
+  for (const example of examples) {
+    if (!groups.has(example.group)) groups.set(example.group, []);
+    groups.get(example.group).push(example);
+  }
+  const missing = [...new Set(examples.map(e => e.profile))].filter(p => !served.includes(p));
+  if (missing.length) {
+    $("profile-note").hidden = false;
+    $("profile-note").textContent = `This portal doesn't serve ${missing.join(" or ")}, so those examples would run as ${served.join(", ")} instead. Start it with --config warden.example.yaml to try them as written.`;
+  }
+  $("example-list").replaceChildren(...[...groups].map(([group, items]) => el("div", {},
+    el("h3", {}, group),
+    items.map(example => el("div", { class: "example" },
+      el("div", { class: "head" },
+        el("strong", {}, example.title),
+        el("span", { class: `tag ${served.includes(example.profile) ? "plain" : "warn"}` }, `profile ${example.profile}`),
+        expectTag(example.expect)),
+      el("pre", {}, example.sql),
+      example.look ? el("p", { class: "hint" }, example.look) : null,
+      el("div", { class: "links" },
+        el("a", { href: portalLink(example) }, "Open"),
+        el("a", { href: portalLink(example, "check") }, "Check"),
+        el("a", { href: portalLink(example, "run") }, "Run"),
+        served.length > 1 ? el("a", { href: portalLink(example, "compare") }, "Compare") : null),
+    )),
+  )));
+}
+
+// ---------------------------------------------------------------- start
+
+(async () => {
+  const [{ profiles, default: start }, { examples }] = await Promise.all([
+    fetch("/profiles").then(r => r.json()),
+    fetch("/examples.json").then(r => r.json()),
+  ]);
+  $("profile").replaceChildren(...profiles.map(name => el("option", { value: name }, name)));
+  $("profile").value = start;
+  $("profile").disabled = profiles.length < 2;
+  $("profile").addEventListener("change", e => showTools(e.target.value));
+  renderExamples(examples, profiles);
+  await showTools(start);
+})().catch(exc => {
+  $("example-list").replaceChildren(el("p", { class: "error" }, `Couldn't load the docs: ${exc.message}. Is the portal still running?`));
+});
+</script>
+</body>
+</html>

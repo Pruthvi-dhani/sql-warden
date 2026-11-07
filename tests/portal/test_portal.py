@@ -19,9 +19,12 @@ import uvicorn
 from click.testing import CliRunner
 
 from sql_warden.audit import MemoryAuditSink
+from sql_warden.config import load_config
+from sql_warden.models import RefusalCode
+from sql_warden.server import QueryResponse
 from sql_warden.warden import Warden
 from tests.portal.__main__ import main
-from tests.portal.app import PAGE, create_portal_app
+from tests.portal.app import DOCS, EXAMPLES, PAGE, create_portal_app
 from tests.support import serving
 from tests.unit.conftest import FakeEngine
 from tests.unit.test_access_check import ADMIN, CATALOG, PUBLIC
@@ -152,6 +155,55 @@ def test_the_page_only_calls_tools_the_server_has() -> None:
 def test_a_table_click_writes_a_query_the_profile_allows() -> None:
     # SELECT * only where every column may be read; else the listed columns.
     assert 't.all_columns ? "*" : t.columns.map(c => c.name).join(", ")' in PAGE.read_text()
+
+
+def test_the_docs_and_examples_are_served(portal_url: str) -> None:
+    with urllib.request.urlopen(f"{portal_url}/docs", timeout=10) as response:
+        assert response.headers["content-type"].startswith("text/html")
+        assert response.headers["cache-control"] == "no-store"
+        assert "<title>portal docs</title>" in response.read().decode()
+    with urllib.request.urlopen(f"{portal_url}/examples.json", timeout=10) as response:
+        assert response.headers["content-type"] == "application/json"
+        assert json.loads(response.read()) == json.loads(EXAMPLES.read_text())
+
+
+def test_the_page_links_to_the_docs_and_keeps_no_examples_of_its_own() -> None:
+    page = PAGE.read_text()
+    assert 'href="/docs"' in page
+    assert "EXAMPLES" not in page
+    assert 'id="examples"' not in page
+
+
+def test_each_example_is_complete_and_for_a_profile_the_example_config_has() -> None:
+    profiles = set(load_config(Path(__file__).parents[2] / "warden.example.yaml").profiles or ())
+    outcomes = {"allowed", "failed", *RefusalCode}
+    examples = json.loads(EXAMPLES.read_text())["examples"]
+    assert examples
+    for example in examples:
+        assert {"group", "title", "profile", "sql", "expect"} <= set(example), example
+        assert set(example) <= {"group", "title", "profile", "sql", "expect", "look"}, example
+        assert example["profile"] in profiles, example["title"]
+        assert example["expect"] in outcomes, example["title"]
+    titles = [example["title"] for example in examples]
+    assert len(titles) == len(set(titles))
+
+
+def test_the_docs_list_every_refusal_code_and_response_field() -> None:
+    docs = DOCS.read_text()
+    assert re.findall(r'data-code="(\w+)"', docs) == list(RefusalCode)
+    assert re.findall(r'data-field="(\w+)"', docs) == list(QueryResponse.model_fields)
+
+
+def test_the_docs_page_only_lists_tools(client: PortalClient) -> None:
+    # The docs page's whole exchange: the handshake, then tools/list.
+    methods = re.findall(r'method: "([a-z/]+)"', DOCS.read_text())  # JSON-RPC, not HTTP
+    assert methods == ["initialize", "notifications/initialized", "tools/list"]
+    _, _, messages = client.post({"jsonrpc": "2.0", "id": 99, "method": "tools/list"})
+    tools = {tool["name"]: tool for tool in messages[0]["result"]["tools"]}
+    assert set(tools) == {"run_query", "check_query", "list_tables", "describe_table"}
+    for name in ("run_query", "check_query"):
+        assert set(tools[name]["outputSchema"]["properties"]) == set(QueryResponse.model_fields)
+    assert tools["run_query"]["inputSchema"]["required"] == ["sql"]
 
 
 def test_the_handshake_names_the_server(client: PortalClient) -> None:
@@ -295,7 +347,11 @@ class TestProfiles:
 
     def test_the_page_has_the_picker_and_compare(self) -> None:
         page = PAGE.read_text()
-        for needle in ('id="profile"', 'id="compare"', "/p/${encodeURIComponent(profile)}/mcp"):
+        for needle in (
+            'id="profile"',
+            'id="compare"',
+            "/p/${encodeURIComponent(profile)}/mcp",
+        ):
             assert needle in page
 
 
@@ -320,6 +376,7 @@ class TestLauncherProfiles:
         outcome = CliRunner().invoke(main, ["--config", str(policy), "--no-open"])
         assert outcome.exit_code == 0, outcome.output
         assert "profiles public, admin" in outcome.output
+        assert "no profiles" not in outcome.output
         with serving(served[0]) as base_url:
             assert _get_json(f"{base_url}/profiles") == {
                 "profiles": ["public", "admin"],
@@ -337,9 +394,43 @@ class TestLauncherProfiles:
         assert "unknown profile 'x': the config defines public, admin" in outcome.output
         assert served == []
 
+    def test_without_a_config_file_it_serves_the_example_profiles_too(
+        self, served: list[Any], engines: list[FakeEngine]
+    ) -> None:
+        outcome = CliRunner().invoke(main, ["--no-open"])
+        assert outcome.exit_code == 0, outcome.output
+        assert "profiles all, public, admin" in outcome.output
+        assert "no config file, so public, admin come from warden.example.yaml" in outcome.output
+        # public connects as its own role, as the example config says; all and admin as the
+        # warehouse's reader.
+        users = [engine.dsn.split("://")[1].split(":")[0] for engine in engines]
+        assert users == ["warden_reader", "warden_public", "warden_reader"]
+        with serving(served[0]) as base_url:
+            assert _get_json(f"{base_url}/profiles") == {
+                "profiles": ["all", "public", "admin"],
+                "default": "all",
+            }
+            for profile in ("all", "public", "admin"):  # each is its own server
+                client = PortalClient(base_url, endpoint=f"/p/{profile}/mcp")
+                client.connect()
+                listed = client.call_tool("list_tables")["structuredContent"]
+                assert listed["profile"] == profile
+
+    def test_without_a_config_file_it_can_start_on_an_example_profile(
+        self, served: list[Any]
+    ) -> None:
+        outcome = CliRunner().invoke(main, ["--no-open", "--profile", "admin"])
+        assert outcome.exit_code == 0, outcome.output
+        with serving(served[0]) as base_url:
+            assert _get_json(f"{base_url}/profiles")["default"] == "admin"
+        unknown = CliRunner().invoke(main, ["--no-open", "--profile", "x"])
+        assert unknown.exit_code == 1
+        assert "unknown profile 'x': the portal serves all, public, admin" in unknown.output
+
     def test_without_profiles_there_is_one(self, served: list[Any], tmp_path: Path) -> None:
         empty = tmp_path / "warden.yaml"
         empty.write_text("version: 1\n")
-        CliRunner().invoke(main, ["--config", str(empty), "--no-open"])
+        outcome = CliRunner().invoke(main, ["--config", str(empty), "--no-open"])
+        assert "the config has no profiles, so the page has only 'all' to pick" in outcome.output
         with serving(served[0]) as base_url:
             assert _get_json(f"{base_url}/profiles") == {"profiles": ["all"], "default": "all"}
