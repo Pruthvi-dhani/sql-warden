@@ -63,6 +63,14 @@ def test_non_query_statements_are_rejected_and_change_nothing(warehouse: Warehou
         assert conn.execute("SELECT count(*) FROM products").fetchone() == (200,)
 
 
+def test_stacked_statements_are_rejected_and_change_nothing(warehouse: Warehouse) -> None:
+    # The named cursor sends one statement only: nothing after the SELECT runs.
+    with pytest.raises(QueryFailed, match="cannot insert multiple commands"):
+        PostgresEngine(warehouse.admin_dsn).execute("SELECT 1; DELETE FROM products")
+    with psycopg.connect(warehouse.admin_dsn) as conn:
+        assert conn.execute("SELECT count(*) FROM products").fetchone() == (200,)
+
+
 def test_syntax_errors_are_reported(warehouse: Warehouse) -> None:
     with pytest.raises(QueryFailed) as caught:
         PostgresEngine(warehouse.reader_dsn).execute("SELEC 1")

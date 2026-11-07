@@ -1,7 +1,8 @@
 """What sql-warden needs from a database, independent of which database it is."""
 
-from dataclasses import dataclass
-from typing import Protocol
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,21 @@ class Table:
     schema: str
     name: str
     columns: tuple[Column, ...]
+
+
+@dataclass(frozen=True)
+class CostEstimate:
+    """What the database's planner expects a query to cost. Getting one runs nothing."""
+
+    total_cost: float
+    """The planner's estimate for the whole query, in the database's own units. Postgres:
+    abstract cost units, in which reading one page from disk in sequence costs 1.0."""
+    est_rows: int
+    """The rows the planner expects the query to return."""
+    top_node: str
+    """The step of the plan that adds the most cost of its own, e.g. "Seq Scan on orders"."""
+    raw: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
+    """The plan, as the database gave it."""
 
 
 class EngineError(Exception):
@@ -56,4 +72,8 @@ class Engine(Protocol):
 
     def tables(self) -> tuple[Table, ...]:
         """The tables and views the engine's role can read, with their columns."""
+        ...
+
+    def explain(self, sql: str) -> CostEstimate:
+        """The planner's estimate for one read-only query, without running it."""
         ...

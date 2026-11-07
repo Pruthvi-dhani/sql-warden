@@ -390,7 +390,7 @@ profiles:
   name and version, e.g. `claude-code 2.1.3`). `session_id` stays empty until 6.1.
   `list_tables` and `describe_table` are not recorded: they run no query.
 
-**3.3 `sql-warden audit tail|show <id>`** ✅ done
+**3.3 `sql-warden audit tail|show <id>`** ✅ done (`ece779a`)
 - Tests: CLI output against seeded audit rows.
 - As built: `audit/reader.py` has `AuditReader` (`recent`, `since`, `find`), which turns rows
   back into `AuditEvent`s. `tail` prints the last `-n` events (20 by default), oldest first,
@@ -409,11 +409,29 @@ profiles:
   audit database.
 
 ## Phase 4 — Cost gate via the planner
-**4.1 `explain()` for Postgres**
+**4.1 `explain()` for Postgres** ✅ done
 - Runs `EXPLAIN (FORMAT JSON)`, never ANALYZE, inside a read-only transaction, on the
   regenerated SQL, and returns `CostEstimate(total_cost, est_rows, top_node, raw)`.
 - Tests: integration on the 1M-row `orders` table. An indexed lookup is cheap, a cross join is
   expensive.
+- As built: `CostEstimate` is in `engines/base.py`, and `explain()` is on the `Engine`
+  protocol. From the plan's root: `total_cost` and `est_rows` (the rows it returns).
+  `top_node` is the step that adds the most cost of its own (its total less its inputs'),
+  named as EXPLAIN's text format names it: `Index Scan using orders_pkey on orders`,
+  `Parallel Seq Scan on orders o`, `Nested Loop`. `raw` keeps the JSON plan.
+- The planner prices a LIMIT in: a cross join cut short by the injected `LIMIT 101` costs
+  about 2 (it really is quick), while `count(*)` of it costs about 10^10. The tests use the
+  `count(*)` for "expensive". The indexed lookup costs about 8.
+- Same read-only transaction and statement timeout as `execute()`. Errors point into the SQL
+  as sent, not into the `EXPLAIN` prefix, and the SQL can't turn it into `EXPLAIN ANALYZE`
+  (that's a syntax error after `EXPLAIN (…)`). The EXPLAIN is sent as a prepared statement,
+  so Postgres takes exactly one statement. Found while testing: unprepared, psycopg sends a
+  query without parameters over the simple protocol, so `SELECT 1; DELETE …` would have
+  planned the SELECT and then run the DELETE. Only the read-only transaction stopped it.
+  `execute()`'s named cursor was never affected; a new test pins that down too.
+- Not called by the `Warden` yet: that's 4.2. Open for 4.2: with the LIMIT always injected,
+  the root's `est_rows` is never above the row cap + 1, so `max_estimated_rows` needs a
+  different number to mean anything.
 
 **4.2 Cost check**
 - Uses the policy values `max_total_cost` and `max_estimated_rows` (new `cost` config

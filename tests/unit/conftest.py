@@ -5,10 +5,11 @@ import pytest
 
 from sql_warden import cli as cli_module
 from sql_warden.audit import AuditError, AuditEvent, MemoryAuditSink
-from sql_warden.engines import Column, EngineError, Result, Table
+from sql_warden.engines import Column, CostEstimate, EngineError, Result, Table
 
 ONE_ROW = Result(columns=("id",), rows=((1,),), truncated=False, duration_ms=1.0)
 PRODUCTS = Table("public", "products", (Column("id", "integer"), Column("name", "text")))
+CHEAP = CostEstimate(total_cost=1.0, est_rows=1, top_node="Result")
 
 
 @dataclass
@@ -20,7 +21,9 @@ class FakeEngine:
     result: Result = ONE_ROW
     error: EngineError | None = None
     catalog: tuple[Table, ...] = (PRODUCTS,)
+    estimate: CostEstimate = CHEAP
     executed: list[str] = field(default_factory=list)
+    explained: list[str] = field(default_factory=list)
 
     def execute(self, sql: str) -> Result:
         self.executed.append(sql)
@@ -32,6 +35,12 @@ class FakeEngine:
         if self.error is not None:
             raise self.error
         return self.catalog
+
+    def explain(self, sql: str) -> CostEstimate:
+        self.explained.append(sql)
+        if self.error is not None:
+            raise self.error
+        return self.estimate
 
 
 @pytest.fixture(autouse=True)

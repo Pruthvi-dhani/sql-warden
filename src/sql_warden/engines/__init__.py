@@ -1,5 +1,6 @@
 from sql_warden.engines.base import (
     Column,
+    CostEstimate,
     Engine,
     EngineError,
     EngineUnavailable,
@@ -11,6 +12,7 @@ from sql_warden.engines.base import (
 
 __all__ = [
     "Column",
+    "CostEstimate",
     "Engine",
     "EngineError",
     "EngineUnavailable",
