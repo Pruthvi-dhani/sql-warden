@@ -48,9 +48,11 @@ decide about the query.
 
 ## Docs and examples
 
-**docs & examples** in the header opens `/docs`. It covers:
-- **The API**: MCP only (no REST), the transports, the session handshake, and the CLI command
-  for each tool.
+**docs & examples** in the header opens `/docs` in a tab of its own. Its example links and
+"back to the portal" load into the portal's tab rather than opening more. It covers:
+- **The API**: MCP only (no REST); which transport each client uses (this portal: Streamable
+  HTTP, local only; Claude Code: stdio; the CLI: none, in-process); the session handshake; and
+  the CLI command for each tool.
 - **Tools**: read live with `tools/list` from the profile you pick, with the instructions the
   server gives an agent when it connects.
 - **Responses**: the fields `run_query` and `check_query` return.

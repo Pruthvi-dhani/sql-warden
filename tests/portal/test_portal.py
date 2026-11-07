@@ -169,7 +169,13 @@ def test_the_docs_and_examples_are_served(portal_url: str) -> None:
 
 def test_the_page_links_to_the_docs_and_keeps_no_examples_of_its_own() -> None:
     page = PAGE.read_text()
-    assert 'href="/docs"' in page
+    # A tab of their own, which can still send example links back to this tab by its name.
+    assert 'href="/docs" target="sql-warden-docs" rel="opener"' in page
+    assert 'window.name = "sql-warden-portal";' in page
+    docs = DOCS.read_text()
+    assert 'const PORTAL_TAB = "sql-warden-portal";' in docs
+    assert docs.count("target: PORTAL_TAB") == 4
+    assert '<a href="/" target="sql-warden-portal">' in docs
     assert "EXAMPLES" not in page
     assert 'id="examples"' not in page
 
@@ -186,6 +192,11 @@ def test_each_example_is_complete_and_for_a_profile_the_example_config_has() -> 
         assert example["expect"] in outcomes, example["title"]
     titles = [example["title"] for example in examples]
     assert len(titles) == len(set(titles))
+
+
+def test_the_docs_say_which_transport_each_client_uses() -> None:
+    transports = re.findall(r'data-transport="(\w+)"', DOCS.read_text())
+    assert transports == ["portal", "stdio", "http", "cli"]
 
 
 def test_the_docs_list_every_refusal_code_and_response_field() -> None:

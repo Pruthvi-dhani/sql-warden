@@ -47,7 +47,7 @@
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
   th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { background: var(--code-bg); font-weight: 600; }
-  td:first-child code { white-space: nowrap; }
+  td code { white-space: nowrap; }  /* keep --profile and the like in one piece */
   select { font: inherit; padding: 2px 4px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--panel); color: var(--text); }
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-family: var(--mono); white-space: nowrap; }
@@ -73,10 +73,11 @@
 <header>
   <div class="title">
     <h1>test portal · docs</h1>
-    <a href="/">← back to the portal</a>
+    <a href="/" target="sql-warden-portal">← back to the portal</a>
   </div>
   <nav>
     <a href="#api">The API</a>
+    <a href="#transports">Which transport?</a>
     <a href="#tools">Tools</a>
     <a href="#responses">Responses</a>
     <a href="#codes">Refusal codes</a>
@@ -90,14 +91,27 @@
     <p>Agents reach sql-warden only through <strong>MCP</strong> (the Model Context Protocol):
       there is no REST API. A server serves one profile, chosen when it starts; the tools take
       only SQL, so an agent can't change what it may read.</p>
+    <h3 id="transports">Which transport?</h3>
+    <p>MCP runs over two transports, and the CLI skips MCP altogether. <strong>This portal uses
+      Streamable HTTP</strong>: a web page can't start a process to talk to over stdio.</p>
     <div class="table-wrap"><table>
-      <thead><tr><th>Transport</th><th>Started with</th><th>Used by</th></tr></thead>
+      <thead><tr><th>What you use</th><th>Transport</th><th>How it connects</th><th>Who picks the profile</th></tr></thead>
       <tbody>
-        <tr><td>stdio</td><td><code>sql-warden serve</code></td><td>an agent that launches sql-warden itself, such as Claude Code</td></tr>
-        <tr><td>Streamable HTTP</td><td><code>sql-warden serve --transport http</code> → <code>http://127.0.0.1:8000/mcp</code></td><td>local tools. Loopback only, with no authentication yet</td></tr>
-        <tr><td>this portal</td><td><code>uv run python -m tests.portal</code></td><td>you: one server per profile at <code>/p/&lt;profile&gt;/mcp</code>, the starting profile's also at <code>/mcp</code></td></tr>
+        <tr data-transport="portal"><td>this portal<br><code>uv run python -m tests.portal</code></td><td>Streamable HTTP</td><td>The page sends JSON-RPC with <code>fetch</code> to <code>/p/&lt;profile&gt;/mcp</code> (the starting profile's also at <code>/mcp</code>): what the Console panel shows. One server per profile.</td><td>you, with the profile picker; <code>--profile</code> picks where the page starts</td></tr>
+        <tr data-transport="stdio"><td>Claude Code, via <code>.mcp.json</code><br><code>sql-warden serve</code></td><td>stdio</td><td>The agent launches sql-warden as a child process and exchanges JSON-RPC over its stdin and stdout. No network.</td><td>whoever launches it: <code>--profile</code>, <code>SQL_WARDEN_PROFILE</code> or <code>default_profile</code></td></tr>
+        <tr data-transport="http"><td>local tools<br><code>sql-warden serve --transport http</code></td><td>Streamable HTTP</td><td>JSON-RPC over HTTP at <code>http://127.0.0.1:8000/mcp</code>.</td><td>whoever starts it, as for stdio</td></tr>
+        <tr data-transport="cli"><td>the CLI<br><code>sql-warden query</code>, <code>check</code>, <code>tables</code>, <code>audit</code></td><td>none</td><td>Calls the same checks in-process: no MCP, no server.</td><td>the command's <code>--profile</code></td></tr>
       </tbody>
     </table></div>
+    <p>The HTTP transport is <strong>local only</strong> for now. It listens only on
+      127.0.0.1, refuses to start on any other address, and rejects requests whose
+      <code>Host</code> or <code>Origin</code> isn't loopback, so another web page can't reach
+      it through DNS rebinding. It has <strong>no authentication</strong> yet, which is why it
+      stays on loopback.</p>
+    <p class="hint">In production (Phase 9 of the plan), HTTP opens up together with
+      authentication. Each client sends a token, and the server works out the identity and the
+      profile from it, so a client never names its own profile. stdio needs no token: whoever
+      launches the process has already chosen its profile.</p>
     <h3>A session</h3>
     <p>Every client does the same three steps, which the portal's Console panel shows:</p>
     <ol>
@@ -182,8 +196,8 @@
     <h2>Examples</h2>
     <p>A query for each kind of decision. <strong>Open</strong> puts it in the portal's editor,
       under its profile; <strong>Check</strong>, <strong>Run</strong> and
-      <strong>Compare</strong> also submit it. The profiles are the ones in
-      <code>warden.example.yaml</code>.</p>
+      <strong>Compare</strong> also submit it. They go to the portal's tab rather than opening
+      more tabs. The profiles are the ones in <code>warden.example.yaml</code>.</p>
     <p id="profile-note" class="missing" hidden></p>
     <div id="example-list"><span class="empty">loading…</span></div>
   </section>
@@ -306,6 +320,9 @@ function expectTag(expect) {
   return el("span", { class: "tag bad" }, `refused · ${expect}`);
 }
 
+// The portal's tab names itself this, so links here load into it instead of opening new tabs.
+const PORTAL_TAB = "sql-warden-portal";
+
 function portalLink(example, tool) {
   const params = new URLSearchParams({ sql: example.sql, profile: example.profile });
   if (tool) params.set("tool", tool);
@@ -333,10 +350,10 @@ function renderExamples(examples, served) {
       el("pre", {}, example.sql),
       example.look ? el("p", { class: "hint" }, example.look) : null,
       el("div", { class: "links" },
-        el("a", { href: portalLink(example) }, "Open"),
-        el("a", { href: portalLink(example, "check") }, "Check"),
-        el("a", { href: portalLink(example, "run") }, "Run"),
-        served.length > 1 ? el("a", { href: portalLink(example, "compare") }, "Compare") : null),
+        el("a", { href: portalLink(example), target: PORTAL_TAB }, "Open"),
+        el("a", { href: portalLink(example, "check"), target: PORTAL_TAB }, "Check"),
+        el("a", { href: portalLink(example, "run"), target: PORTAL_TAB }, "Run"),
+        served.length > 1 ? el("a", { href: portalLink(example, "compare"), target: PORTAL_TAB }, "Compare") : null),
     )),
   )));
 }

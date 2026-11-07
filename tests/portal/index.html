@@ -127,7 +127,7 @@
     <label class="picker">profile <select id="profile" aria-label="Profile"></select></label>
     <span id="status">connecting…</span>
     <button id="reconnect" class="link">reconnect</button>
-    <a id="docs-link" class="docs-link" href="/docs">docs &amp; examples</a>
+    <a id="docs-link" class="docs-link" href="/docs" target="sql-warden-docs" rel="opener" title="Opens in a new tab">docs &amp; examples ↗</a>
   </div>
   <p class="intro">Try queries through the same MCP server agents use, and see exactly what they get back.</p>
 </header>
@@ -584,6 +584,10 @@ $("compare").addEventListener("click", compare);
 $("reconnect").addEventListener("click", reconnect);
 $("clear-history").addEventListener("click", () => { saveHistory([]); renderHistory(); });
 $("clear-console").addEventListener("click", () => $("console").replaceChildren());
+
+// The docs tab sends its example links here, by this name (the docs link keeps this tab as
+// their opener, so the browser can find it). Reopening the docs reuses their one tab.
+window.name = "sql-warden-portal";
 
 renderHistory();
 // ?sql=... fills the editor; &tool=run, check or compare also submits it, and &profile=...
