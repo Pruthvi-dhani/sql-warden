@@ -216,6 +216,7 @@ class TestRules:
                 Partial(keep_first=1, keep_last=4),
             ),
             ("hmac", Hmac(KEY)),
+            ({"strategy": "hmac", "allow_in_predicates": True}, Hmac(KEY)),  # the check's affair
             ("null", Null()),
         ],
     )

@@ -465,7 +465,7 @@ profiles:
   query first. `config validate` shows the limit and each profile's own.
 
 ## Phase 5 — Masking sensitive columns
-**5.1 Mask strategies**
+**5.1 Mask strategies** ✅ done (`f8e0444`)
 - Strategies: `redact`, `partial` (e.g. last 4), `hmac` (keyed and deterministic, so masked
   values can still be joined and grouped), and `null`. They handle NULL and non-string types.
   Masks live under each profile (`profiles.<name>.masks`), so `admin` can see an unmasked
@@ -492,7 +492,7 @@ profiles:
   code that masks results; a test pins that down until then. Where the hmac key lives in the
   config is decided there too.
 
-**5.2 Output lineage**
+**5.2 Output lineage** ✅ done
 - `lineage.py` maps each output column back to its source columns, through aliases,
   expressions, CTEs and UNIONs. Any output derived from a masked column is masked.
 - If a masked column is used in WHERE/JOIN/GROUP BY/ORDER BY, the query is refused with
@@ -500,6 +500,35 @@ profiles:
   attacks such as `WHERE ssn LIKE '123%'`. `count(col)` is allowed.
 - Tests: `upper(email)`, `email AS e`, concatenation, CTE pass-through, a union branch, and the
   predicate-leak cases.
+- As built, stricter than "any output derived from a masked column is masked". Masking what an
+  agent computed with the column's own mask leaks: `'xxxx' || substr(ssn, 1, 4)` walks the
+  value past a partial mask, `ssn LIKE '123%'` is one bit per row under hmac, and even a fully
+  hidden result can signal through an error (`CASE WHEN … THEN 1/(id-id) …`). So a masked
+  column is safe in one shape only: selected as it is. Then it reaches the result through its
+  own mask, and that survives aliases, CTEs, subqueries, LATERAL, recursive CTEs and a
+  UNION ALL of the same column. `COUNT(col)` and `COUNT(DISTINCT col)` are allowed.
+- Everything else is refused. `MASKED_COLUMN_IN_PREDICATE`: outside a select list (WHERE,
+  JOIN, GROUP BY, HAVING, ORDER BY including by ordinal or alias, DISTINCT, DISTINCT ON, a
+  WINDOW, a table function's arguments, a subquery in a condition) and in UNION, INTERSECT and
+  EXCEPT, which compare rows. `MASKED_COLUMN_IN_EXPRESSION`: inside any expression (functions,
+  operators, casts, CASE, other aggregates, window functions, the whole row as `c`, `c.*` or
+  `(c).ssn`, a subquery used as a value). The column is followed under other names too: a
+  derived table's `s` is still `ssn`.
+- A UNION ALL of a masked column with anything else is not refused (nothing is compared or
+  computed), but its output is "made from" the columns, not any one of them: 5.3 hides it
+  entirely. With the column's own mask, an hmac of a guessed literal would sit next to the
+  hmac of the value.
+- `allow_in_predicates: true` on a column's rule lifts both refusals for it: for a column
+  that is hidden but not secret, like an hmac'd email that reports group by. What is computed
+  from it is still hidden in the result.
+- `pipeline/lineage.py`'s `trace()` works on a copy of the query with names resolved and
+  stars expanded (what runs stays as written) and returns the result's columns in order, each
+  with its `Flow` (clear, one column unchanged, or made from several), and the uses.
+  `MaskingCheck` (`masking`, after access and before cost, only for a profile with masks)
+  refuses on the first use its rules don't allow and keeps the lineage for 5.3. It fails
+  closed: what can't be followed (a star over a table function, say) is refused.
+- Still not reachable from `warden.yaml`: the `Warden` takes `masks` as an argument, and the
+  config section opens in 5.3.
 
 **5.3 Apply masks at execution**
 - The masks run on result rows in `Warden`. Masked columns are listed in the result metadata

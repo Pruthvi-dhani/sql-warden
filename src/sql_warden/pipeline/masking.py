@@ -16,11 +16,18 @@ import hmac
 import json
 import math
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Protocol
 
+from sql_warden.catalog import Catalog
 from sql_warden.config import MaskRule
+from sql_warden.engines import EngineError
+from sql_warden.models import Refusal, RefusalCode
+from sql_warden.pipeline.access import DEFAULT_SCHEMAS
+from sql_warden.pipeline.base import CheckContext
+from sql_warden.pipeline.lineage import LineageError, MaskedColumn, Use, trace
 
 REDACTED = "[REDACTED]"
 MIN_KEY_BYTES = 16
@@ -165,3 +172,65 @@ def build_mask(rule: MaskRule, *, key: bytes | None = None) -> Mask:
             raise ValueError("an hmac mask needs a key")
         return Hmac(key)
     return Null()
+
+
+class MaskingCheck:
+    """Refuses queries that would use a masked column where its values could leak, and works
+    out which of the result's columns to mask."""
+
+    name = "masking"
+
+    def __init__(
+        self,
+        catalog: Catalog,
+        masks: Mapping[MaskedColumn, MaskRule],
+        *,
+        profile: str,
+        dialect: str = "postgres",
+    ) -> None:
+        self._catalog = catalog
+        self.masks = dict(masks)
+        self._profile = profile
+        self._dialect = dialect
+
+    def run(self, ctx: CheckContext) -> Refusal | None:
+        try:
+            lineage = trace(
+                ctx.statements[0],
+                self.masks,
+                schema=self._catalog.schema(),
+                dialect=self._dialect,
+                default_schema=DEFAULT_SCHEMAS[self._dialect],
+            )
+        except EngineError as exc:
+            return Refusal(
+                RefusalCode.CATALOG_UNAVAILABLE,
+                f"could not read the tables and columns to follow the masked ones: {exc}",
+            )
+        except LineageError as exc:
+            # Fail closed: a query whose masked columns can't be followed doesn't run.
+            return Refusal(
+                RefusalCode.MASKED_COLUMN_IN_EXPRESSION,
+                f"profile {self._profile} has masked columns, and {exc}",
+            )
+        for use in lineage.uses:
+            if not self.masks[use.column].allow_in_predicates:
+                return self._refusal(use)
+        ctx.lineage = lineage
+        return None
+
+    def _refusal(self, use: Use) -> Refusal:
+        schema, table, column = use.column
+        masked = f"column {column} of {schema}.{table} is masked for profile {self._profile}"
+        if use.kind == "predicate":
+            return Refusal(
+                RefusalCode.MASKED_COLUMN_IN_PREDICATE,
+                f"{masked}, so the query can't use it in {use.where}: filtering, joining, "
+                "grouping or sorting on it would reveal what the mask hides. Select it on its "
+                "own, or leave it out",
+            )
+        return Refusal(
+            RefusalCode.MASKED_COLUMN_IN_EXPRESSION,
+            f"{masked}, so it can't be part of an expression ({use.where}). Select it on its "
+            f"own, or count it with COUNT({column})",
+        )

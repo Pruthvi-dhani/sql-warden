@@ -7,6 +7,7 @@ from sqlglot import exp
 
 from sql_warden.engines import CostEstimate
 from sql_warden.models import Decision, Refusal, RefusalCode, TraceEntry
+from sql_warden.pipeline.lineage import Lineage
 
 
 @dataclass
@@ -20,6 +21,8 @@ class CheckContext:
     """Checks that change the tree say how here."""
     cost: CostEstimate | None = None
     """The planner's estimate, set by the cost check."""
+    lineage: Lineage | None = None
+    """Which of the result's columns come from masked columns, set by the masking check."""
 
     def sql_to_run(self) -> str:
         """The SQL that runs if the query is allowed: the tree as the checks left it,

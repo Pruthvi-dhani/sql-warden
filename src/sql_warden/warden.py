@@ -1,5 +1,5 @@
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from sqlglot import exp
@@ -8,7 +8,7 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sql_warden.audit import AuditError, AuditEvent, AuditSink
 from sql_warden.catalog import Catalog
-from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, CostConfig, ShapeConfig
+from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, CostConfig, MaskRule, ShapeConfig
 from sql_warden.engines import Engine, EngineError, Table
 from sql_warden.models import Decision, QueryOutcome, Refusal, RefusalCode, TraceEntry
 from sql_warden.pipeline import (
@@ -16,11 +16,13 @@ from sql_warden.pipeline import (
     Check,
     CheckContext,
     CostCheck,
+    MaskingCheck,
     ParseCheck,
     Pipeline,
     ShapeCheck,
 )
 from sql_warden.pipeline.access import DEFAULT_SCHEMAS
+from sql_warden.pipeline.lineage import MaskedColumn
 from sql_warden.profiles import Access
 
 
@@ -44,6 +46,7 @@ class Warden:
         profile: str = IMPLICIT_PROFILE,
         access: Access | None = None,
         cost: CostConfig | None = None,
+        masks: Mapping[MaskedColumn, MaskRule] | None = None,
     ) -> None:
         self.engine = engine
         self.audit = audit
@@ -59,10 +62,21 @@ class Warden:
             if access is not None
             else []
         )
+        # Only for a profile with masked columns: without any, there is nothing to follow.
+        masking_checks = (
+            [MaskingCheck(self.catalog, masks, profile=profile, dialect=dialect)] if masks else []
+        )
         # Last of the built-in checks: the planner sees only SQL the others approved.
         self.cost_check = CostCheck(engine, cost or CostConfig(), profile=profile)
         self.pipeline = Pipeline(
-            [ParseCheck(), shape_check, *access_checks, self.cost_check, *checks]
+            [
+                ParseCheck(),
+                shape_check,
+                *access_checks,
+                *masking_checks,
+                self.cost_check,
+                *checks,
+            ]
         )
 
     def check(self, sql: str, *, client: str | None = None) -> Decision:

@@ -167,6 +167,11 @@ class MaskRule(_Section):
     the last 4."""
     text: str | None = None
     """redact only: what replaces the value, instead of [REDACTED]."""
+    allow_in_predicates: bool = False
+    """Let queries filter, join, group and sort on the column, and compute with it. Off by
+    default, because each of those can reveal what the mask hides (`WHERE ssn LIKE '123%'`).
+    Worth turning on for a column that is hidden but not secret, like an hmac'd email that
+    reports group by. What is computed from the column still comes back redacted."""
 
     @model_validator(mode="before")
     @classmethod
