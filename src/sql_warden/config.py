@@ -156,6 +156,52 @@ ColumnRule = Literal["*"] | tuple[str, ...]
 """Every column of a table, including ones added later, or just these."""
 
 
+class MaskRule(_Section):
+    """How a profile sees one sensitive column. In warden.yaml, a strategy's name alone
+    (`hmac`), or a mapping when it takes settings (`{strategy: partial, keep_last: 4}`)."""
+
+    strategy: Literal["redact", "partial", "hmac", "null"]
+    keep_first: NonNegativeInt | None = None
+    keep_last: NonNegativeInt | None = None
+    """partial only: how many characters stay readable at each end. Alone, `partial` keeps
+    the last 4."""
+    text: str | None = None
+    """redact only: what replaces the value, instead of [REDACTED]."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _name_alone(cls, rule: object) -> object:
+        if isinstance(rule, str):
+            rule = {"strategy": rule}
+        if not isinstance(rule, dict) or rule.get("strategy") != "partial":
+            return rule
+        if rule.get("keep_first") is None and rule.get("keep_last") is None:
+            return {**rule, "keep_last": 4}  # `partial` alone keeps the last 4
+        return rule
+
+    @model_validator(mode="after")
+    def _settings_fit_the_strategy(self) -> Self:
+        kept = [n for n in ("keep_first", "keep_last") if getattr(self, n) is not None]
+        if self.strategy != "partial" and kept:
+            raise PydanticCustomError(
+                "mask_setting",
+                "{setting} is for the partial strategy, not {strategy}",
+                {"setting": kept[0], "strategy": self.strategy},
+            )
+        if self.strategy != "redact" and self.text is not None:
+            raise PydanticCustomError(
+                "mask_setting",
+                "text is for the redact strategy, not {strategy}",
+                {"strategy": self.strategy},
+            )
+        if self.strategy == "partial" and not (self.keep_first or 0) + (self.keep_last or 0):
+            raise PydanticCustomError(
+                "mask_keeps_nothing",
+                "a partial mask that keeps nothing is a redaction: use redact",
+            )
+        return self
+
+
 class ProfileConfig(_Section):
     """Who a server serves, e.g. an agent released to customers, or internal admins."""
 

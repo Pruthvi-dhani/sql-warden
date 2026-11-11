@@ -433,7 +433,7 @@ profiles:
   the root's `est_rows` is never above the row cap + 1, so `max_estimated_rows` needs a
   different number to mean anything (decided in 4.2: dropped).
 
-**4.2 Cost check** ✅ done
+**4.2 Cost check** ✅ done (`72aa01c`)
 - Uses the policy values `max_total_cost` and `max_estimated_rows` (new `cost` config
   section, with per-profile overrides, so `public` can be held to tighter limits than `admin`). It refuses with `COST_TOO_HIGH`, giving the estimate against the limit and the
   dominant plan node (e.g. "Seq Scan on orders"). The estimate is written to the audit record.
@@ -472,6 +472,25 @@ profiles:
   column that another profile sees masked.
 - Tests: unit tests, including a test that HMAC output is stable for one key and differs
   across keys.
+- As built: `pipeline/masking.py` has `Redact`, `Partial`, `Hmac` and `Null`, each with
+  `apply(value)`, and `build_mask(rule, key=…)`. `config.py` has `MaskRule`: a strategy's name
+  alone (`hmac`) or a mapping with its settings (`{strategy: partial, keep_last: 4}`,
+  `{strategy: redact, text: "***"}`). A setting on the wrong strategy is an error.
+- NULL stays NULL under `redact`, `partial` and `hmac`: whether there is a value isn't hidden.
+  `null` hides that too.
+- `partial` keeps `keep_first` and `keep_last` characters (alone: the last 4) and stars the
+  rest, so the length shows. It never shows more than half a value: one too short is starred
+  entirely (`12345` → `*****`). Booleans, binary data, arrays and JSON are redacted instead,
+  since their length or shape would give them away.
+- `hmac` is HMAC-SHA256, cut to 16 hex characters (64 bits). Values are put in one canonical
+  text first, so equal values match however the database typed them: `42`, `'42'`, `42.0` and
+  `42.00` share a token, as do one instant in two time zones. So tokens match across columns
+  and tables, like the values they stand for. The key must be at least 16 bytes and never
+  shows in a repr.
+- `warden.yaml` does not accept `profiles.<name>.masks` yet, on purpose: a mask in the file
+  that nothing applies would leave the column in the clear. The section opens in 5.3, with the
+  code that masks results; a test pins that down until then. Where the hmac key lives in the
+  config is decided there too.
 
 **5.2 Output lineage**
 - `lineage.py` maps each output column back to its source columns, through aliases,
