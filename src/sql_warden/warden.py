@@ -45,6 +45,7 @@ from sql_warden.sessions import (
     BudgetStatus,
     MemorySessionStore,
     SessionStore,
+    SessionStoreError,
     Usage,
     new_session_id,
 )
@@ -53,6 +54,7 @@ NOT_COUNTED = frozenset(
     {
         RefusalCode.BUDGET_EXHAUSTED,
         RefusalCode.COST_OVER_BUDGET,
+        RefusalCode.BUDGET_UNAVAILABLE,
         RefusalCode.CATALOG_UNAVAILABLE,
         RefusalCode.COST_UNAVAILABLE,
         RefusalCode.AUDIT_UNAVAILABLE,
@@ -120,7 +122,13 @@ class Warden:
         self.budget = budget or BudgetConfig()
         """What one session may use. Without limits there is no budget check, but usage is
         still counted."""
-        self.sessions: SessionStore = MemorySessionStore() if sessions is None else sessions
+        if sessions is None:
+            # With limits to hold, a session this server hasn't seen starts from what the
+            # audit log says it used, so a budget outlives the server that counted it.
+            # Without limits there is nothing to hold, and the audit log is left alone.
+            restore = self._audited_usage if self.budget.limited else None
+            sessions = MemorySessionStore(restore=restore)
+        self.sessions: SessionStore = sessions
         # Around the other checks rather than among them: the gate before any of them, the
         # reservation once they have all passed.
         self._gate = Pipeline([BudgetGate(self.sessions, self.budget)])
@@ -183,8 +191,17 @@ class Warden:
         return self._recorded(sql, outcome, started, client=client)
 
     def budget_status(self, session_id: str | None = None) -> BudgetStatus:
-        """What the session (without one, this Warden's own) has used, against its budget."""
+        """What the session (without one, this Warden's own) has used, against its budget.
+        Raises SessionStoreError if its usage can't be read."""
         return BudgetStatus(self.sessions.usage(session_id or self.session_id), self.budget)
+
+    def _audited_usage(self, session_id: str) -> Usage:
+        """What the audit log says the session has used under this profile."""
+        try:
+            return self.audit.usage(session_id, self.profile, not_counted=NOT_COUNTED)
+        except Exception as exc:
+            # As when recording: an AuditError is written to be shown, a bug is only named.
+            raise SessionStoreError(_audit_problem(exc, reading=True)) from exc
 
     def _decide(
         self, sql: str, session_id: str | None = None, *, dry_run: bool = False
@@ -406,11 +423,12 @@ def trace_step(entry: TraceEntry) -> dict[str, object]:
     }
 
 
-def _audit_problem(exc: Exception) -> str:
+def _audit_problem(exc: Exception, *, reading: bool = False) -> str:
     # AuditError messages are written to be shown; anything else is a bug, named but not shown.
     if isinstance(exc, AuditError):
         return str(exc)
-    return f"could not record the audit event: {_crash(exc)}"
+    what = "read the session's usage from the audit log" if reading else "record the audit event"
+    return f"could not {what}: {_crash(exc)}"
 
 
 def _crash(exc: Exception) -> str:

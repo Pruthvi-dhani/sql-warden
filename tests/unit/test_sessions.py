@@ -12,6 +12,7 @@ from sql_warden.sessions import (
     Charge,
     MemorySessionStore,
     SessionStore,
+    SessionStoreError,
     Usage,
     new_session_id,
     over,
@@ -225,6 +226,71 @@ class TestForgetting:
     def test_it_needs_room_for_one(self) -> None:
         with pytest.raises(ValueError, match="at least 1"):
             MemorySessionStore(max_sessions=0)
+
+
+class TestRestoring:
+    """A store told where a session's earlier usage is kept, as the Warden's is."""
+
+    def _store(
+        self, earlier: dict[str, Usage], **settings: int
+    ) -> tuple[MemorySessionStore, list[str]]:
+        asked: list[str] = []
+
+        def restore(session_id: str) -> Usage:
+            asked.append(session_id)
+            return earlier.get(session_id, Usage())
+
+        return MemorySessionStore(restore=restore, **settings), asked
+
+    def test_a_session_starts_from_what_it_had_used(self) -> None:
+        store, _ = self._store({"s": Usage(queries=3, total_cost=60, refusals=1)})
+        assert store.usage("s") == Usage(queries=3, total_cost=60, refusals=1)
+        charge = store.charge("s", Usage(queries=1, total_cost=5))
+        assert charge.usage == Usage(queries=4, total_cost=65, refusals=1)
+
+    def test_a_charge_is_held_against_what_was_restored(self) -> None:
+        store, _ = self._store({"s": Usage(queries=2)})
+        refused = store.charge("s", Usage(queries=1), within=BudgetConfig(max_queries=2))
+        assert refused == Charge(Usage(queries=2), exceeded="max_queries")
+
+    def test_it_is_asked_once_per_session(self) -> None:
+        store, asked = self._store({"s": Usage(queries=3)})
+        store.usage("s")
+        store.charge("s", Usage(queries=1))
+        store.usage("s")
+        store.usage("new")
+        store.usage("new")  # nothing to restore is remembered too
+        assert asked == ["s", "new"]
+        assert store.usage("s") == Usage(queries=4)  # not restored over what was charged
+
+    def test_a_forgotten_session_is_restored_again(self) -> None:
+        earlier = {"a": Usage(queries=1)}
+        store, asked = self._store(earlier, max_sessions=1)
+        store.charge("a", Usage(queries=1))
+        earlier["a"] = Usage(queries=2)  # what the audit log says by now
+        store.charge("b", Usage(queries=1))  # a is forgotten
+        assert store.usage("a") == Usage(queries=2)
+        assert asked == ["a", "b", "a"]
+
+    def test_a_failure_is_passed_on_and_asked_again_next_time(self) -> None:
+        answers: list[Usage | Exception] = [SessionStoreError("down"), Usage(queries=7)]
+
+        def restore(session_id: str) -> Usage:
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        store = MemorySessionStore(restore=restore)
+        with pytest.raises(SessionStoreError, match="down"):
+            store.charge("s", Usage(queries=1))
+        assert store.usage("s") == Usage(queries=7)
+
+    def test_requests_at_once_restore_a_session_once_and_lose_no_charge(self) -> None:
+        store, asked = self._store({"s": Usage(queries=100)})
+        _together(16, lambda: [store.charge("s", Usage(queries=1)) for _ in range(50)].clear())
+        assert asked == ["s"]
+        assert store.usage("s") == Usage(queries=900)
 
 
 class TestBudgetConfig:

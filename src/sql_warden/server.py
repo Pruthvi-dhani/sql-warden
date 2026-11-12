@@ -24,7 +24,7 @@ from sql_warden import __version__
 from sql_warden.config import IMPLICIT_PROFILE
 from sql_warden.engines import EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
-from sql_warden.sessions import BudgetStatus
+from sql_warden.sessions import BudgetStatus, SessionStoreError
 from sql_warden.warden import Warden, trace_step
 
 INSTRUCTIONS = """\
@@ -211,11 +211,15 @@ def _number(value: float) -> float:
 
 
 def describe_budget(warden: Warden, session_id: str | None = None) -> BudgetResponse:
-    """What budget_status returns."""
+    """What budget_status returns. A session whose usage can't be read is a tool error."""
+    try:
+        status = warden.budget_status(session_id)
+    except SessionStoreError as exc:
+        raise ToolError(f"this session's budget could not be read: {exc}") from exc
     return BudgetResponse(
         profile=warden.profile,
         session_id=session_id or warden.session_id,
-        budget=budget_info(warden.budget_status(session_id)),
+        budget=budget_info(status),
     )
 
 

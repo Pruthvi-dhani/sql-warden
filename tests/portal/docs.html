@@ -197,6 +197,7 @@
         <tr data-code="PLAN_FAILED"><td><code>PLAN_FAILED</code></td><td>cost</td><td>The database rejected the query while planning it, before anything ran: a type error, a table its role can't read, a constant like <code>1/0</code>. Its error says why; retrying won't help.</td></tr>
         <tr data-code="BUDGET_EXHAUSTED"><td><code>BUDGET_EXHAUSTED</code></td><td>budget</td><td>The session has reached one of its profile's limits: queries run, their total estimated cost, rows returned, or requests refused. Nothing more runs in this session, and no other check looks at the query.</td></tr>
         <tr data-code="COST_OVER_BUDGET"><td><code>COST_OVER_BUDGET</code></td><td>budget</td><td>The planner estimates the query costs more than the session has left to spend. A cheaper query may still fit.</td></tr>
+        <tr data-code="BUDGET_UNAVAILABLE"><td><code>BUDGET_UNAVAILABLE</code></td><td>budget</td><td>What the session has used couldn't be read back from the audit log, so its budget couldn't be checked. Nothing runs; worth retrying later.</td></tr>
         <tr data-code="AUDIT_UNAVAILABLE"><td><code>AUDIT_UNAVAILABLE</code></td><td>audit</td><td>The request couldn't be recorded in the audit log, so nothing it would return is returned.</td></tr>
         <tr data-code="INTERNAL_ERROR"><td><code>INTERNAL_ERROR</code></td><td>any</td><td>A check crashed. The query is refused rather than let through unchecked.</td></tr>
       </tbody>

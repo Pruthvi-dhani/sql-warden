@@ -6,6 +6,7 @@ from sql_warden.audit.sink import (
     Decision,
     MemoryAuditSink,
     PostgresAuditSink,
+    usage_from,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "Decision",
     "MemoryAuditSink",
     "PostgresAuditSink",
+    "usage_from",
 ]

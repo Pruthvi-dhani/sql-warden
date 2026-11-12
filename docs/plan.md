@@ -585,7 +585,7 @@ profiles:
   in 6.2 with the check that enforces them, so a limit in the file is never one that is
   ignored. `config.BudgetConfig` (the four limits, each optional) is there for the store.
 
-**6.2 Budget check + post-execution accounting** ✅ done
+**6.2 Budget check + post-execution accounting** ✅ done (`9f16ba6`)
 - Before running, the check refuses `BUDGET_EXHAUSTED` with the remaining budget. After
   running, it charges the actual cost and rows. A new `budget_status` MCP tool shows the state.
   Limits come from a `budgets` section with per-profile overrides.
@@ -623,9 +623,33 @@ profiles:
   nothing (6.3). A query charged at the reservation and then not run because the audit
   database went away stays charged. A reconnect is a new session with a new budget (9.3).
 
-**6.3 Budgets survive restarts**
+**6.3 Budgets survive restarts** ✅ done
 - Session usage is rebuilt from the audit DB when the server starts.
 - Tests: an integration test that restarts the Warden and finds the budget still used.
+- As built: usage is read back per session, the first time a server sees it, rather than for
+  every session at startup: a server can't know which sessions will come back, and most never
+  do. `MemorySessionStore(restore=…)` asks once per session, under its lock, so requests
+  arriving together restore it once and lose no charge; a session it forgot (the 10,000
+  cap) is restored again when it returns.
+- The audit log is the durable record, so nothing new is stored. `AuditSink.usage(session_id,
+  profile, not_counted=…)` reads it back: `usage_from` is the rule in Python (the memory
+  sink), `_USAGE` the same rule in SQL (the Postgres sink), and an integration test holds
+  one against the other on every refusal code. A query counts, with its estimated cost, if it
+  was sent to the database (allowed or failed, not a dry run); rows where they came back;
+  refusals as in 6.2. Usage is per session and profile, and never expires: a session name is
+  one session for good.
+- The `Warden` wires it itself (`sessions=None` with a budgeted profile), so the CLI, the
+  servers and the portal all get it. A profile without limits never reads the audit log.
+- Fail closed, with a third budget code: if the usage can't be read, the query is refused
+  with `BUDGET_UNAVAILABLE` (not counted as a refusal; `budget_status` is a tool error). An
+  unexpected error while reading is named, never quoted. With the whole audit database down,
+  the refusal that comes back is still `AUDIT_UNAVAILABLE`.
+- What this does and doesn't buy: CLI calls with one `--session` now share a budget, and a
+  named session keeps its budget across restarts. An agent's session over stdio or HTTP is
+  new after a restart anyway (new process, forgotten connection), so it gets a new budget:
+  that is 9.3's per-identity budgets. Two processes serving one session at once each count
+  from their own restore and can overspend between them: 9.3's shared store. Usage charged
+  without a record (an audit write that failed after the query ran) is forgiven on restore.
 
 ## Phase 7 — Snowflake engine
 The audit DB is always Postgres, whatever the warehouse engine is. Config sets

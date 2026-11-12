@@ -12,13 +12,20 @@ from sql_warden.config import BudgetConfig
 from sql_warden.models import Refusal, RefusalCode
 from sql_warden.pipeline.base import CheckContext
 from sql_warden.pipeline.cost import format_cost
-from sql_warden.sessions import SessionStore, Usage, over, reached
+from sql_warden.sessions import SessionStore, SessionStoreError, Usage, over, reached
 
 
 def _session(ctx: CheckContext) -> str:
     if ctx.session_id is None:
         raise ValueError("the request has no session to hold a budget against")
     return ctx.session_id
+
+
+def unavailable(exc: SessionStoreError) -> Refusal:
+    """Fail closed: a query whose session's usage is unknown doesn't run."""
+    return Refusal(
+        RefusalCode.BUDGET_UNAVAILABLE, f"this session's budget could not be checked: {exc}"
+    )
 
 
 def used_up(limit: str, usage: Usage, budget: BudgetConfig) -> Refusal:
@@ -49,7 +56,10 @@ class BudgetGate:
         self._budget = budget
 
     def run(self, ctx: CheckContext) -> Refusal | None:
-        usage = self._sessions.usage(_session(ctx))
+        try:
+            usage = self._sessions.usage(_session(ctx))
+        except SessionStoreError as exc:
+            return unavailable(exc)
         limit = reached(usage, self._budget)
         return None if limit is None else used_up(limit, usage, self._budget)
 
@@ -67,12 +77,15 @@ class BudgetReservation:
     def run(self, ctx: CheckContext) -> Refusal | None:
         session_id = _session(ctx)
         spent = Usage(queries=1, total_cost=0.0 if ctx.cost is None else ctx.cost.total_cost)
-        if ctx.dry_run:
-            used = self._sessions.usage(session_id)
-            exceeded = over(used + spent, self._budget)
-        else:
-            charge = self._sessions.charge(session_id, spent, within=self._budget)
-            used, exceeded = charge.usage, charge.exceeded
+        try:
+            if ctx.dry_run:
+                used = self._sessions.usage(session_id)
+                exceeded = over(used + spent, self._budget)
+            else:
+                charge = self._sessions.charge(session_id, spent, within=self._budget)
+                used, exceeded = charge.usage, charge.exceeded
+        except SessionStoreError as exc:
+            return unavailable(exc)
         if exceeded is None:
             return None
         most = self._budget.max_total_cost

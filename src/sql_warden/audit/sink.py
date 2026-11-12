@@ -4,13 +4,15 @@ import datetime
 import json
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from importlib.resources import files
 from typing import Any, Literal, Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
+
+from sql_warden.sessions import Usage
 
 Decision = Literal["allowed", "refused", "failed"]
 """allowed: the checks passed (and, unless a dry run, it ran). refused: a check stopped it.
@@ -52,7 +54,30 @@ class AuditEvent:
     ts: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.UTC))
 
 
+def usage_from(events: Iterable[AuditEvent], *, not_counted: Collection[str] = ()) -> Usage:
+    """What the requests in events used: the rule for reading a session's usage back out of
+    the audit log.
+
+    A query counts, with its estimated cost, if it was sent to the database: allowed or
+    failed, and not a dry run. Rows count where they came back. A refusal counts, dry runs
+    included, unless its code is in not_counted."""
+    queries, total_cost, rows_returned, refusals = 0, 0.0, 0, 0
+    for event in events:
+        if event.decision == "refused":
+            refusals += event.code not in not_counted
+        elif not event.dry_run:
+            queries += 1
+            total_cost += event.cost_estimate or 0.0
+            rows_returned += event.rows_returned or 0
+    return Usage(queries, total_cost, rows_returned, refusals)
+
+
 class AuditSink(Protocol):
+    def usage(self, session_id: str, profile: str, *, not_counted: Collection[str] = ()) -> Usage:
+        """What the session has used under the profile, by the records so far (see
+        usage_from), or raise AuditError. How a budget outlives the server that counted it."""
+        ...
+
     def ping(self) -> None:
         """Raise AuditError if events can't be recorded right now. Checked before a query
         runs, so the warehouse isn't queried while the audit database is down."""
@@ -88,6 +113,25 @@ class MemoryAuditSink:
         with self._lock:
             return tuple(self._events)
 
+    def usage(self, session_id: str, profile: str, *, not_counted: Collection[str] = ()) -> Usage:
+        self.ping()
+        mine = (e for e in self.events if (e.session_id, e.profile) == (session_id, profile))
+        return usage_from(mine, not_counted=not_counted)
+
+
+# usage_from, in SQL.
+_USAGE = """
+    SELECT
+        count(*) FILTER (WHERE decision <> 'refused' AND NOT dry_run),
+        coalesce(sum(cost_estimate) FILTER (WHERE decision <> 'refused' AND NOT dry_run), 0),
+        coalesce(sum(rows_returned) FILTER (WHERE decision <> 'refused' AND NOT dry_run), 0),
+        count(*) FILTER (
+            WHERE decision = 'refused'
+              AND (code IS NULL OR code <> ALL (%(not_counted)s::text[]))
+        )
+    FROM audit_events
+    WHERE session_id = %(session_id)s AND profile = %(profile)s
+"""
 
 _INSERT = """
     INSERT INTO audit_events (
@@ -139,6 +183,21 @@ class PostgresAuditSink:
                 lambda conn: conn.execute(_INSERT, params), "could not record the audit event"
             )
 
+    def usage(self, session_id: str, profile: str, *, not_counted: Collection[str] = ()) -> Usage:
+        params = {
+            "session_id": session_id,
+            "profile": profile,
+            "not_counted": [str(code) for code in not_counted],
+        }
+        with self._lock:
+            row = self._attempt(
+                lambda conn: conn.execute(_USAGE, params).fetchone(),
+                "could not read the session's usage from the audit log",
+            )
+        assert row is not None  # an aggregate without GROUP BY always returns one row
+        queries, total_cost, rows_returned, refusals = row
+        return Usage(int(queries), float(total_cost), int(rows_returned), int(refusals))
+
     def close(self) -> None:
         with self._lock:
             if self._conn is not None:
@@ -150,18 +209,19 @@ class PostgresAuditSink:
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_SCHEMA_LOCK,))
             conn.execute(SCHEMA.read_text())
 
-    def _attempt(self, action: Callable[[psycopg.Connection[Any]], object], what: str) -> None:
+    def _attempt[T](self, action: Callable[[psycopg.Connection[Any]], T], what: str) -> T:
         # Two tries: a connection that broke since last time gets one fresh replacement.
-        for attempt in (1, 2):
-            try:
-                action(self._connection())
-                return
-            except psycopg.OperationalError as exc:
-                self._drop()
-                if attempt == 2:
-                    raise AuditError(f"{what}: {str(exc).strip()}") from exc
-            except psycopg.Error as exc:
-                raise AuditError(f"{what}: {str(exc).strip()}") from exc
+        try:
+            return action(self._connection())
+        except psycopg.OperationalError:
+            self._drop()
+        except psycopg.Error as exc:
+            raise AuditError(f"{what}: {str(exc).strip()}") from exc
+        try:
+            return action(self._connection())
+        except psycopg.Error as exc:
+            self._drop()
+            raise AuditError(f"{what}: {str(exc).strip()}") from exc
 
     def _connection(self) -> psycopg.Connection[Any]:
         if self._conn is None or self._conn.closed:

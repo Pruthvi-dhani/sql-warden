@@ -2,7 +2,7 @@ import datetime
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,7 +47,7 @@ from sql_warden.server import (
     describe_one_table,
     describe_tables,
 )
-from sql_warden.sessions import valid_session_id
+from sql_warden.sessions import Usage, valid_session_id
 from sql_warden.warden import Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
@@ -208,6 +208,9 @@ def build_warden(
 class _NotRecorded:
     """The audit sink for commands that run no queries. If one ever did, it would be refused:
     a query is never answered without a record."""
+
+    def usage(self, session_id: str, profile: str, *, not_counted: Collection[str] = ()) -> Usage:
+        raise AuditError("this command does not record queries")
 
     def ping(self) -> None:
         raise AuditError("this command does not record queries")

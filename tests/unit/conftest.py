@@ -72,10 +72,12 @@ def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
 
 
 class FakeAuditSink(MemoryAuditSink):
-    """What the CLI gets instead of PostgresAuditSink: events in a list."""
+    """What the CLI gets instead of PostgresAuditSink: events in a list, which every sink
+    built in one test shares, as CLI calls share one audit database."""
 
-    def __init__(self, dsn: str, *, connect_timeout_s: int) -> None:
+    def __init__(self, dsn: str, *, connect_timeout_s: int, database: list[AuditEvent]) -> None:
         super().__init__()
+        self._events = database
         self.dsn = dsn
         self.connect_timeout_s = connect_timeout_s
         self.schema_applied = False
@@ -91,9 +93,12 @@ class AuditSinks:
     fail_with: AuditError | None = None
     """Set to make the sinks built from now on fail, as an unreachable database would."""
 
+    database: list[AuditEvent] = field(default_factory=list)
+    """What they all record to."""
+
     @property
     def events(self) -> list[AuditEvent]:
-        return [event for sink in self.built for event in sink.events]
+        return list(self.database)
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +107,7 @@ def audit_sinks(monkeypatch: pytest.MonkeyPatch) -> AuditSinks:
     sinks = AuditSinks()
 
     def factory(dsn: str, *, connect_timeout_s: int) -> FakeAuditSink:
-        sink = FakeAuditSink(dsn, connect_timeout_s=connect_timeout_s)
+        sink = FakeAuditSink(dsn, connect_timeout_s=connect_timeout_s, database=sinks.database)
         sink.fail_with = sinks.fail_with
         sinks.built.append(sink)
         return sink

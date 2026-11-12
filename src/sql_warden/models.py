@@ -47,6 +47,9 @@ class RefusalCode(StrEnum):
     COST_OVER_BUDGET = "COST_OVER_BUDGET"
     """The planner estimates the query costs more than the session has left to spend. A
     cheaper query may still fit."""
+    BUDGET_UNAVAILABLE = "BUDGET_UNAVAILABLE"
+    """What the session has used could not be read, so its budget could not be checked.
+    Worth retrying later."""
     AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
     """The request could not be recorded, so nothing it would return is returned."""
     INTERNAL_ERROR = "INTERNAL_ERROR"

@@ -9,6 +9,7 @@ import re
 import threading
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from typing import Protocol
 
@@ -17,6 +18,11 @@ from sql_warden.config import BudgetConfig
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 MAX_SESSIONS = 10_000
 """How many sessions MemorySessionStore keeps before it forgets the least recently charged."""
+
+
+class SessionStoreError(Exception):
+    """A session's usage could not be read or charged, so its budget can't be checked. The
+    message is safe to show."""
 
 
 def new_session_id() -> str:
@@ -117,7 +123,9 @@ class Charge:
 class SessionStore(Protocol):
     """Each session's usage. In memory for one server; a shared database once several servers
     serve the same sessions, which is why charging is one atomic step here rather than a read
-    followed by a write."""
+    followed by a write.
+
+    Either method raises SessionStoreError if the usage can't be read or kept."""
 
     def usage(self, session_id: str) -> Usage:
         """What the session has used so far. Nothing, for a session never charged."""
@@ -135,23 +143,51 @@ class SessionStore(Protocol):
 
 
 class MemorySessionStore:
-    """Usage kept in this process: gone when it stops, and not shared with other servers.
+    """Usage kept in this process, and not shared with other servers.
 
     Thread-safe. It keeps at most max_sessions sessions and then forgets the one charged
-    longest ago, so a server that many clients connect to doesn't grow without end. A
-    forgotten session starts again from nothing, as a new connection would anyway.
+    longest ago, so a server that many clients connect to doesn't grow without end.
+
+    restore says what a session had already used when this store first hears of it: the
+    Warden reads that from the audit log, so a budget outlives the process that counted it.
+    It is asked once per session, and again for one that was forgotten. Without it, an
+    unknown or forgotten session starts from nothing.
     """
 
-    def __init__(self, *, max_sessions: int = MAX_SESSIONS) -> None:
+    def __init__(
+        self,
+        *,
+        max_sessions: int = MAX_SESSIONS,
+        restore: Callable[[str], Usage] | None = None,
+    ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be at least 1")
         self._max_sessions = max_sessions
+        self._restore = restore
         self._usage: OrderedDict[str, Usage] = OrderedDict()
         self._lock = threading.Lock()
 
     def usage(self, session_id: str) -> Usage:
         with self._lock:
-            return self._usage.get(session_id, Usage())
+            return self._used(session_id)
+
+    def _used(self, session_id: str) -> Usage:
+        """The session's usage, restored first if this store doesn't know the session. Held
+        under the lock, so two requests can't both restore it and one lose its charge."""
+        used = self._usage.get(session_id)
+        if used is not None:
+            return used
+        if self._restore is None:
+            return Usage()  # nothing to remember until it is charged
+        used = self._restore(session_id)
+        self._keep(session_id, used)  # kept even if nothing, so it is asked only once
+        return used
+
+    def _keep(self, session_id: str, used: Usage) -> None:
+        self._usage[session_id] = used
+        self._usage.move_to_end(session_id)
+        while len(self._usage) > self._max_sessions:
+            self._usage.popitem(last=False)
 
     def charge(
         self, session_id: str, spent: Usage, *, within: BudgetConfig | None = None
@@ -159,16 +195,13 @@ class MemorySessionStore:
         if any(getattr(spent, field.name) < 0 for field in fields(Usage)):
             raise ValueError("a charge can't be negative: usage only grows")
         with self._lock:
-            used = self._usage.get(session_id, Usage())
+            used = self._used(session_id)
             total = used + spent
             if within is not None:
                 exceeded = over(total, within)
                 if exceeded is not None:
                     return Charge(used, exceeded)
-            self._usage[session_id] = total
-            self._usage.move_to_end(session_id)
-            while len(self._usage) > self._max_sessions:
-                self._usage.popitem(last=False)
+            self._keep(session_id, total)
             return Charge(total)
 
     def __len__(self) -> int:

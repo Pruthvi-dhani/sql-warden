@@ -26,7 +26,8 @@ cost:
   max_total_cost: 1000000
 
 # What one session may use in total. A session is one agent's connection (or the CLI calls
-# given the same --session), and once it reaches a limit nothing more runs in it
+# given the same --session: its usage is read back from the audit log, so a name is one
+# session for good), and once it reaches a limit nothing more runs in it
 # (BUDGET_EXHAUSTED). A query whose estimated cost is more than the session has left is
 # refused too (COST_OVER_BUDGET), though a cheaper one may still fit. No limit is set unless
 # you set it, here for every profile or under a profile for that one:

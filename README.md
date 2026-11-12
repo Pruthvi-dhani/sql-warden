@@ -27,9 +27,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 > work today; every request is recorded in the audit database, readable with
 > `sql-warden audit`; the database planner's cost estimate gates every query before it runs;
 > and sensitive columns come back masked per profile. Every request belongs to a session,
-> and a session can have a budget: queries, total cost, rows and refusals. Budgets are kept
-> in memory for now; rebuilding them from the audit log after a restart is next. See the
-> [plan](docs/plan.md) for the roadmap.
+> and a session can have a budget: queries, total cost, rows and refusals. A session's usage
+> is read back from the audit log, so its budget outlives the server that counted it, which
+> completes Phase 6. Next: the Snowflake engine. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -467,8 +467,8 @@ profiles:
 - **Dry runs are free**, except that a refused one counts as a refusal. A dry run is told
   whether the query would fit.
 - **Not every refusal counts.** The budget's own don't, nor do the ones that aren't the
-  caller's doing: `COST_UNAVAILABLE`, `CATALOG_UNAVAILABLE`, `AUDIT_UNAVAILABLE`,
-  `INTERNAL_ERROR`.
+  caller's doing: `COST_UNAVAILABLE`, `CATALOG_UNAVAILABLE`, `BUDGET_UNAVAILABLE`,
+  `AUDIT_UNAVAILABLE`, `INTERNAL_ERROR`.
 
 Each result says what the session has used (`budget`, and a `session budget:` line in the
 CLI), and the `budget_status` tool says it at any time:
@@ -487,13 +487,34 @@ $ uv run sql-warden --config warden.example.yaml check "select id, name from pro
   would run: SELECT id, name FROM public.products LIMIT 51
 ```
 
-Two limits of today's budgets, both on the [plan](docs/plan.md):
+#### Budgets outlive the server
 
-- **They live in the server's memory.** A restart forgets them, and each `sql-warden query`
-  is a new process, so the CLI's budgets don't yet add up across calls, even with
-  `--session`. Rebuilding usage from the audit log is next (6.3).
-- **A new session has a new budget**, and a client gets one by reconnecting. Budgets per
-  identity, which close that, come with authentication (9.2, 9.3).
+The audit log already records what every request used, so it is where a budget is kept for
+good. A server counts in memory, and the first time it sees a session it reads what that
+session has used from the audit log: its queries that were sent to the database with their
+estimated costs and rows, and its counted refusals, under the same profile. So CLI calls
+given the same `--session` share one budget, though each is its own process:
+
+```text
+$ uv run sql-warden --config warden.example.yaml query "select id from products limit 3" --session nightly-2026-11-12
+...
+session budget: 1 of 25 queries, 0.06 of 50,000 cost, 3 of 500 rows, 0 of 10 refusals used
+$ uv run sql-warden --config warden.example.yaml query "select id from products limit 3" --session nightly-2026-11-12
+...
+session budget: 2 of 25 queries, 0.12 of 50,000 cost, 6 of 500 rows, 0 of 10 refusals used
+```
+
+- **A name is one session for good.** Its budget never starts again, however old its
+  records, so give each run its own name, say with the date in it.
+- **If the usage can't be read, nothing runs**: the query is refused with
+  `BUDGET_UNAVAILABLE`. A profile without limits never reads it.
+- **An agent's session doesn't survive a restart anyway.** Over stdio the session is the
+  server process, and over HTTP it is the connection, which a restarted server has forgotten:
+  the agent reconnects and gets a new session, with a new budget. Budgets per identity, which
+  close that, come with authentication (9.2, 9.3 on the [plan](docs/plan.md)).
+- **Servers don't share their counts while running.** Two processes using one session at the
+  same moment each count from what the audit log said when they first saw it, so between
+  them they can overspend. One shared store fixes that (9.3).
 
 ### Masked columns
 
