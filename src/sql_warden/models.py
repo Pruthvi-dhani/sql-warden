@@ -64,6 +64,22 @@ class TraceEntry:
 
 
 @dataclass(frozen=True)
+class MaskedOutput:
+    """A column of the result that comes back masked."""
+
+    position: int
+    """Where it is in the result, from 0."""
+    column: str
+    strategy: str
+    """redact, partial, hmac or null."""
+    sources: tuple[str, ...]
+    """The masked columns it comes from, as schema.table.column."""
+    computed: bool = False
+    """True if it was computed or mixed from them rather than selected as it is: then it is
+    hidden entirely, whatever their own masks."""
+
+
+@dataclass(frozen=True)
 class Decision:
     """The outcome of running the checks. Checks after the first refusal do not run."""
 
@@ -78,6 +94,8 @@ class Decision:
     """The planner's estimate, once the cost check got one, whether or not it refused."""
     cost_limit: float | None = None
     """The profile's max_total_cost, when there is an estimate to hold against it."""
+    masked: tuple[MaskedOutput, ...] = ()
+    """The result's columns that are masked, or would be for a dry run."""
     audit_id: uuid.UUID | None = None
     """The audit record of this request; None only when it could not be written."""
 

@@ -31,7 +31,10 @@ fix it and try again. Only single SELECT statements are allowed. Results are cap
 query has no LIMIT, or one above the cap, sql-warden adds or lowers it and says so in
 `rewrites`; `truncated` tells you whether rows were cut off. A query the database's planner
 estimates as too expensive is refused (COST_TOO_HIGH), with the costliest step named:
-filter on indexed columns or aggregate less. Use list_tables to see what you
+filter on indexed columns or aggregate less. Some columns are masked (list_tables marks
+them): they come back hidden, as `masked_columns` says, and can only be selected as they are
+or counted; filtering, joining, grouping, sorting or computing with them is refused. Use
+list_tables to see what you
 can query, describe_table for one table's columns, and check_query to test a query without
 running it. Tables and columns that aren't listed can't be queried. SELECT * works only on
 tables with `all_columns: true`; elsewhere, name the columns."""
@@ -68,6 +71,17 @@ class QueryRows(BaseModel):
     duration_ms: float
 
 
+class MaskedColumnInfo(BaseModel):
+    column: str
+    """The result's column, by name."""
+    position: int
+    """And by position, from 0: names can repeat."""
+    strategy: str
+    """How it is masked: redact, partial, hmac or null."""
+    sources: list[str]
+    """The masked columns it comes from, as schema.table.column."""
+
+
 class QueryResponse(BaseModel):
     refused: bool
     profile: str | None = None
@@ -79,6 +93,8 @@ class QueryResponse(BaseModel):
     sql: str | None = None
     """The SQL that ran, or would run: the checked query, regenerated, with any rewrites."""
     rewrites: list[str] = []
+    masked_columns: list[MaskedColumnInfo] = []
+    """The result's masked columns: their values come back masked, or would for a dry run."""
     cost: CostInfo | None = None
     """The planner's estimate, once the cost check got one: on an allowed query, and on one
     the cost check refused."""
@@ -94,6 +110,10 @@ class QueryResponse(BaseModel):
 class ColumnInfo(BaseModel):
     name: str
     type: str
+    mask: str | None = None
+    """Set if the column comes back masked: redact, partial, hmac or null. A masked column
+    can be selected as it is or counted, not filtered, joined, grouped, sorted or computed
+    with, unless the profile allows it."""
 
 
 class TableInfo(BaseModel):
@@ -148,6 +168,15 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
         reason=refusal.reason if refusal else None,
         sql=decision.sql,
         rewrites=list(decision.rewrites),
+        masked_columns=[
+            MaskedColumnInfo(
+                column=masked.column,
+                position=masked.position,
+                strategy=masked.strategy,
+                sources=list(masked.sources),
+            )
+            for masked in decision.masked
+        ],
         cost=None
         if decision.cost is None or decision.cost_limit is None
         else CostInfo(
@@ -240,7 +269,16 @@ def table_info(warden: Warden, table: Table) -> TableInfo:
     return TableInfo(
         schema_name=table.schema,
         name=table.name,
-        columns=[ColumnInfo(name=c.name, type=c.type) for c in table.columns],
+        columns=[
+            ColumnInfo(
+                name=c.name,
+                type=c.type,
+                mask=rule.strategy
+                if (rule := warden.masks.get((table.schema, table.name, c.name)))
+                else None,
+            )
+            for c in table.columns
+        ],
         all_columns=warden.all_columns(table),
     )
 

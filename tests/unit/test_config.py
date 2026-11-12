@@ -116,7 +116,12 @@ class TestDeniedFunctions:
 
 
 def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("WARDEN_READER_PASSWORD", "WARDEN_PUBLIC_PASSWORD", "WARDEN_AUDIT_PASSWORD"):
+    for name in (
+        "WARDEN_READER_PASSWORD",
+        "WARDEN_PUBLIC_PASSWORD",
+        "WARDEN_AUDIT_PASSWORD",
+        "WARDEN_MASK_KEY",
+    ):
         monkeypatch.delenv(name, raising=False)
     example, defaults = load_config(EXAMPLE_CONFIG), default_config()
     assert (example.warehouse, example.audit, example.shape) == (
@@ -132,9 +137,22 @@ def test_example_config_matches_the_demo_stack(monkeypatch: pytest.MonkeyPatch) 
             "postgresql://warden_public:warden_public@localhost:5433/warehouse",
             {"public.products": ("id", "name", "price_cents")},
         ),
+        "support": (
+            None,
+            {"public.customers": "*", "public.orders": "*", "public.products": "*"},
+        ),
         "admin": (None, "*"),
     }
     public, admin = example.profiles["public"], example.profiles["admin"]
+    support = example.profiles["support"]
+    assert {name: rule.strategy for name, rule in support.masks.items()} == {
+        "public.customers.ssn": "redact",
+        "public.customers.phone": "partial",
+        "public.customers.email": "hmac",
+    }
+    assert example.masking.key is not None
+    assert example.masking.key.get_secret_value() == "demo-only-mask-key-not-for-real-use"
+    assert default_config().masking.key is None  # sql-warden itself ships no key
     assert (public.max_rows, public.cost) == (50, CostConfig(max_total_cost=10_000))
     assert (admin.max_rows, admin.cost) == (1000, None)
 

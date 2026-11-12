@@ -38,7 +38,9 @@ decide about the query.
 - **Decision**: the verdict, then one line per check that ran (✓/✗, code, reason, time), the
   planner's estimated cost against the profile's limit (with the costliest step), any rewrites
   (such as an added LIMIT), and the SQL that ran or would run.
-- **Results**: the rows, with NULLs marked and a note when the row cap cut the result off.
+- **Results**: the rows, with NULLs marked, masked columns tagged with their mask (`hmac`,
+  `redact`, ...), and a note when the row cap cut the result off. The Decision panel lists
+  the masked columns too, and the Tables panel tags them.
 - **Tables**: from `list_tables`, so only what the server's profile may query. Click a table to
   query it (`select *` where the profile may read every column, the allowed columns otherwise),
   a column to insert its name. Start the portal with `--profile` to see another profile. The

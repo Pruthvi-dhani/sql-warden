@@ -158,6 +158,7 @@
         <tr data-field="reason"><td><code>reason</code></td><td>Why, in a sentence, naming the offending table, column or function.</td></tr>
         <tr data-field="sql"><td><code>sql</code></td><td>The SQL that ran, or would run: regenerated from the checked query, comments dropped, rewrites applied.</td></tr>
         <tr data-field="rewrites"><td><code>rewrites</code></td><td>How sql-warden changed the query, e.g. <code>added LIMIT 101 (row cap 100 + 1 to detect truncation)</code>.</td></tr>
+        <tr data-field="masked_columns"><td><code>masked_columns</code></td><td>The result's columns that come back masked (or would, for a dry run): <code>column</code>, <code>position</code>, <code>strategy</code> (<code>redact</code>, <code>partial</code>, <code>hmac</code> or <code>null</code>) and the <code>sources</code> it comes from, as <code>schema.table.column</code>.</td></tr>
         <tr data-field="cost"><td><code>cost</code></td><td>The database planner's estimate, from <code>EXPLAIN</code> (never run): <code>total_cost</code> against the profile's <code>max_total_cost</code>, <code>est_rows</code> (rows it expects to return) and <code>top_node</code>, the step that adds the most cost. On an allowed query, and on one the cost check refused.</td></tr>
         <tr data-field="trace"><td><code>trace</code></td><td>One step per check that ran, in order: <code>check</code>, <code>passed</code>, <code>code</code>, <code>reason</code>, <code>duration_ms</code>. Checks after a refusal don't run.</td></tr>
         <tr data-field="result"><td><code>result</code></td><td><code>run_query</code> only: <code>columns</code>, <code>rows</code>, <code>row_count</code>, <code>truncated</code> (more rows than the row cap; only the first are here) and <code>duration_ms</code>. Exact numbers come as strings, times in ISO 8601.</td></tr>
@@ -165,7 +166,7 @@
         <tr data-field="audit_id"><td><code>audit_id</code></td><td>This request's record in the audit log: <code>sql-warden audit show &lt;audit_id&gt;</code>. Missing only when the record couldn't be written, and then the response is an <code>AUDIT_UNAVAILABLE</code> refusal.</td></tr>
       </tbody>
     </table></div>
-    <p class="hint"><code>list_tables</code> returns <code>{profile, tables}</code> and <code>describe_table</code> returns <code>{profile, table}</code>. Each table has <code>schema</code>, <code>name</code>, the <code>columns</code> the profile may read (name and type) and <code>all_columns</code>, which is true when <code>SELECT *</code> works.</p>
+    <p class="hint"><code>list_tables</code> returns <code>{profile, tables}</code> and <code>describe_table</code> returns <code>{profile, table}</code>. Each table has <code>schema</code>, <code>name</code>, the <code>columns</code> the profile may read (name, type, and <code>mask</code> if the column comes back masked) and <code>all_columns</code>, which is true when <code>SELECT *</code> works.</p>
   </section>
 
   <section id="codes">

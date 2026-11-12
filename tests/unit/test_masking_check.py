@@ -10,6 +10,7 @@ from sql_warden.profiles import Access
 from sql_warden.warden import Warden
 from tests.unit.conftest import FakeEngine
 from tests.unit.test_lineage import CATALOG, EMAIL, SSN
+from tests.unit.test_masking import KEY
 
 EVERYTHING = Access("*")
 REDACT = MaskRule.model_validate("redact")
@@ -32,6 +33,7 @@ def _warden(
         profile="public",
         access=access,
         masks=MASKS if masks is None else masks,
+        mask_key=KEY,
     )
 
 

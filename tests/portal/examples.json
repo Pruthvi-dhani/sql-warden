@@ -119,6 +119,60 @@
       "expect": "PARSE_ERROR"
     },
     {
+      "group": "Masked columns: the support profile",
+      "title": "Masked columns come back masked",
+      "profile": "support",
+      "sql": "select id, full_name, email, phone, ssn from customers order by id limit 5",
+      "expect": "allowed",
+      "look": "Results: ssn is [REDACTED], phone shows its last 4, email is an hmac token. Press Compare, or switch to admin, to see them in the clear."
+    },
+    {
+      "group": "Masked columns: the support profile",
+      "title": "Tokens can still be matched",
+      "profile": "support",
+      "sql": "select o.id, c.email from orders o join customers c on c.id = o.customer_id where c.id = 42 limit 5",
+      "expect": "allowed",
+      "look": "Every order of customer 42 carries the same email token: the same value always gives the same token."
+    },
+    {
+      "group": "Masked columns: the support profile",
+      "title": "Counting a masked column is fine",
+      "profile": "support",
+      "sql": "select count(distinct ssn) from customers",
+      "expect": "allowed",
+      "look": "How many values there are, not what they are."
+    },
+    {
+      "group": "Masked columns: the support profile",
+      "title": "Filtering on one",
+      "profile": "support",
+      "sql": "select id from customers where ssn like '123%'",
+      "expect": "MASKED_COLUMN_IN_PREDICATE",
+      "look": "Which rows come back would spell out the SSN, a digit at a time."
+    },
+    {
+      "group": "Masked columns: the support profile",
+      "title": "Grouping on one",
+      "profile": "support",
+      "sql": "select email, count(*) from customers c join orders o on o.customer_id = c.id group by email",
+      "expect": "MASKED_COLUMN_IN_PREDICATE"
+    },
+    {
+      "group": "Masked columns: the support profile",
+      "title": "Computing with one",
+      "profile": "support",
+      "sql": "select split_part(email, '@', 2) as domain from customers",
+      "expect": "MASKED_COLUMN_IN_EXPRESSION",
+      "look": "A masked column can only be selected as it is, or counted."
+    },
+    {
+      "group": "Masked columns: the support profile",
+      "title": "Hidden under another name too",
+      "profile": "support",
+      "sql": "select id from (select id, ssn as s from customers) t where s > '5'",
+      "expect": "MASKED_COLUMN_IN_PREDICATE"
+    },
+    {
       "group": "Refused by the cost check",
       "title": "Counting a cross join",
       "profile": "admin",

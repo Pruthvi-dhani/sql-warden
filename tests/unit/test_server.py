@@ -156,8 +156,8 @@ class TestListTables:
                     "schema": "public",
                     "name": "products",
                     "columns": [
-                        {"name": "id", "type": "integer"},
-                        {"name": "name", "type": "text"},
+                        {"name": "id", "type": "integer", "mask": None},
+                        {"name": "name", "type": "text", "mask": None},
                     ],
                     "all_columns": True,
                 }

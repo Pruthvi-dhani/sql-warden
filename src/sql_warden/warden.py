@@ -9,8 +9,15 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sql_warden.audit import AuditError, AuditEvent, AuditSink
 from sql_warden.catalog import Catalog
 from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, CostConfig, MaskRule, ShapeConfig
-from sql_warden.engines import Engine, EngineError, Table
-from sql_warden.models import Decision, QueryOutcome, Refusal, RefusalCode, TraceEntry
+from sql_warden.engines import Engine, EngineError, Result, Table
+from sql_warden.models import (
+    Decision,
+    MaskedOutput,
+    QueryOutcome,
+    Refusal,
+    RefusalCode,
+    TraceEntry,
+)
 from sql_warden.pipeline import (
     AccessCheck,
     Check,
@@ -22,7 +29,8 @@ from sql_warden.pipeline import (
     ShapeCheck,
 )
 from sql_warden.pipeline.access import DEFAULT_SCHEMAS
-from sql_warden.pipeline.lineage import MaskedColumn
+from sql_warden.pipeline.lineage import Lineage, MaskedColumn
+from sql_warden.pipeline.masking import Mask, Null, Redact, build_mask
 from sql_warden.profiles import Access
 
 
@@ -47,6 +55,7 @@ class Warden:
         access: Access | None = None,
         cost: CostConfig | None = None,
         masks: Mapping[MaskedColumn, MaskRule] | None = None,
+        mask_key: bytes | None = None,
     ) -> None:
         self.engine = engine
         self.audit = audit
@@ -54,6 +63,12 @@ class Warden:
         self.profile = profile
         """The profile this Warden serves. Fixed for its lifetime."""
         self.access = access
+        self.masks: dict[MaskedColumn, MaskRule] = dict(masks or {})
+        """The profile's masked columns: (schema, table, column) → its rule."""
+        # Built once, so a missing hmac key stops the Warden from starting.
+        self._masks: dict[MaskedColumn, Mask] = {
+            column: build_mask(rule, key=mask_key) for column, rule in self.masks.items()
+        }
         self.catalog = Catalog(engine, dialect=dialect)
         shape_check = ShapeCheck(shape or ShapeConfig(), max_rows=engine.max_rows)
         # The implicit profile has no table rules, so there is nothing for an access check.
@@ -82,7 +97,7 @@ class Warden:
     def check(self, sql: str, *, client: str | None = None) -> Decision:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
         started = time.perf_counter()
-        outcome = QueryOutcome(self._decide(sql), result=None)
+        outcome = QueryOutcome(self._decide(sql)[0], result=None)
         return self._recorded(sql, outcome, started, dry_run=True, client=client).decision
 
     def run(self, sql: str, *, client: str | None = None) -> QueryOutcome:
@@ -91,7 +106,7 @@ class Warden:
 
         client names who asked (the MCP client, or cli), for the audit record."""
         started = time.perf_counter()
-        decision = self._decide(sql)
+        decision, columns = self._decide(sql)
         if decision.sql is None:
             return self._recorded(sql, QueryOutcome(decision, None), started, client=client)
         try:
@@ -101,7 +116,8 @@ class Warden:
             refused = _withheld(decision, f"{_audit_problem(exc)}; the query was not run")
             return QueryOutcome(refused, result=None)
         try:
-            outcome = QueryOutcome(decision, result=self.engine.execute(decision.sql))
+            result = self.engine.execute(decision.sql)
+            outcome = QueryOutcome(decision, result=self._masked(result, decision, columns))
         except EngineError as exc:
             outcome = QueryOutcome(decision, result=None, error=exc)
         except Exception as exc:
@@ -112,15 +128,66 @@ class Warden:
             raise
         return self._recorded(sql, outcome, started, client=client)
 
-    def _decide(self, sql: str) -> Decision:
+    def _decide(self, sql: str) -> tuple[Decision, int | None]:
+        """The decision, and how many columns the result will have if any are masked (None
+        if none are), to check the rows against before masking them by position."""
         ctx = CheckContext(sql=sql, dialect=self.dialect)
         decision = replace(self.pipeline.run(ctx), profile=self.profile)
         if ctx.cost is not None:  # kept on a refusal too: the audit record shows the estimate
             limit = self.cost_check.limits.max_total_cost
             decision = replace(decision, cost=ctx.cost, cost_limit=limit)
         if not decision.allowed:
-            return decision
-        return replace(decision, sql=ctx.sql_to_run(), rewrites=tuple(ctx.rewrites))
+            return decision, None
+        decision = replace(decision, sql=ctx.sql_to_run(), rewrites=tuple(ctx.rewrites))
+        lineage = ctx.lineage
+        if lineage is None or not lineage.masked:
+            return decision, None
+        return replace(decision, masked=self._masked_outputs(lineage)), len(lineage.outputs)
+
+    def _masked_outputs(self, lineage: Lineage) -> tuple[MaskedOutput, ...]:
+        masked = []
+        for position, output in enumerate(lineage.outputs):
+            flow = output.flow
+            if not flow.columns:
+                continue
+            sources = tuple(sorted(".".join(column) for column in flow.columns))
+            if flow.unchanged:
+                (column,) = flow.columns
+                strategy = self.masks[column].strategy
+            else:
+                # Computed or mixed: no one column's mask fits, so it is hidden whole. As
+                # NULL if a source hides even whether it has a value, else as [REDACTED].
+                hide = any(self.masks[column].strategy == "null" for column in flow.columns)
+                strategy = "null" if hide else "redact"
+            masked.append(
+                MaskedOutput(position, output.name, strategy, sources, computed=not flow.unchanged)
+            )
+        return tuple(masked)
+
+    def _masked(self, result: Result, decision: Decision, columns: int | None) -> Result:
+        """result with its masked columns masked."""
+        if not decision.masked:
+            return result
+        if len(result.columns) != columns:
+            # Masks go by position: if the columns aren't the ones followed, none of them can
+            # be trusted to be in its place, so nothing comes back.
+            raise EngineError(
+                f"the result has {len(result.columns)} columns where {columns} were expected, "
+                "so its masked columns can't be found; nothing is returned"
+            )
+        masks = {masked.position: self._mask_for(masked) for masked in decision.masked}
+        rows = tuple(
+            tuple(masks[i].apply(value) if i in masks else value for i, value in enumerate(row))
+            for row in result.rows
+        )
+        return replace(result, rows=rows)
+
+    def _mask_for(self, masked: MaskedOutput) -> Mask:
+        if masked.computed:
+            return Null() if masked.strategy == "null" else Redact()
+        (source,) = masked.sources
+        schema, table, column = source.split(".")
+        return self._masks[(schema, table, column)]
 
     def _recorded(
         self,
@@ -178,6 +245,7 @@ class Warden:
             error=None if error is None else str(error),
             client=client,
             cost_estimate=None if decision.cost is None else decision.cost.total_cost,
+            masked_columns=tuple(masked.column for masked in decision.masked),
             rows_returned=None if result is None else len(result.rows),
             truncated=None if result is None else result.truncated,
         )

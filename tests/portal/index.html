@@ -91,6 +91,8 @@
   .label { color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
   .notes { margin: 0; padding-left: 18px; color: var(--warn); }
   .cost { font-size: 13px; } .cost.over strong { color: var(--bad); }
+  .tag.mask { margin-left: 6px; font-weight: normal; }
+  .notes.masked { color: var(--text); }
   .cost code { font-size: 12px; }
   .table-wrap { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: 6px; }
   table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12.5px; }
@@ -348,6 +350,11 @@ function renderDecision(tool, result) {
     el("span", { class: "ms" }, `${step.duration_ms.toFixed(2)} ms`),
   ))));
 
+  if (payload.masked_columns && payload.masked_columns.length) {
+    box.append(el("div", { class: "label" }, tool === "check_query" ? "Would be masked" : "Masked"),
+      el("ul", { class: "notes masked" }, payload.masked_columns.map(m =>
+        el("li", {}, el("code", {}, m.column), ` · ${maskNote(m)}`))));
+  }
   if (payload.cost) {
     const c = payload.cost;
     const over = c.total_cost > c.max_total_cost;
@@ -364,6 +371,11 @@ function renderDecision(tool, result) {
   if (payload.sql) {
     box.append(el("div", { class: "label" }, tool === "check_query" ? "Would run" : "Ran"), el("pre", {}, payload.sql));
   }
+}
+
+// How a masked column is masked: "hmac, from public.customers.email".
+function maskNote(m) {
+  return `${m.strategy}, from ${m.sources.join(", ")}`;
 }
 
 // As the CLI prints costs: 8.44, 500, 14,543, 12,847,522,946.
@@ -384,8 +396,10 @@ function renderResults(tool, result) {
     box.replaceChildren(el("span", { class: "empty" }, why));
     return;
   }
+  const masked = new Map((result.structuredContent.masked_columns || []).map(m => [m.position, m]));
   const table = el("table", {},
-    el("thead", {}, el("tr", {}, rows.columns.map(c => el("th", {}, c)))),
+    el("thead", {}, el("tr", {}, rows.columns.map((c, i) => el("th", {}, c,
+      masked.has(i) ? el("span", { class: "tag warn mask", title: `masked: ${maskNote(masked.get(i))}` }, masked.get(i).strategy) : null)))),
     el("tbody", {}, rows.rows.map(row => el("tr", {}, row.map(v => v === null
       ? el("td", { class: "null" }, "NULL")
       : el("td", {}, typeof v === "object" ? JSON.stringify(v) : v))))),
@@ -420,6 +434,7 @@ function renderTables(result) {
       el("ul", {}, t.columns.map(c => el("li", {},
         el("button", { class: "link", title: "Insert at the cursor", onclick: () => insertAtCursor(c.name) }, c.name),
         el("span", { class: "type" }, c.type),
+        c.mask ? el("span", { class: "tag warn mask", title: "comes back masked; it can be selected or counted, not filtered on" }, c.mask) : null,
       ))),
     );
   }));

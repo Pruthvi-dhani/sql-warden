@@ -33,7 +33,7 @@ def format_decision(decision: Decision, *, dry_run: bool) -> str:
         lines.append("→ allowed" + (f" ({profile})" if profile else ""))
     if decision.allowed:
         lines += format_cost_line(decision)
-    lines += [f"  {note}" for note in format_rewrites(decision)]
+    lines += [f"  {note}" for note in [*format_masked(decision), *format_rewrites(decision)]]
     if dry_run and decision.sql is not None:
         lines.append(f"  would run: {decision.sql}")
     return "\n".join(lines)
@@ -48,6 +48,20 @@ def format_cost_line(decision: Decision) -> list[str]:
     return [
         f"  cost: {format_cost(cost.total_cost)} of {format_cost(limit)} allowed "
         f"(most of it: {cost.top_node})"
+    ]
+
+
+def format_masked(decision: Decision) -> list[str]:
+    """One note per masked column of the result: `masked: email (hmac)`."""
+    return [
+        f"masked: {masked.column} ("
+        + (
+            f"computed from {', '.join(masked.sources)}, hidden"
+            if masked.computed
+            else masked.strategy
+        )
+        + ")"
+        for masked in decision.masked
     ]
 
 
@@ -88,7 +102,8 @@ def format_tables(response: TablesResponse) -> str:
     names = [f"{table.schema_name}.{table.name}" for table in response.tables]
     width = max((len(name) for name in names), default=0)
     lines = [
-        f"{name.ljust(width)}  {', '.join(c.name for c in table.columns)}"
+        f"{name.ljust(width)}  "
+        + ", ".join(c.name + (f" ({c.mask})" if c.mask else "") for c in table.columns)
         + ("" if table.all_columns else "  (some columns)")
         for name, table in zip(names, response.tables, strict=True)
     ]
@@ -101,7 +116,11 @@ def format_table_detail(response: TableResponse) -> str:
     table = response.table
     width = max(len(column.name) for column in table.columns)
     lines = [f"{table.schema_name}.{table.name} (profile {response.profile})"]
-    lines += [f"  {column.name.ljust(width)}  {column.type}" for column in table.columns]
+    lines += [
+        f"  {column.name.ljust(width)}  {column.type}"
+        + (f"  masked: {column.mask}" if column.mask else "")
+        for column in table.columns
+    ]
     lines.append(
         "SELECT * is allowed"
         if table.all_columns

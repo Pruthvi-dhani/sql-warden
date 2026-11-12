@@ -12,6 +12,7 @@ from sql_warden.config import (
     EVERYTHING,
     IMPLICIT_PROFILE,
     CostConfig,
+    MaskRule,
     ProfileConfig,
     WardenConfig,
 )
@@ -65,6 +66,8 @@ class Profile:
     """The profile's row cap; None to use warehouse.max_rows."""
     cost: CostConfig = field(default_factory=CostConfig)
     """The cost limits: the profile's own, filled in from the top-level cost section."""
+    masks: Mapping[tuple[str, str, str], MaskRule] = field(default_factory=dict)
+    """(schema, table, column) → how the profile sees it."""
 
 
 def profile_cost(config: WardenConfig, profile: ProfileConfig) -> CostConfig:
@@ -105,4 +108,10 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
         access=Access.from_config(profile),
         max_rows=profile.max_rows,
         cost=profile_cost(config, profile),
+        masks={_column(name): rule for name, rule in profile.masks.items()},
     )
+
+
+def _column(name: str) -> tuple[str, str, str]:
+    schema, table, column = name.split(".")
+    return schema, table, column

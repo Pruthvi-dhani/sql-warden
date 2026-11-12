@@ -492,7 +492,7 @@ profiles:
   code that masks results; a test pins that down until then. Where the hmac key lives in the
   config is decided there too.
 
-**5.2 Output lineage** ✅ done
+**5.2 Output lineage** ✅ done (`2f258e3`)
 - `lineage.py` maps each output column back to its source columns, through aliases,
   expressions, CTEs and UNIONs. Any output derived from a masked column is masked.
 - If a masked column is used in WHERE/JOIN/GROUP BY/ORDER BY, the query is refused with
@@ -530,10 +530,30 @@ profiles:
 - Still not reachable from `warden.yaml`: the `Warden` takes `masks` as an argument, and the
   config section opens in 5.3.
 
-**5.3 Apply masks at execution**
+**5.3 Apply masks at execution** ✅ done
 - The masks run on result rows in `Warden`. Masked columns are listed in the result metadata
   and in the audit record.
 - Tests: an integration test on `customers.ssn` and `email`.
+- As built: `profiles.<name>.masks` maps `schema.table.column` to a rule. A mask on a table or
+  column the profile doesn't read is a config error (most likely a typo that would leave the
+  real column in the clear). `masking.key` is the hmac key, one for every profile so a value
+  gets one token whoever sees it. It is a `SecretStr`, at least 16 bytes, never printed
+  (`config validate` says only "hmac key set"), and required as soon as a profile uses hmac:
+  sql-warden ships no key. The example config adds a `support` profile (customers, orders,
+  products; `ssn: redact`, `phone: partial`, `email: hmac`) and reads the key from
+  `WARDEN_MASK_KEY`, with a demo-only default.
+- The `Warden` builds the masks once (a missing hmac key stops it starting), works out each
+  result column's mask when it decides (`Decision.masked`: position, name, strategy, sources)
+  and applies them to the rows by position after the query runs. If the result's column count
+  isn't the one followed, nothing comes back. A column computed or mixed from masked columns
+  is hidden whole: `[REDACTED]`, or NULL if one of its sources is `null`-masked. That covers a
+  `UNION ALL` of two masked columns and expressions on an `allow_in_predicates` column.
+- Shown everywhere: `masked_columns` in MCP responses (a dry run says what would be masked),
+  `mask` on each column from `list_tables`/`describe_table`, `masked: email (hmac)` notes in the
+  CLI, tags in the portal's Results, Decision and Tables panels, `masked_columns` in the audit
+  record, and the masks per profile in `config validate`. The MCP instructions tell agents
+  masked columns can only be selected or counted.
+- The portal examples gained a masking group for `support`; the integration test checks each.
 
 ## Phase 6 — Sessions & query budgets
 **6.1 Session store**

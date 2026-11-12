@@ -25,9 +25,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
 > work today; every request is recorded in the audit database, readable with
-> `sql-warden audit`; and the database planner's cost estimate gates every query before it
-> runs, which completes Phase 4. Next: masking sensitive columns. See the
-> [plan](docs/plan.md) for the roadmap.
+> `sql-warden audit`; the database planner's cost estimate gates every query before it runs;
+> and sensitive columns come back masked per profile, which completes Phase 5. Next: sessions
+> and query budgets. See the [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -202,6 +202,19 @@ uv run sql-warden audit show 5019a2f1 --json             # an id, or its first f
     note: added LIMIT 101 (row cap 100 + 1 to detect truncation)
     would run: SELECT id FROM orders LIMIT 101
   ```
+- **masking**: for a profile with [masked columns](#masked-columns), a masked column may
+  only be selected as it is (then its values come back masked) or counted. Anything else could
+  reveal what the mask hides, and is refused:
+
+  | Try (as the example's `support` profile)                      | Refused with                  |
+  |---------------------------------------------------------------|-------------------------------|
+  | `select id from customers where ssn like '123%'`              | `MASKED_COLUMN_IN_PREDICATE`  |
+  | `... join ... on c.email = ...`, `group by email`, `order by phone`, `distinct ssn` | `MASKED_COLUMN_IN_PREDICATE` |
+  | `select upper(email)`, `split_part(email, '@', 2)`, `max(ssn)` | `MASKED_COLUMN_IN_EXPRESSION` |
+  | `select count(distinct ssn) from customers`                   | allowed                       |
+
+  The column is followed through aliases, CTEs, subqueries and unions, so renaming it changes
+  nothing.
 - **cost**: the database planner's estimate for the SQL that would run, from `EXPLAIN`, which
   plans a query without running it (never `EXPLAIN ANALYZE`). A query estimated above
   `cost.max_total_cost` (1,000,000 by default; a profile can set its own) is refused before it
@@ -340,7 +353,7 @@ Values can reference environment variables as `${NAME}` or `${NAME:-default}`, s
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
 enforces it. Today that is `warehouse` (connection, timeout, row cap), `audit` (the audit
 database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists), `cost`
-(`max_total_cost`) and `profiles`;
+(`max_total_cost`), `masking` (the hmac key) and `profiles`;
 [warden.example.yaml](warden.example.yaml) documents every key.
 
 ### Profiles
@@ -382,6 +395,44 @@ unknown name is an error, never a fallback. A profile's own `dsn` wins over `--d
 `--max-rows` in the same way. Its `cost` limits replace the top-level ones it names, and the
 rest come from the `cost` section. Every decision names its profile: the CLI prints it, and
 `--json` and the MCP results carry `profile`.
+
+### Masked columns
+
+A profile can see a column it may read only masked. Masks are listed under the profile, so
+`admin` can see in the clear what `support` sees masked:
+
+```yaml
+masking:
+  key: ${WARDEN_MASK_KEY}      # for hmac; never in the file itself
+profiles:
+  support:
+    tables:
+      public.customers: "*"
+    masks:
+      public.customers.ssn: redact     # [REDACTED]
+      public.customers.phone: partial  # ********0001: the last 4 kept
+      public.customers.email: hmac     # 3f9a1c0b7e2d4a61: a keyed token
+```
+
+| Strategy  | Shows                                  | Settings                                        |
+|-----------|----------------------------------------|-------------------------------------------------|
+| `redact`  | `[REDACTED]`                           | `{strategy: redact, text: "***"}`               |
+| `partial` | the ends, the rest starred: `********0001` | `keep_first`, `keep_last` (alone: the last 4). Never more than half a value |
+| `hmac`    | a 16-hex-character token, the same for the same value, so results can still be matched and counted | needs `masking.key` (16+ bytes), shared by every profile |
+| `null`    | nothing, not even whether there was a value | |
+
+NULL stays NULL under the first three. A column made from more than one masked column (a
+`UNION ALL` of two, say) comes back hidden whole. Responses list `masked_columns`, the CLI
+prints `masked: email (hmac)`, `list_tables` marks masked columns with `mask`, and the audit
+record lists them too.
+
+A masked column can be selected or counted, nothing more (see the **masking** check). For a
+column that is hidden but not secret, `{strategy: hmac, allow_in_predicates: true}` lets
+queries filter, join, group and sort on it; what is computed from it still comes back hidden.
+
+The hmac key is a secret: whoever has it can check a guess against a token. sql-warden has no
+built-in key and won't start if a profile uses `hmac` without one. The example config's
+default after `:-` is for the local demo stack only.
 
 `list_tables`, `describe_table` and `sql-warden tables` show only what the profile may query,
 so an agent never learns that the other tables exist. Each table says `all_columns`: whether

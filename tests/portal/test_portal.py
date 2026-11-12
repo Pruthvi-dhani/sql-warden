@@ -416,18 +416,21 @@ class TestLauncherProfiles:
     ) -> None:
         outcome = CliRunner().invoke(main, ["--no-open"])
         assert outcome.exit_code == 0, outcome.output
-        assert "profiles all, public, admin" in outcome.output
-        assert "no config file, so public, admin come from warden.example.yaml" in outcome.output
+        assert "profiles all, public, support, admin" in outcome.output
+        assert (
+            "no config file, so public, support, admin come from warden.example.yaml"
+            in outcome.output
+        )
         # public connects as its own role, as the example config says; all and admin as the
         # warehouse's reader.
         users = [engine.dsn.split("://")[1].split(":")[0] for engine in engines]
-        assert users == ["warden_reader", "warden_public", "warden_reader"]
+        assert users == ["warden_reader", "warden_public", "warden_reader", "warden_reader"]
         with serving(served[0]) as base_url:
             assert _get_json(f"{base_url}/profiles") == {
-                "profiles": ["all", "public", "admin"],
+                "profiles": ["all", "public", "support", "admin"],
                 "default": "all",
             }
-            for profile in ("all", "public", "admin"):  # each is its own server
+            for profile in ("all", "public", "support", "admin"):  # each is its own server
                 client = PortalClient(base_url, endpoint=f"/p/{profile}/mcp")
                 client.connect()
                 listed = client.call_tool("list_tables")["structuredContent"]
@@ -442,7 +445,9 @@ class TestLauncherProfiles:
             assert _get_json(f"{base_url}/profiles")["default"] == "admin"
         unknown = CliRunner().invoke(main, ["--no-open", "--profile", "x"])
         assert unknown.exit_code == 1
-        assert "unknown profile 'x': the portal serves all, public, admin" in unknown.output
+        assert "unknown profile 'x': the portal serves all, public, support, admin" in (
+            unknown.output
+        )
 
     def test_without_profiles_there_is_one(self, served: list[Any], tmp_path: Path) -> None:
         empty = tmp_path / "warden.yaml"

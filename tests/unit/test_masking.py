@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from sql_warden.config import ConfigError, MaskRule, parse_config
+from sql_warden.config import MaskRule
 from sql_warden.pipeline.masking import (
     REDACTED,
     Hmac,
@@ -258,11 +258,3 @@ class TestRules:
         with pytest.raises(ValidationError) as caught:
             MaskRule.model_validate(rule)
         assert message in str(caught.value)
-
-
-def test_warden_yaml_takes_no_masks_until_they_are_applied() -> None:
-    # A mask in the file that nothing enforces would leave the column in the clear. The
-    # section opens in 5.3, with the code that masks results.
-    text = "version: 1\nprofiles:\n  p:\n    masks:\n      public.customers.ssn: redact\n"
-    with pytest.raises(ConfigError, match=r"profiles\.p\.masks: Extra inputs are not permitted"):
-        parse_config(text)

@@ -20,6 +20,7 @@ from pydantic import (
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
+    SecretStr,
     ValidationError,
     field_validator,
     model_validator,
@@ -142,6 +143,24 @@ class CostConfig(_Section):
     a 1M-row table costs about 20,000; a cross join of two, about 10^10."""
 
 
+class MaskingConfig(_Section):
+    key: SecretStr | None = None
+    """The key for hmac masks, shared by every profile: a value gets one token whichever
+    profile sees it. Needed only if a profile uses hmac. Keep it out of the file, as
+    `key: ${WARDEN_MASK_KEY}`: whoever has it can check guesses against tokens. Never shown."""
+
+    @field_validator("key")
+    @classmethod
+    def _long_enough(cls, key: SecretStr | None) -> SecretStr | None:
+        if key is not None and len(key.get_secret_value().encode()) < MIN_MASK_KEY_BYTES:
+            raise PydanticCustomError(
+                "mask_key_too_short",
+                "must be at least {length} bytes",
+                {"length": MIN_MASK_KEY_BYTES},
+            )
+        return key
+
+
 class AuditConfig(_Section):
     """Where every request is recorded. Always Postgres, whatever the warehouse engine, and on
     its own instance: the warehouse role must not be able to touch the audit log. There is no
@@ -152,6 +171,7 @@ class AuditConfig(_Section):
 
 
 EVERYTHING: Literal["*"] = "*"
+MIN_MASK_KEY_BYTES = 16
 ColumnRule = Literal["*"] | tuple[str, ...]
 """Every column of a table, including ones added later, or just these."""
 
@@ -220,6 +240,45 @@ class ProfileConfig(_Section):
     """The profile's row cap, instead of warehouse.max_rows."""
     cost: CostConfig | None = None
     """The profile's cost limits; any it leaves out come from the top-level cost section."""
+    masks: dict[str, MaskRule] = Field(default_factory=dict)
+    """schema.table.column → how the profile sees it. Exact names, as in `tables`."""
+
+    @field_validator("masks")
+    @classmethod
+    def _mask_names(cls, masks: dict[str, MaskRule]) -> dict[str, MaskRule]:
+        for name in masks:
+            parts = name.split(".")
+            if len(parts) != 3 or not all(parts):
+                raise PydanticCustomError(
+                    "mask_name",
+                    "'{name}' must be schema.table.column, e.g. public.customers.ssn",
+                    {"name": name},
+                )
+        return masks
+
+    @model_validator(mode="after")
+    def _masks_are_readable(self) -> Self:
+        # A mask on something the profile can't read protects nothing: most likely a typo,
+        # which would leave the column it meant in the clear.
+        for name in self.masks:
+            table, _, column = name.rpartition(".")
+            if self.tables == EVERYTHING:
+                continue
+            assert isinstance(self.tables, dict)
+            if table not in self.tables:
+                raise PydanticCustomError(
+                    "mask_unreadable",
+                    "masks {name}, but the profile doesn't read {table}",
+                    {"name": name, "table": table},
+                )
+            columns = self.tables[table]
+            if columns != EVERYTHING and column not in columns:
+                raise PydanticCustomError(
+                    "mask_unreadable",
+                    "masks {name}, but the profile doesn't read column {column} of {table}",
+                    {"name": name, "column": column, "table": table},
+                )
+        return self
 
     @field_validator("tables", mode="before")
     @classmethod
@@ -269,6 +328,7 @@ class WardenConfig(_Section):
     warehouse: WarehouseConfig = WarehouseConfig()
     shape: ShapeConfig = ShapeConfig()
     cost: CostConfig = CostConfig()
+    masking: MaskingConfig = MaskingConfig()
     audit: AuditConfig = AuditConfig()
     profiles: dict[str, ProfileConfig] | None = None
     """None: no profiles are defined, and the one profile is the implicit `all`."""
@@ -320,6 +380,21 @@ class WardenConfig(_Section):
                 "default_profile is '{name}', which is not one of the profiles ({known})",
                 {"name": default, "known": ", ".join(self.profiles)},
             )
+        return self
+
+    @model_validator(mode="after")
+    def _hmac_has_a_key(self) -> Self:
+        if self.masking.key is not None:
+            return self
+        for profile_name, profile in (self.profiles or {}).items():
+            for name, rule in profile.masks.items():
+                if rule.strategy == "hmac":
+                    raise PydanticCustomError(
+                        "mask_key_missing",
+                        "profile {profile} masks {name} with hmac, which needs masking.key "
+                        "(set it from the environment: key: ${WARDEN_MASK_KEY})",
+                        {"profile": profile_name, "name": name},
+                    )
         return self
 
 

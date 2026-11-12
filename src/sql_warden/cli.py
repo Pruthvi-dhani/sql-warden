@@ -32,6 +32,7 @@ from sql_warden.render import (
     format_audit_event,
     format_audit_line,
     format_decision,
+    format_masked,
     format_rewrites,
     format_table,
     format_table_detail,
@@ -174,6 +175,10 @@ def build_warden(
         profile=active.name,
         access=active.access,
         cost=active.cost,
+        masks=active.masks,
+        mask_key=None
+        if config.masking.key is None
+        else config.masking.key.get_secret_value().encode(),
     )
 
 
@@ -298,7 +303,7 @@ def query(
         raise SystemExit(EXIT_REFUSED)
     if not as_json:
         click.echo(format_table(outcome.result, profile=warden.profile))
-        for note in format_rewrites(outcome.decision):
+        for note in [*format_masked(outcome.decision), *format_rewrites(outcome.decision)]:
             click.echo(note)
 
 
@@ -525,6 +530,8 @@ def validate(state: CliState, path: Path | None) -> None:
             f"{len(shape.denied_functions)} extra denied"
         )
     click.echo(f"  cost:      refused above an estimated {format_cost(loaded.cost.max_total_cost)}")
+    if loaded.masking.key is not None:
+        click.echo("  masking:   hmac key set")
     for line in describe_profiles(loaded):
         click.echo(line)
 
@@ -561,6 +568,9 @@ def describe_profiles(config: WardenConfig) -> list[str]:
         lines += [f"               {line}" for line in describe_profile_tables(profile)]
         if profile.max_rows is not None:
             lines.append(f"               max {profile.max_rows} rows")
+        for name, rule in profile.masks.items():
+            opened = ", may be filtered and joined on" if rule.allow_in_predicates else ""
+            lines.append(f"               masks {name} ({rule.strategy}{opened})")
         if profile.cost is not None:
             cost = profile_cost(config, profile)
             lines.append(

@@ -116,9 +116,9 @@ class TestMcp:
                 "schema": "public",
                 "name": "products",
                 "columns": [
-                    {"name": "id", "type": "integer"},
-                    {"name": "name", "type": "integer"},
-                    {"name": "price_cents", "type": "integer"},
+                    {"name": "id", "type": "integer", "mask": None},
+                    {"name": "name", "type": "integer", "mask": None},
+                    {"name": "price_cents", "type": "integer", "mask": None},
                 ],
                 "all_columns": False,
             },
@@ -193,7 +193,7 @@ class TestCli:
                 {
                     "schema": "public",
                     "name": "products",
-                    "columns": [{"name": "id", "type": "integer"}],
+                    "columns": [{"name": "id", "type": "integer", "mask": None}],
                     "all_columns": False,
                 }
             ],
