@@ -19,13 +19,13 @@ import uvicorn
 from click.testing import CliRunner
 
 from sql_warden.audit import MemoryAuditSink
-from sql_warden.config import load_config
+from sql_warden.config import BudgetConfig, load_config
 from sql_warden.models import RefusalCode
 from sql_warden.server import QueryResponse
 from sql_warden.warden import Warden
 from tests.portal.__main__ import main
 from tests.portal.app import DOCS, EXAMPLES, PAGE, create_portal_app
-from tests.support import serving
+from tests.support import TOOLS, serving
 from tests.unit.conftest import FakeEngine
 from tests.unit.test_access_check import ADMIN, CATALOG, PUBLIC
 
@@ -211,7 +211,7 @@ def test_the_docs_page_only_lists_tools(client: PortalClient) -> None:
     assert methods == ["initialize", "notifications/initialized", "tools/list"]
     _, _, messages = client.post({"jsonrpc": "2.0", "id": 99, "method": "tools/list"})
     tools = {tool["name"]: tool for tool in messages[0]["result"]["tools"]}
-    assert set(tools) == {"run_query", "check_query", "list_tables", "describe_table"}
+    assert set(tools) == TOOLS
     for name in ("run_query", "check_query"):
         assert set(tools[name]["outputSchema"]["properties"]) == set(QueryResponse.model_fields)
     assert tools["run_query"]["inputSchema"]["required"] == ["sql"]
@@ -285,6 +285,26 @@ def test_the_audit_log_records_the_connections_session(engine: FakeEngine) -> No
     assert event.session_id == payload["session_id"] != warden.session_id
     assert client.session_id is not None
     assert client.session_id not in repr(event)
+
+
+def test_each_connection_has_a_budget_of_its_own(engine: FakeEngine) -> None:
+    warden = Warden(engine, audit=MemoryAuditSink(), budget=BudgetConfig(max_queries=1))
+    with serving(create_portal_app(warden)) as base_url:
+        first, second = PortalClient(base_url), PortalClient(base_url)
+        first.connect()
+        second.connect()
+        ran = first.call_tool("run_query", sql="select 1")
+        refused = first.call_tool("run_query", sql="select 1")
+        status = first.call_tool("budget_status")["structuredContent"]
+        fresh = second.call_tool("budget_status")["structuredContent"]
+        other = second.call_tool("run_query", sql="select 1")  # the page's reconnect
+    assert ran["isError"] is False
+    assert refused["structuredContent"]["code"] == "BUDGET_EXHAUSTED"
+    assert refused["structuredContent"]["budget"]["exhausted"] == "max_queries"
+    assert status["session_id"] == ran["structuredContent"]["session_id"]
+    assert status["budget"]["queries"] == {"used": 1, "limit": 1, "remaining": 0}
+    assert fresh["budget"]["queries"] == {"used": 0, "limit": 1, "remaining": 1}
+    assert other["isError"] is False
 
 
 def test_an_unknown_session_gets_404_so_the_page_reconnects(portal_url: str) -> None:

@@ -8,6 +8,9 @@ from contextlib import contextmanager
 import uvicorn
 from starlette.types import ASGIApp
 
+TOOLS = {"run_query", "check_query", "budget_status", "list_tables", "describe_table"}
+"""Every tool the MCP server offers."""
+
 
 @contextmanager
 def serving(app: ASGIApp) -> Iterator[str]:

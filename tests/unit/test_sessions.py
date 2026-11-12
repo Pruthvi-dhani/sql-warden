@@ -6,14 +6,16 @@ from collections.abc import Callable
 import pytest
 from pydantic import ValidationError
 
-from sql_warden.config import BudgetConfig, ConfigError, parse_config
+from sql_warden.config import BudgetConfig
 from sql_warden.sessions import (
+    BudgetStatus,
     Charge,
     MemorySessionStore,
     SessionStore,
     Usage,
     new_session_id,
     over,
+    reached,
     valid_session_id,
 )
 
@@ -242,7 +244,34 @@ class TestBudgetConfig:
         with pytest.raises(ValidationError):
             BudgetConfig.model_validate(limits)
 
-    def test_warden_yaml_doesnt_take_budgets_before_the_check_that_enforces_them(self) -> None:
-        # A rule in the file is never silently ignored: the section arrives with its check.
-        with pytest.raises(ConfigError, match="budgets: Extra inputs are not permitted"):
-            parse_config("version: 1\nbudgets:\n  max_queries: 10\n")
+    def test_limited_once_any_limit_is_set(self) -> None:
+        assert not BudgetConfig().limited
+        assert BudgetConfig(max_refusals=3).limited
+
+
+class TestReached:
+    BUDGET = BudgetConfig(max_queries=3, max_refusals=2)
+
+    def test_there_is_room_under_every_limit(self) -> None:
+        assert reached(Usage(queries=2, refusals=1, rows_returned=10**6), self.BUDGET) is None
+
+    def test_equal_to_a_limit_has_reached_it(self) -> None:
+        # Unlike over(): a charge may bring usage up to a limit, and then the session is done.
+        assert reached(Usage(queries=3), self.BUDGET) == "max_queries"
+        assert reached(Usage(refusals=5), self.BUDGET) == "max_refusals"
+
+
+class TestBudgetStatus:
+    def test_lines_and_the_limit_reached(self) -> None:
+        status = BudgetStatus(
+            Usage(queries=2, total_cost=30.5, rows_returned=7, refusals=4),
+            BudgetConfig(max_queries=5, max_refusals=4),
+        )
+        assert status.lines() == (
+            ("queries", 2, 5),
+            ("total_cost", 30.5, None),
+            ("rows_returned", 7, None),
+            ("refusals", 4, 4),
+        )
+        assert status.exhausted == "max_refusals"
+        assert BudgetStatus(Usage(), BudgetConfig()).exhausted is None

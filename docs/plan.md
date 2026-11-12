@@ -43,6 +43,7 @@ src/sql_warden/
   pipeline/
     base.py          # Check protocol, CheckContext, Pipeline (ordered, short-circuit, per-check trace, fail-closed)
     parse.py         # ParseCheck: parses once with sqlglot, readable errors
+    budget.py        # BudgetGate (first) and BudgetReservation (last): the session's budget
     shape.py         # ShapeCheck: structural rules + LIMIT rewrite
     access.py        # AccessCheck: tables and columns per profile, tables pinned to schemas
   catalog.py         # Catalog: the role's tables and columns, cached, as a sqlglot schema
@@ -63,7 +64,6 @@ tests/unit/  tests/integration/ (marker: integration)
 Still to come:
 ```
 src/sql_warden/
-  pipeline/  budget.py
   engines/   snowflake.py
 tests/portal/  tests/snowflake/ (marker: snowflake)
 ```
@@ -556,7 +556,7 @@ profiles:
 - The portal examples gained a masking group for `support`; the integration test checks each.
 
 ## Phase 6 — Sessions & query budgets
-**6.1 Session store** ✅ done
+**6.1 Session store** ✅ done (`168975e`)
 - Each session has a `session_id` (per MCP connection; the CLI takes `--session`). Budgets:
   `max_queries`, `max_total_cost`, `max_rows_returned`, and `max_refusals`, which stops an
   agent from brute-forcing its way through the checks. The store is thread-safe and in-memory,
@@ -585,11 +585,43 @@ profiles:
   in 6.2 with the check that enforces them, so a limit in the file is never one that is
   ignored. `config.BudgetConfig` (the four limits, each optional) is there for the store.
 
-**6.2 Budget check + post-execution accounting**
+**6.2 Budget check + post-execution accounting** ✅ done
 - Before running, the check refuses `BUDGET_EXHAUSTED` with the remaining budget. After
   running, it charges the actual cost and rows. A new `budget_status` MCP tool shows the state.
   Limits come from a `budgets` section with per-profile overrides.
 - Tests: unit tests (the last query allowed, the next refused); an MCP tool test.
+- As built: no limit is set unless the file sets one, since a session can live as long as the
+  agent that opened it. `budgets` at the top level applies to every profile; a profile's own
+  `budgets` replaces the limits it names, and `null` lifts one.
+- The budget sits around the other checks, in two parts that are both `budget` in the trace
+  (`pipeline/budget.py`):
+  - `BudgetGate` runs first. A session that has reached a limit is refused with
+    `BUDGET_EXHAUSTED` before even the parse, so it learns nothing more and the planner is
+    left alone; the trace is then that one step.
+  - `BudgetReservation` runs last, after the cost check and any checks given to the `Warden`.
+    It charges the query and its estimated cost with one `charge(..., within=budget)`, so
+    requests arriving at once can't spend the same last query. A query that costs more than
+    what is left is refused with `COST_OVER_BUDGET` (a cheaper one may fit), a second code
+    beside the plan's one, so an agent can tell "try something cheaper" from "stop". A dry
+    run is told whether the query would fit and charged nothing.
+- Charged afterwards by the `Warden`: rows, once the query has run (so the query that passes
+  `max_rows_returned` still comes back and the next is refused), and refusals, dry runs
+  included. Not counted as refusals: the budget's own, and `COST_UNAVAILABLE`,
+  `CATALOG_UNAVAILABLE`, `AUDIT_UNAVAILABLE` and `INTERNAL_ERROR`, which aren't the caller's
+  doing. "Actual cost" is the planner's estimate: nothing measures a query's real cost.
+- Usage is counted for every profile, limits or not; without limits there is no `budget`
+  step in the trace and no `budget` in responses. Fail closed: if the store fails, the gate
+  or reservation refuses with `INTERNAL_ERROR`, and rows that can't be counted are withheld.
+- Shown: `Decision.budget`, `budget` in MCP responses and `--json` (each of queries,
+  total_cost, rows_returned, refusals with `used`, `limit`, `remaining`, and `exhausted`), a
+  `session budget:` line in the CLI, the portal's Decision panel, `config validate`, and the
+  `budget_status` tool, which is free, unrecorded and never refused. The MCP instructions
+  explain budgets and the two codes.
+- The example config sets `max_refusals: 50` for every profile and a small budget for
+  `public` (25 queries, cost 50,000, 500 rows, 10 refusals), easy to reach by hand.
+- Left for later: the store is in memory, so a restart, or the next CLI call, starts from
+  nothing (6.3). A query charged at the reservation and then not run because the audit
+  database went away stays charged. A reconnect is a new session with a new budget (9.3).
 
 **6.3 Budgets survive restarts**
 - Session usage is rebuilt from the audit DB when the server starts.

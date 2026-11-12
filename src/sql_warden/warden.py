@@ -8,7 +8,14 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sql_warden.audit import AuditError, AuditEvent, AuditSink
 from sql_warden.catalog import Catalog
-from sql_warden.config import EVERYTHING, IMPLICIT_PROFILE, CostConfig, MaskRule, ShapeConfig
+from sql_warden.config import (
+    EVERYTHING,
+    IMPLICIT_PROFILE,
+    BudgetConfig,
+    CostConfig,
+    MaskRule,
+    ShapeConfig,
+)
 from sql_warden.engines import Engine, EngineError, Result, Table
 from sql_warden.models import (
     Decision,
@@ -20,6 +27,8 @@ from sql_warden.models import (
 )
 from sql_warden.pipeline import (
     AccessCheck,
+    BudgetGate,
+    BudgetReservation,
     Check,
     CheckContext,
     CostCheck,
@@ -32,7 +41,26 @@ from sql_warden.pipeline.access import DEFAULT_SCHEMAS
 from sql_warden.pipeline.lineage import Lineage, MaskedColumn
 from sql_warden.pipeline.masking import Mask, Null, Redact, build_mask
 from sql_warden.profiles import Access
-from sql_warden.sessions import new_session_id
+from sql_warden.sessions import (
+    BudgetStatus,
+    MemorySessionStore,
+    SessionStore,
+    Usage,
+    new_session_id,
+)
+
+NOT_COUNTED = frozenset(
+    {
+        RefusalCode.BUDGET_EXHAUSTED,
+        RefusalCode.COST_OVER_BUDGET,
+        RefusalCode.CATALOG_UNAVAILABLE,
+        RefusalCode.COST_UNAVAILABLE,
+        RefusalCode.AUDIT_UNAVAILABLE,
+        RefusalCode.INTERNAL_ERROR,
+    }
+)
+"""Refusals that don't count against a session's max_refusals: the budget's own, and the
+ones that are sql-warden's or the database's trouble rather than anything the caller sent."""
 
 
 class Warden:
@@ -57,6 +85,8 @@ class Warden:
         cost: CostConfig | None = None,
         masks: Mapping[MaskedColumn, MaskRule] | None = None,
         mask_key: bytes | None = None,
+        budget: BudgetConfig | None = None,
+        sessions: SessionStore | None = None,
     ) -> None:
         self.engine = engine
         self.audit = audit
@@ -87,6 +117,14 @@ class Warden:
         )
         # Last of the built-in checks: the planner sees only SQL the others approved.
         self.cost_check = CostCheck(engine, cost or CostConfig(), profile=profile)
+        self.budget = budget or BudgetConfig()
+        """What one session may use. Without limits there is no budget check, but usage is
+        still counted."""
+        self.sessions: SessionStore = MemorySessionStore() if sessions is None else sessions
+        # Around the other checks rather than among them: the gate before any of them, the
+        # reservation once they have all passed.
+        self._gate = Pipeline([BudgetGate(self.sessions, self.budget)])
+        self._reservation = Pipeline([BudgetReservation(self.sessions, self.budget)])
         self.pipeline = Pipeline(
             [
                 ParseCheck(),
@@ -103,7 +141,7 @@ class Warden:
     ) -> Decision:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
         started = time.perf_counter()
-        outcome = QueryOutcome(self._decide(sql, session_id)[0], result=None)
+        outcome = QueryOutcome(self._decide(sql, session_id, dry_run=True)[0], result=None)
         return self._recorded(sql, outcome, started, dry_run=True, client=client).decision
 
     def run(
@@ -123,9 +161,16 @@ class Warden:
         except Exception as exc:
             # Nothing can be recorded, so nothing runs, and there is no record to write.
             refused = _withheld(decision, f"{_audit_problem(exc)}; the query was not run")
-            return QueryOutcome(refused, result=None)
+            return QueryOutcome(self._with_budget(refused), result=None)
         try:
             result = self.engine.execute(decision.sql)
+            # Known only now, so charged now: the query that takes a session past its rows
+            # still comes back, and the next request finds the budget used up.
+            if not self._count(self._session(decision), Usage(rows_returned=len(result.rows))):
+                raise EngineError(
+                    "the rows could not be counted against the session's budget, so they "
+                    "are withheld"
+                )
             outcome = QueryOutcome(decision, result=self._masked(result, decision, columns))
         except EngineError as exc:
             outcome = QueryOutcome(decision, result=None, error=exc)
@@ -137,23 +182,72 @@ class Warden:
             raise
         return self._recorded(sql, outcome, started, client=client)
 
-    def _decide(self, sql: str, session_id: str | None = None) -> tuple[Decision, int | None]:
+    def budget_status(self, session_id: str | None = None) -> BudgetStatus:
+        """What the session (without one, this Warden's own) has used, against its budget."""
+        return BudgetStatus(self.sessions.usage(session_id or self.session_id), self.budget)
+
+    def _decide(
+        self, sql: str, session_id: str | None = None, *, dry_run: bool = False
+    ) -> tuple[Decision, int | None]:
         """The decision, and how many columns the result will have if any are masked (None
-        if none are), to check the rows against before masking them by position."""
-        ctx = CheckContext(sql=sql, dialect=self.dialect)
-        decision = replace(
-            self.pipeline.run(ctx), profile=self.profile, session_id=session_id or self.session_id
-        )
+        if none are), to check the rows against before masking them by position.
+
+        Unless it is a dry run, an allowed query is charged to its session here: it is about
+        to run. A refusal is charged either way."""
+        session_id = session_id or self.session_id
+        ctx = CheckContext(sql=sql, dialect=self.dialect, session_id=session_id, dry_run=dry_run)
+        decision = replace(self._checked(ctx), profile=self.profile, session_id=session_id)
         if ctx.cost is not None:  # kept on a refusal too: the audit record shows the estimate
             limit = self.cost_check.limits.max_total_cost
             decision = replace(decision, cost=ctx.cost, cost_limit=limit)
         if not decision.allowed:
+            refused_by = decision.refused_by
+            assert refused_by is not None
+            assert refused_by.refusal is not None
+            if refused_by.refusal.code not in NOT_COUNTED:
+                # Refused either way; if it can't be counted, the gate refuses what follows.
+                self._count(session_id, Usage(refusals=1))
             return decision, None
         decision = replace(decision, sql=ctx.sql_to_run(), rewrites=tuple(ctx.rewrites))
         lineage = ctx.lineage
         if lineage is None or not lineage.masked:
             return decision, None
         return replace(decision, masked=self._masked_outputs(lineage)), len(lineage.outputs)
+
+    def _checked(self, ctx: CheckContext) -> Decision:
+        """The checks' verdict on ctx, with the budget around them."""
+        if self.budget.limited:
+            gate = self._gate.run(ctx)
+            if not gate.allowed:
+                return gate
+        decision = self.pipeline.run(ctx)
+        if not decision.allowed:
+            return decision
+        reserved = self._reservation.run(ctx)
+        if not self.budget.limited and reserved.allowed:
+            return decision  # counted, but with no limits there was nothing to check
+        return replace(decision, trace=(*decision.trace, *reserved.trace))
+
+    def _session(self, decision: Decision) -> str:
+        return decision.session_id or self.session_id
+
+    def _count(self, session_id: str, spent: Usage) -> bool:
+        """Add spent to the session's usage. False if the store failed: callers decide what
+        that costs, rather than a request ending without its audit record."""
+        try:
+            self.sessions.charge(session_id, spent)
+        except Exception:
+            return False
+        return True
+
+    def _with_budget(self, decision: Decision) -> Decision:
+        """decision, with what its session has now used of its budget, if it has one."""
+        if not self.budget.limited:
+            return decision
+        try:
+            return replace(decision, budget=self.budget_status(self._session(decision)))
+        except Exception:
+            return decision  # the store is failing, and the decision already says so
 
     def _masked_outputs(self, lineage: Lineage) -> tuple[MaskedOutput, ...]:
         masked = []
@@ -210,6 +304,7 @@ class Warden:
         client: str | None,
     ) -> QueryOutcome:
         """The outcome, once its audit record is written; if it can't be, a refusal instead."""
+        outcome = replace(outcome, decision=self._with_budget(outcome.decision))
         event = self._event(sql, outcome, started, dry_run=dry_run, client=client)
         writing = time.perf_counter()
         try:

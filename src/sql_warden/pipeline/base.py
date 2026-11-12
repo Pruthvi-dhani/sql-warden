@@ -23,6 +23,10 @@ class CheckContext:
     """The planner's estimate, set by the cost check."""
     lineage: Lineage | None = None
     """Which of the result's columns come from masked columns, set by the masking check."""
+    session_id: str | None = None
+    """The session the request belongs to; the Warden always sets it."""
+    dry_run: bool = False
+    """True if the query is only being checked: then nothing may be charged for it."""
 
     def sql_to_run(self) -> str:
         """The SQL that runs if the query is allowed: the tree as the checks left it,

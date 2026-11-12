@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from sql_warden.engines import CostEstimate, EngineError, Result
+from sql_warden.sessions import BudgetStatus
 
 
 class RefusalCode(StrEnum):
@@ -40,6 +41,12 @@ class RefusalCode(StrEnum):
     PLAN_FAILED = "PLAN_FAILED"
     """The database rejected the query while planning it: a type error, a table its role
     can't read, a constant like 1/0. Its error says why; retrying won't help."""
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    """The session has used up its budget: its queries, their total cost, the rows returned
+    or its refusals reached the profile's limit. Nothing more runs in this session."""
+    COST_OVER_BUDGET = "COST_OVER_BUDGET"
+    """The planner estimates the query costs more than the session has left to spend. A
+    cheaper query may still fit."""
     AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
     """The request could not be recorded, so nothing it would return is returned."""
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -98,6 +105,9 @@ class Decision:
     """The profile's max_total_cost, when there is an estimate to hold against it."""
     masked: tuple[MaskedOutput, ...] = ()
     """The result's columns that are masked, or would be for a dry run."""
+    budget: BudgetStatus | None = None
+    """What the session has used of its budget, this request included. None for a profile
+    without limits."""
     audit_id: uuid.UUID | None = None
     """The audit record of this request; None only when it could not be written."""
 

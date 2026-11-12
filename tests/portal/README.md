@@ -38,8 +38,10 @@ decide about the query.
 - **Compare**: one row per profile: allowed (with the SQL that would run) or refused (with the
   check, code and reason). The profile the page is on is marked.
 - **Decision**: the verdict, then one line per check that ran (✓/✗, code, reason, time), the
-  planner's estimated cost against the profile's limit (with the costliest step), any rewrites
-  (such as an added LIMIT), and the SQL that ran or would run.
+  planner's estimated cost against the profile's limit (with the costliest step), what the
+  session has used of its budget (for a profile that sets one, like the example's `public`),
+  any rewrites (such as an added LIMIT), and the SQL that ran or would run. **reconnect** in
+  the header starts a new session, with a new budget.
 - **Results**: the rows, with NULLs marked, masked columns tagged with their mask (`hmac`,
   `redact`, ...), and a note when the row cap cut the result off. The Decision panel lists
   the masked columns too, and the Tables panel tags them.

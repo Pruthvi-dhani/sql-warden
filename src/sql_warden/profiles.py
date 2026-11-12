@@ -11,6 +11,7 @@ from typing import Literal
 from sql_warden.config import (
     EVERYTHING,
     IMPLICIT_PROFILE,
+    BudgetConfig,
     CostConfig,
     MaskRule,
     ProfileConfig,
@@ -68,6 +69,9 @@ class Profile:
     """The cost limits: the profile's own, filled in from the top-level cost section."""
     masks: Mapping[tuple[str, str, str], MaskRule] = field(default_factory=dict)
     """(schema, table, column) → how the profile sees it."""
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
+    """What one session may use: the profile's own limits, filled in from the top-level
+    budgets section."""
 
 
 def profile_cost(config: WardenConfig, profile: ProfileConfig) -> CostConfig:
@@ -75,6 +79,14 @@ def profile_cost(config: WardenConfig, profile: ProfileConfig) -> CostConfig:
     if profile.cost is None:
         return config.cost
     return config.cost.model_copy(update=profile.cost.model_dump(exclude_unset=True))
+
+
+def profile_budget(config: WardenConfig, profile: ProfileConfig) -> BudgetConfig:
+    """The profile's session budget: what it sets (null lifts a limit), and the top-level
+    section's for the rest."""
+    if profile.budgets is None:
+        return config.budgets
+    return config.budgets.model_copy(update=profile.budgets.model_dump(exclude_unset=True))
 
 
 def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
@@ -88,7 +100,12 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
                 f"'{IMPLICIT_PROFILE}'"
             )
         return Profile(
-            IMPLICIT_PROFILE, warehouse_dsn, own_dsn=False, implicit=True, cost=config.cost
+            IMPLICIT_PROFILE,
+            warehouse_dsn,
+            own_dsn=False,
+            implicit=True,
+            cost=config.cost,
+            budget=config.budgets,
         )
 
     known = ", ".join(config.profiles)
@@ -109,6 +126,7 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
         max_rows=profile.max_rows,
         cost=profile_cost(config, profile),
         masks={_column(name): rule for name, rule in profile.masks.items()},
+        budget=profile_budget(config, profile),
     )
 
 

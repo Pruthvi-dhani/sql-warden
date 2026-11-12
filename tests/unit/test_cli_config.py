@@ -120,6 +120,7 @@ class TestValidate:
             "  shape:     up to 4 joins, subqueries up to 3 deep",
             "             LIMIT added or lowered to the row cap",
             "  cost:      refused above an estimated 1,000,000",
+            "  budgets:   none: a session is not limited",
             "  profiles:  ! none defined: every server uses the implicit profile 'all',",
             "             which can read everything the warehouse role can",
         ]

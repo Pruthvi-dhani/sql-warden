@@ -9,6 +9,7 @@ from sql_warden.engines import Result
 from sql_warden.models import Decision
 from sql_warden.pipeline.cost import format_cost
 from sql_warden.server import TableResponse, TablesResponse
+from sql_warden.sessions import BudgetStatus
 
 
 def format_decision(decision: Decision, *, dry_run: bool) -> str:
@@ -33,7 +34,8 @@ def format_decision(decision: Decision, *, dry_run: bool) -> str:
         lines.append("→ allowed" + (f" ({profile})" if profile else ""))
     if decision.allowed:
         lines += format_cost_line(decision)
-    lines += [f"  {note}" for note in [*format_masked(decision), *format_rewrites(decision)]]
+    notes = [*format_masked(decision), *format_rewrites(decision), *format_budget(decision)]
+    lines += [f"  {note}" for note in notes]
     if dry_run and decision.sql is not None:
         lines.append(f"  would run: {decision.sql}")
     return "\n".join(lines)
@@ -63,6 +65,31 @@ def format_masked(decision: Decision) -> list[str]:
         + ")"
         for masked in decision.masked
     ]
+
+
+_BUDGET_UNITS = {
+    "queries": "queries",
+    "total_cost": "cost",
+    "rows_returned": "rows",
+    "refusals": "refusals",
+}
+
+
+def describe_budget_status(status: BudgetStatus) -> str:
+    """The limits that are set, with what is used of each: `3 of 20 queries, 0 of 5
+    refusals`. Empty if none is set."""
+    return ", ".join(
+        f"{format_cost(used)} of {format_cost(limit)} {_BUDGET_UNITS[what]}"
+        for what, used, limit in status.lines()
+        if limit is not None
+    )
+
+
+def format_budget(decision: Decision) -> list[str]:
+    """What the session has used of its budget, for a profile that sets one."""
+    if decision.budget is None:
+        return []
+    return [f"session budget: {describe_budget_status(decision.budget)} used"]
 
 
 def format_rewrites(decision: Decision) -> list[str]:

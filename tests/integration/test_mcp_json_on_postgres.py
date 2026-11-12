@@ -16,6 +16,7 @@ import pytest
 from mcp import Client, StdioServerParameters
 
 from tests.integration.conftest import Warehouse
+from tests.support import TOOLS
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -68,7 +69,7 @@ async def test_the_example_entry_serves_the_warehouse(params: StdioServerParamet
 
     assert instructions is not None
     assert "read-only SQL" in instructions
-    assert names == {"run_query", "check_query", "list_tables", "describe_table"}
+    assert names == TOOLS
     assert {t["name"] for t in tables["tables"]} == {
         "customers",
         "employee_salaries",

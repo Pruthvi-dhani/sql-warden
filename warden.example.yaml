@@ -25,6 +25,19 @@ warehouse:
 cost:
   max_total_cost: 1000000
 
+# What one session may use in total. A session is one agent's connection (or the CLI calls
+# given the same --session), and once it reaches a limit nothing more runs in it
+# (BUDGET_EXHAUSTED). A query whose estimated cost is more than the session has left is
+# refused too (COST_OVER_BUDGET), though a cheaper one may still fit. No limit is set unless
+# you set it, here for every profile or under a profile for that one:
+#   max_queries        queries that were allowed and sent to the database
+#   max_total_cost     the sum of their estimated costs, in the units of cost.max_total_cost
+#   max_rows_returned  rows returned, over all of them
+#   max_refusals       requests a check refused, dry runs included: an agent can't try
+#                      query after query until one gets through
+budgets:
+  max_refusals: 50
+
 # The key for hmac masks (see profiles below), shared by every profile. Whoever has it can
 # check guesses against masked values, so set it from the environment. The default after :-
 # is for the local demo stack only: never use it anywhere else.
@@ -61,7 +74,8 @@ shape:
 #
 # A profile can also set its own max_rows (instead of warehouse.max_rows) and its own cost
 # limits (any it leaves out come from the cost section). Like its dsn, they are policy:
-# --max-rows doesn't change a profile's own row cap.
+# --max-rows doesn't change a profile's own row cap. Its own budgets work the same way: any
+# limit it leaves out comes from the budgets section, and `max_refusals: null` lifts one.
 #
 # masks hide columns a profile may read, keyed schema.table.column:
 #   redact   [REDACTED]                     {strategy: redact, text: "***"} to choose the text
@@ -81,6 +95,11 @@ profiles:
     max_rows: 50
     cost:
       max_total_cost: 10000
+    budgets:       # small, so the limits are easy to reach by hand
+      max_queries: 25
+      max_total_cost: 50000
+      max_rows_returned: 500
+      max_refusals: 10
   support:         # a support agent: finds customers and their orders, never sees an SSN
     tables:
       public.customers: "*"

@@ -364,6 +364,10 @@ function renderDecision(tool, result) {
         el("span", { class: "hint" }, ` · about ${c.est_rows.toLocaleString()} ${c.est_rows === 1 ? "row" : "rows"} · costliest step: `),
         el("code", {}, c.top_node)));
   }
+  if (payload.budget) {
+    box.append(el("div", { class: "label" }, "Session budget (reconnect starts a new session)"),
+      el("div", { class: `cost budget ${payload.budget.exhausted ? "over" : ""}` }, budgetParts(payload.budget)));
+  }
   if (payload.error) box.append(el("div", { class: "label" }, "Database error"), el("pre", {}, payload.error));
   if (payload.rewrites && payload.rewrites.length) {
     box.append(el("div", { class: "label" }, "Rewrites"), el("ul", { class: "notes" }, payload.rewrites.map(r => el("li", {}, r))));
@@ -371,6 +375,21 @@ function renderDecision(tool, result) {
   if (payload.sql) {
     box.append(el("div", { class: "label" }, tool === "check_query" ? "Would run" : "Ran"), el("pre", {}, payload.sql));
   }
+}
+
+// The limits a session budget sets, with what is used of each: "3 of 25 queries · …".
+function budgetParts(budget) {
+  const units = { queries: "queries", total_cost: "cost", rows_returned: "rows", refusals: "refusals" };
+  const parts = [];
+  for (const [what, unit] of Object.entries(units)) {
+    const line = budget[what];
+    if (line.limit == null) continue;
+    if (parts.length) parts.push(el("span", { class: "hint" }, " · "));
+    const reached = budget.exhausted === `max_${what}`;
+    parts.push(el(reached ? "strong" : "span", {}, `${formatCost(line.used)} of ${formatCost(line.limit)} ${unit}`));
+  }
+  if (budget.exhausted) parts.push(el("span", { class: "hint" }, " · used up: nothing more runs in this session"));
+  return parts;
 }
 
 // How a masked column is masked: "hmac, from public.customers.email".

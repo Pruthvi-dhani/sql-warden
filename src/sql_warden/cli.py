@@ -16,6 +16,7 @@ from sql_warden.audit import AuditError, AuditEvent, AuditReader, AuditSink, Pos
 from sql_warden.config import (
     EVERYTHING,
     IMPLICIT_PROFILE,
+    BudgetConfig,
     ConfigError,
     ProfileConfig,
     WardenConfig,
@@ -25,12 +26,13 @@ from sql_warden.config import (
 )
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.pipeline.cost import format_cost
-from sql_warden.profiles import ProfileError, profile_cost, select_profile
+from sql_warden.profiles import ProfileError, profile_budget, profile_cost, select_profile
 from sql_warden.render import (
     AUDIT_HEADER,
     audit_json,
     format_audit_event,
     format_audit_line,
+    format_budget,
     format_decision,
     format_masked,
     format_rewrites,
@@ -199,6 +201,7 @@ def build_warden(
         mask_key=None
         if config.masking.key is None
         else config.masking.key.get_secret_value().encode(),
+        budget=active.budget,
     )
 
 
@@ -327,7 +330,12 @@ def query(
         raise SystemExit(EXIT_REFUSED)
     if not as_json:
         click.echo(format_table(outcome.result, profile=warden.profile))
-        for note in [*format_masked(outcome.decision), *format_rewrites(outcome.decision)]:
+        decision = outcome.decision
+        for note in [
+            *format_masked(decision),
+            *format_rewrites(decision),
+            *format_budget(decision),
+        ]:
             click.echo(note)
 
 
@@ -562,10 +570,23 @@ def validate(state: CliState, path: Path | None) -> None:
             f"{len(shape.denied_functions)} extra denied"
         )
     click.echo(f"  cost:      refused above an estimated {format_cost(loaded.cost.max_total_cost)}")
+    click.echo(f"  budgets:   {describe_budget(loaded.budgets)}")
     if loaded.masking.key is not None:
         click.echo("  masking:   hmac key set")
     for line in describe_profiles(loaded):
         click.echo(line)
+
+
+def describe_budget(budget: BudgetConfig) -> str:
+    """A session budget in a line: `per session: 20 queries, cost 50,000`."""
+    limits = [
+        (budget.max_queries, "{} queries"),
+        (budget.max_total_cost, "cost {}"),
+        (budget.max_rows_returned, "{} rows"),
+        (budget.max_refusals, "{} refusals"),
+    ]
+    set_ = [text.format(format_cost(limit)) for limit, text in limits if limit is not None]
+    return "per session: " + ", ".join(set_) if set_ else "none: a session is not limited"
 
 
 def describe_profile_tables(profile: ProfileConfig) -> list[str]:
@@ -608,6 +629,9 @@ def describe_profiles(config: WardenConfig) -> list[str]:
             lines.append(
                 f"               refused above an estimated {format_cost(cost.max_total_cost)}"
             )
+        if profile.budgets is not None:
+            budget = describe_budget(profile_budget(config, profile))
+            lines.append(f"               budget {budget}")
     if config.default_profile is None:
         lines.append("             no default_profile: servers must be given --profile")
     return lines

@@ -14,6 +14,7 @@ from sql_warden.cli import cli
 from sql_warden.engines import EngineUnavailable, QueryTimeout, Result
 from sql_warden.server import create_http_app, create_server, is_loopback, json_value
 from sql_warden.warden import Warden
+from tests.support import TOOLS
 from tests.unit.conftest import FakeEngine
 
 pytestmark = pytest.mark.anyio
@@ -38,7 +39,7 @@ def _payload(result: CallToolResult) -> dict[str, Any]:
 async def test_tools_are_listed_as_read_only() -> None:
     async with Client(create_server(Warden(FakeEngine(), audit=MemoryAuditSink()))) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-    assert set(tools) == {"run_query", "check_query", "list_tables", "describe_table"}
+    assert set(tools) == TOOLS
     for tool in tools.values():
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True

@@ -11,6 +11,7 @@ from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.server import create_server
 from sql_warden.warden import Warden
 from tests.integration.conftest import Warehouse
+from tests.support import TOOLS
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -89,7 +90,7 @@ async def test_the_cli_serves_over_stdio(audit_dsn: str) -> None:
         names = {tool.name for tool in (await client.list_tools()).tools}
         checked = await client.call_tool("check_query", {"sql": "select 1"})
         ran = await client.call_tool("run_query", {"sql": "select 1"})
-    assert names == {"run_query", "check_query", "list_tables", "describe_table"}
+    assert names == TOOLS
     # A refused dry run is check_query's answer, not an error; a refused run_query is.
     assert (checked.is_error, ran.is_error) == (False, True)
     for result in (checked, ran):

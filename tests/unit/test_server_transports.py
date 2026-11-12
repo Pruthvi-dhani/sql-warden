@@ -14,7 +14,7 @@ from mcp import Client
 from sql_warden.audit import MemoryAuditSink
 from sql_warden.server import create_http_app
 from sql_warden.warden import Warden
-from tests.support import serving
+from tests.support import TOOLS, serving
 from tests.unit.conftest import FakeEngine
 
 pytestmark = pytest.mark.anyio
@@ -56,7 +56,7 @@ class TestHttp:
         async with Client(http_url) as client:
             names = {tool.name for tool in (await client.list_tools()).tools}
             result = await client.call_tool("run_query", {"sql": "select 1 as id"})
-        assert names == {"run_query", "check_query", "list_tables", "describe_table"}
+        assert names == TOOLS
         assert result.structured_content is not None
         assert result.structured_content["result"]["rows"] == [[1]]
         assert engine.executed == ["SELECT 1 AS id LIMIT 101"]

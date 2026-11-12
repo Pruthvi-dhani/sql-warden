@@ -68,6 +68,37 @@ def over(usage: Usage, budget: BudgetConfig) -> str | None:
     return None
 
 
+def reached(usage: Usage, budget: BudgetConfig) -> str | None:
+    """The first limit of budget that usage has reached or passed, or None if there is room
+    under them all. A session that has reached a limit is done: nothing more runs in it."""
+    for limit, used in _LIMITS:
+        most = getattr(budget, limit)
+        if most is not None and getattr(usage, used) >= most:
+            return limit
+    return None
+
+
+@dataclass(frozen=True)
+class BudgetStatus:
+    """A session's usage, held against its budget."""
+
+    usage: Usage
+    limits: BudgetConfig
+
+    @property
+    def exhausted(self) -> str | None:
+        """The limit the session has reached, e.g. "max_queries", if any."""
+        return reached(self.usage, self.limits)
+
+    def lines(self) -> tuple[tuple[str, float, float | None], ...]:
+        """(what, used, limit) for queries, total_cost, rows_returned and refusals; the
+        limit is None where there is none."""
+        return tuple(
+            (used, getattr(self.usage, used), getattr(self.limits, limit))
+            for limit, used in _LIMITS
+        )
+
+
 @dataclass(frozen=True)
 class Charge:
     """What came of charging a session."""

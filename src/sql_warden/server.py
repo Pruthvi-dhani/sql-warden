@@ -24,6 +24,7 @@ from sql_warden import __version__
 from sql_warden.config import IMPLICIT_PROFILE
 from sql_warden.engines import EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
+from sql_warden.sessions import BudgetStatus
 from sql_warden.warden import Warden, trace_step
 
 INSTRUCTIONS = """\
@@ -39,7 +40,12 @@ or counted; filtering, joining, grouping, sorting or computing with them is refu
 list_tables to see what you
 can query, describe_table for one table's columns, and check_query to test a query without
 running it. Tables and columns that aren't listed can't be queried. SELECT * works only on
-tables with `all_columns: true`; elsewhere, name the columns."""
+tables with `all_columns: true`; elsewhere, name the columns. A session may have a budget:
+how many queries it may run, what they may cost in total, how many rows it may be returned,
+and how many of its requests may be refused (dry runs included). budget_status shows what
+is used and what is left, as does `budget` in each result. COST_OVER_BUDGET means this query
+costs more than is left, and a cheaper one may fit; BUDGET_EXHAUSTED means the session is
+done, and nothing more will run in it."""
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
 LOOPBACK_NAMES = ("localhost",)
@@ -84,6 +90,32 @@ class MaskedColumnInfo(BaseModel):
     """The masked columns it comes from, as schema.table.column."""
 
 
+class BudgetLine(BaseModel):
+    used: float
+    limit: float | None = None
+    """The most the session may use. Missing where the profile sets no limit."""
+    remaining: float | None = None
+    """What is left under the limit: 0 once it is reached."""
+
+
+class BudgetInfo(BaseModel):
+    queries: BudgetLine
+    """Queries that were allowed and sent to the database. Dry runs aren't counted."""
+    total_cost: BudgetLine
+    """The sum of their estimated costs, in the planner's units."""
+    rows_returned: BudgetLine
+    refusals: BudgetLine
+    """Requests a check refused, dry runs included."""
+    exhausted: str | None = None
+    """The limit the session has reached, e.g. max_queries. Then nothing more runs in it."""
+
+
+class BudgetResponse(BaseModel):
+    profile: str
+    session_id: str
+    budget: BudgetInfo
+
+
 class QueryResponse(BaseModel):
     refused: bool
     profile: str | None = None
@@ -103,6 +135,9 @@ class QueryResponse(BaseModel):
     cost: CostInfo | None = None
     """The planner's estimate, once the cost check got one: on an allowed query, and on one
     the cost check refused."""
+    budget: BudgetInfo | None = None
+    """What the session has used of its budget, this request included. Missing when the
+    profile sets no limits."""
     trace: list[TraceStep]
     result: QueryRows | None = None
     error: str | None = None
@@ -159,6 +194,31 @@ def json_value(value: object) -> Any:
     return str(value)
 
 
+def budget_info(status: BudgetStatus) -> BudgetInfo:
+    lines = {
+        what: BudgetLine(
+            used=_number(used),
+            limit=limit,
+            remaining=None if limit is None else _number(max(limit - used, 0)),
+        )
+        for what, used, limit in status.lines()
+    }
+    return BudgetInfo(**lines, exhausted=status.exhausted)
+
+
+def _number(value: float) -> float:
+    return value if isinstance(value, int) else round(value, 2)
+
+
+def describe_budget(warden: Warden, session_id: str | None = None) -> BudgetResponse:
+    """What budget_status returns."""
+    return BudgetResponse(
+        profile=warden.profile,
+        session_id=session_id or warden.session_id,
+        budget=budget_info(warden.budget_status(session_id)),
+    )
+
+
 def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryResponse:
     """The decision, and for run_query what happened when it ran, as the tools return it."""
     refused_by = decision.refused_by
@@ -191,6 +251,7 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
             est_rows=decision.cost.est_rows,
             top_node=decision.cost.top_node,
         ),
+        budget=None if decision.budget is None else budget_info(decision.budget),
         trace=[TraceStep.model_validate(trace_step(entry)) for entry in decision.trace],
         result=None
         if result is None
@@ -246,6 +307,13 @@ def create_server(warden: Warden) -> MCPServer:
         SQL that would run, without running it. The database only plans it."""
         decision = warden.check(sql, client=client_name(ctx), session_id=session_of(ctx))
         return tool_result(describe(decision), is_error=decision.audit_id is None)
+
+    @server.tool(annotations=READ_ONLY)
+    def budget_status(ctx: Context[Any, Any]) -> BudgetResponse:
+        """What this session has used and what it has left: queries, their total estimated
+        cost, rows returned and refusals. A limit that isn't set has no `limit`. Asking is
+        free: it isn't a query, and is never refused."""
+        return describe_budget(warden, session_of(ctx))
 
     @server.tool(annotations=READ_ONLY)
     def list_tables() -> TablesResponse:

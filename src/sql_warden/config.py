@@ -157,6 +157,11 @@ class BudgetConfig(_Section):
     """Refused requests, dry runs included: stops a caller from trying query after query
     until one gets through."""
 
+    @property
+    def limited(self) -> bool:
+        """True if any limit is set."""
+        return any(limit is not None for limit in self.model_dump().values())
+
 
 class MaskingConfig(_Section):
     key: SecretStr | None = None
@@ -257,6 +262,9 @@ class ProfileConfig(_Section):
     """The profile's cost limits; any it leaves out come from the top-level cost section."""
     masks: dict[str, MaskRule] = Field(default_factory=dict)
     """schema.table.column → how the profile sees it. Exact names, as in `tables`."""
+    budgets: BudgetConfig | None = None
+    """What one of the profile's sessions may use; any limit it leaves out comes from the
+    top-level budgets section, and one it sets to null is lifted."""
 
     @field_validator("masks")
     @classmethod
@@ -343,6 +351,9 @@ class WardenConfig(_Section):
     warehouse: WarehouseConfig = WarehouseConfig()
     shape: ShapeConfig = ShapeConfig()
     cost: CostConfig = CostConfig()
+    budgets: BudgetConfig = BudgetConfig()
+    """What one session may use. No limits unless set: a session can be as long-lived as the
+    agent that opened it."""
     masking: MaskingConfig = MaskingConfig()
     audit: AuditConfig = AuditConfig()
     profiles: dict[str, ProfileConfig] | None = None

@@ -9,7 +9,7 @@ Every query runs through a series of checks before it touches the database:
 2. **Access**: it may touch only approved tables and columns.
 3. **Cost**: the database's own planner estimates the cost, and anything too expensive is
    refused before it runs.
-4. **Budget**: each session has a query budget.
+4. **Budget**: each session has a budget of queries, cost, rows and refusals.
 5. **Masking**: sensitive columns come back masked.
 
 Any check can refuse a query with a specific code and reason. Every request is recorded in
@@ -26,8 +26,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
 > work today; every request is recorded in the audit database, readable with
 > `sql-warden audit`; the database planner's cost estimate gates every query before it runs;
-> and sensitive columns come back masked per profile. Every request now belongs to a session,
-> which the audit log records; the budgets that sessions are for come next. See the
+> and sensitive columns come back masked per profile. Every request belongs to a session,
+> and a session can have a budget: queries, total cost, rows and refusals. Budgets are kept
+> in memory for now; rebuilding them from the audit log after a restart is next. See the
 > [plan](docs/plan.md) for the roadmap.
 
 ## Development
@@ -175,9 +176,7 @@ A name is up to 64 letters, digits, `.`, `_`, `:` or `-`. Over HTTP the id is sq
 derived from the transport's `Mcp-Session-Id` rather than being it: whoever holds that header's
 value can use the connection, so it stays out of responses and the audit log.
 
-Sessions are what query budgets will count against (next in the [plan](docs/plan.md)): how
-many queries a session may run, what they may cost in total, how many rows it may take, and
-how many refusals it gets before it is stopped.
+Sessions are what [budgets](#session-budgets) count against.
 
 #### The checks so far
 
@@ -243,6 +242,10 @@ how many refusals it gets before it is stopped.
 
   The column is followed through aliases, CTEs, subqueries and unions, so renaming it changes
   nothing.
+- **budget**: for a profile with a [session budget](#session-budgets). A session that has
+  reached a limit is refused before any other check looks at its query
+  (`BUDGET_EXHAUSTED`); otherwise the budget comes last, once the cost is known, and refuses
+  a query that costs more than the session has left (`COST_OVER_BUDGET`).
 - **cost**: the database planner's estimate for the SQL that would run, from `EXPLAIN`, which
   plans a query without running it (never `EXPLAIN ANALYZE`). A query estimated above
   `cost.max_total_cost` (1,000,000 by default; a profile can set its own) is refused before it
@@ -274,6 +277,7 @@ uv run sql-warden serve --transport http     # Streamable HTTP at http://127.0.0
 | `check_query`    | dry run: the decision and the exact SQL that would run, nothing executed      |
 | `list_tables`    | the tables and columns the profile may query, with types; cached for a minute |
 | `describe_table` | one table's columns and types, and whether `SELECT *` works on it             |
+| `budget_status`  | what the session has used of its budget and what is left; free, never refused |
 
 Results are structured, so an agent can tell why a query was refused and fix it:
 
@@ -382,7 +386,8 @@ Values can reference environment variables as `${NAME}` or `${NAME:-default}`, s
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
 enforces it. Today that is `warehouse` (connection, timeout, row cap), `audit` (the audit
 database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists), `cost`
-(`max_total_cost`), `masking` (the hmac key) and `profiles`;
+(`max_total_cost`), `budgets` (what one session may use), `masking` (the hmac key) and
+`profiles`;
 [warden.example.yaml](warden.example.yaml) documents every key.
 
 ### Profiles
@@ -424,6 +429,71 @@ unknown name is an error, never a fallback. A profile's own `dsn` wins over `--d
 `--max-rows` in the same way. Its `cost` limits replace the top-level ones it names, and the
 rest come from the `cost` section. Every decision names its profile: the CLI prints it, and
 `--json` and the MCP results carry `profile`.
+
+### Session budgets
+
+A budget caps what one [session](#sessions) may use in total. No limit is set unless you set
+it, for every profile or for one:
+
+```yaml
+budgets:
+  max_refusals: 50          # for every profile
+profiles:
+  public:
+    budgets:                # public's own; max_refusals: null would lift the limit above
+      max_queries: 25
+      max_total_cost: 50000
+      max_rows_returned: 500
+      max_refusals: 10
+```
+
+| Limit               | Counts                                                              |
+|---------------------|---------------------------------------------------------------------|
+| `max_queries`       | queries that were allowed and sent to the database                  |
+| `max_total_cost`    | the sum of their estimated costs, in the units of `cost.max_total_cost` |
+| `max_rows_returned` | rows returned, over all of them                                     |
+| `max_refusals`      | requests a check refused, dry runs included                         |
+
+- **A session that reaches a limit is done.** Its next request is refused with
+  `BUDGET_EXHAUSTED` before any other check runs, so it learns nothing more and the database
+  isn't asked to plan anything. That is what `max_refusals` is for: an agent can't try query
+  after query until one gets through.
+- **A query must fit what is left.** Its estimated cost is counted before it runs, and one
+  that costs more than the session has left is refused with `COST_OVER_BUDGET`; a cheaper one
+  may still fit. Counting and checking are one step, so requests arriving together can't
+  spend the same last query.
+- **Rows are counted afterwards**, since they are only known once the query has run. The query
+  that takes a session past `max_rows_returned` still comes back; the next is refused.
+- **Dry runs are free**, except that a refused one counts as a refusal. A dry run is told
+  whether the query would fit.
+- **Not every refusal counts.** The budget's own don't, nor do the ones that aren't the
+  caller's doing: `COST_UNAVAILABLE`, `CATALOG_UNAVAILABLE`, `AUDIT_UNAVAILABLE`,
+  `INTERNAL_ERROR`.
+
+Each result says what the session has used (`budget`, and a `session budget:` line in the
+CLI), and the `budget_status` tool says it at any time:
+
+```text
+$ uv run sql-warden --config warden.example.yaml check "select id, name from products"
+✓ parse   1.8 ms
+✓ shape   0.1 ms
+✓ access  33.9 ms
+✓ cost    6.3 ms
+✓ budget  0.0 ms
+→ allowed (profile public; dry run, nothing was executed)
+  cost: 1.02 of 10,000 allowed (most of it: Seq Scan on products)
+  note: added LIMIT 51 (row cap 50 + 1 to detect truncation)
+  session budget: 0 of 25 queries, 0 of 50,000 cost, 0 of 500 rows, 0 of 10 refusals used
+  would run: SELECT id, name FROM public.products LIMIT 51
+```
+
+Two limits of today's budgets, both on the [plan](docs/plan.md):
+
+- **They live in the server's memory.** A restart forgets them, and each `sql-warden query`
+  is a new process, so the CLI's budgets don't yet add up across calls, even with
+  `--session`. Rebuilding usage from the audit log is next (6.3).
+- **A new session has a new budget**, and a client gets one by reconnecting. Budgets per
+  identity, which close that, come with authentication (9.2, 9.3).
 
 ### Masked columns
 
