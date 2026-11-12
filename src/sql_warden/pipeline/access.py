@@ -23,8 +23,9 @@ from sql_warden.models import Refusal, RefusalCode
 from sql_warden.pipeline.base import CheckContext
 from sql_warden.profiles import Access
 
-DEFAULT_SCHEMAS = {"postgres": "public"}
-"""Where an unqualified table name is looked up, per dialect."""
+DEFAULT_SCHEMAS = {"postgres": "public", "snowflake": "PUBLIC"}
+"""Where an unqualified table name is looked up, per dialect, unless the Warden is told
+another: the name as the database stores it, which in Snowflake is upper case."""
 _ALIAS_CLAUSES = (exp.Order, exp.Group, exp.Having, exp.Distinct)
 """Clauses where a bare name may be an output column of the same SELECT (DISTINCT ON follows
 the ORDER BY rules)."""
@@ -90,13 +91,19 @@ class AccessCheck:
     name = "access"
 
     def __init__(
-        self, catalog: Catalog, access: Access, *, profile: str, dialect: str = "postgres"
+        self,
+        catalog: Catalog,
+        access: Access,
+        *,
+        profile: str,
+        dialect: str = "postgres",
+        default_schema: str | None = None,
     ) -> None:
         self._catalog = catalog
         self._access = access
         self._profile = profile
         self._dialect = dialect
-        self._default_schema = DEFAULT_SCHEMAS[dialect]
+        self._default_schema = default_schema or DEFAULT_SCHEMAS[dialect]
 
     def run(self, ctx: CheckContext) -> Refusal | None:
         try:
@@ -170,7 +177,11 @@ class AccessCheck:
                 self._check_table(source)
         outputs = _output_names(scope)
         for node in scope.walk():
-            if isinstance(node, exp.Star) and node.parent is scope.expression:
+            if isinstance(node, exp.Star) and not isinstance(node.parent, exp.Column):
+                # SELECT *, and * handed to a function, which reads every column just the
+                # same: OBJECT_CONSTRUCT(*). Only COUNT(*) reads none of them.
+                if isinstance(node.parent, exp.Count):
+                    continue
                 for _, source in scope.selected_sources.values():
                     if isinstance(source, exp.Table) and _is_table(source):
                         self._check_star(source, "*")

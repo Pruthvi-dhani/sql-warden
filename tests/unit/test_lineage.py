@@ -6,8 +6,12 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 from sql_warden.catalog import Catalog
 from sql_warden.engines import Column, Table
-from sql_warden.pipeline.lineage import NOTHING, Flow, Lineage, LineageError, trace
+from sql_warden.pipeline.lineage import NOTHING, Flow, Lineage, LineageError, MaskedColumn, trace
+from tests.unit import dialects
 from tests.unit.conftest import FakeEngine
+
+pytestmark = pytest.mark.usefixtures("dialect")  # every test here runs under each dialect
+PG = pytest.mark.postgres_only
 
 
 def _table(name: str, *columns: str) -> Table:
@@ -24,10 +28,30 @@ SSN = ("public", "customers", "ssn")
 MASKED = {EMAIL, SSN}
 
 
+def _masked() -> set[MaskedColumn]:
+    """MASKED, as the running dialect stores the names."""
+    return {dialects.names(column) for column in MASKED}
+
+
+def _follow(tree: sqlglot.Expr, masked: set[MaskedColumn] | None = None) -> Lineage:
+    dialect = dialects.current()
+    catalog = Catalog(FakeEngine(catalog=dialects.catalog(CATALOG)), dialect=dialect)
+    return trace(
+        tree,
+        _masked() if masked is None else masked,
+        schema=catalog.schema(),
+        dialect=dialect,
+        default_schema=dialects.stored("public"),
+    )
+
+
+def _parsed(sql: str) -> sqlglot.Expr:
+    return sqlglot.parse_one(sql, dialect=dialects.current())
+
+
 def _trace(sql: str) -> Lineage:
     # As the masking check gets it: parsed, with unquoted names folded.
-    tree = normalize_identifiers(sqlglot.parse_one(sql, dialect="postgres"), dialect="postgres")
-    return trace(tree, MASKED, schema=Catalog(FakeEngine(catalog=CATALOG)).schema())
+    return _follow(normalize_identifiers(_parsed(sql), dialect=dialects.current()))
 
 
 def _outputs(sql: str) -> str:
@@ -38,11 +62,11 @@ def _outputs(sql: str) -> str:
         columns = "+".join(sorted(column[2] for column in output.flow.columns))
         sign = "" if not columns else "=" if output.flow.unchanged else "~"
         described.append(f"{output.name}{sign}{columns}")
-    return " ".join(described)
+    return dialects.text(" ".join(described))
 
 
 def _uses(sql: str) -> list[str]:
-    return [f"{use.column[2]} in {use.where}" for use in _trace(sql).uses]
+    return [dialects.text(f"{use.column[2]} in {use.where}") for use in _trace(sql).uses]
 
 
 class TestAMaskedColumnSelectedAsItIs:
@@ -102,7 +126,10 @@ class TestCounting:
     def test_but_a_filtered_count_is_a_condition_on_the_values(self) -> None:
         sql = "select count(*) filter (where ssn like '1%') from customers"
         assert _outputs(sql) == "_col_0~ssn"
-        assert _uses(sql) == ["ssn in COUNT(*) FILTER(WHERE customers.ssn LIKE '1%')"]
+        (use,) = _uses(sql)  # Snowflake has no FILTER: it is read as COUNT_IF, a use all the same
+        assert "customers.ssn LIKE '1%'" in use
+        if dialects.current() == "postgres":
+            assert use == "ssn in COUNT(*) FILTER(WHERE customers.ssn LIKE '1%')"
 
     def test_nor_is_any_other_aggregate(self) -> None:
         assert _uses("select max(ssn) from customers") == ["ssn in MAX(customers.ssn)"]
@@ -141,9 +168,10 @@ class TestUsesOutsideTheSelectList:
             ("select id, ssn from customers order by 2", "ssn in ORDER BY"),
             ("select distinct ssn from customers", "ssn in DISTINCT"),
             ("select distinct on (ssn) id from customers", "ssn in DISTINCT ON"),
-            (
+            pytest.param(  # Snowflake has no WINDOW clause
                 "select count(*) over w from customers window w as (partition by ssn)",
                 "ssn in WINDOW",
+                marks=PG,
             ),
             ("select id from orders where note in (select ssn from customers)", "ssn in WHERE"),
             (
@@ -225,14 +253,14 @@ class TestUsesInsideAnExpression:
     )
     def test_functions_operators_casts_and_windows(self, sql: str, outputs: str, use: str) -> None:
         assert _outputs(sql) == outputs
-        assert [u.where for u in _trace(sql).uses] == [use]
+        assert [dialects.text(u.where) for u in _trace(sql).uses] == [use]
         assert {u.kind for u in _trace(sql).uses} == {"expression"}
 
     def test_an_error_can_carry_one_bit_even_when_the_result_is_hidden(self) -> None:
         sql = "select case when ssn like '123%' then 1 / (id - id) else 1 end from customers"
         (use,) = _trace(sql).uses
-        assert (use.column, use.kind) == (SSN, "expression")
-        assert use.where.startswith("CASE WHEN customers.ssn LIKE '123%'")
+        assert (use.column, use.kind) == (dialects.names(SSN), "expression")
+        assert use.where.lower().startswith("case when customers.ssn like '123%'")
         assert use.where.endswith("…")  # cut to a readable length
         assert len(use.where) == 60
 
@@ -247,8 +275,8 @@ class TestUsesInsideAnExpression:
     )
     def test_the_whole_row_holds_every_masked_column(self, sql: str) -> None:
         lineage = _trace(sql)
-        assert lineage.outputs[0].flow == Flow(frozenset(MASKED), unchanged=False)
-        assert {use.column for use in lineage.uses} == MASKED
+        assert lineage.outputs[0].flow == Flow(frozenset(_masked()), unchanged=False)
+        assert {use.column for use in lineage.uses} == _masked()
 
     def test_a_subquery_used_as_a_value(self) -> None:
         sql = (
@@ -295,20 +323,19 @@ class TestNothingToFollow:
         assert not NOTHING.masked
 
     def test_no_masked_columns_at_all(self) -> None:
-        tree = sqlglot.parse_one("select ssn from customers", dialect="postgres")
-        assert trace(tree, set(), schema=Catalog(FakeEngine(catalog=CATALOG)).schema()) is NOTHING
+        assert _follow(_parsed("select ssn from customers"), set()) is NOTHING
 
     def test_a_masked_table_read_without_its_masked_columns(self) -> None:
         lineage = _trace("select id, full_name from customers where id > 5 order by full_name")
-        assert [output.name for output in lineage.outputs] == ["id", "full_name"]
+        assert [dialects.text(output.name) for output in lineage.outputs] == ["id", "full_name"]
         assert not lineage.masked
         assert lineage.uses == ()
 
     def test_the_query_is_left_as_it_was(self) -> None:
-        tree = sqlglot.parse_one("select * from customers", dialect="postgres")
-        before = tree.sql(dialect="postgres")
-        trace(tree, MASKED, schema=Catalog(FakeEngine(catalog=CATALOG)).schema())
-        assert tree.sql(dialect="postgres") == before
+        tree = _parsed("select * from customers")
+        before = tree.sql(dialect=dialects.current())
+        _follow(tree)
+        assert tree.sql(dialect=dialects.current()) == before
 
 
 class TestWhatCantBeFollowed:

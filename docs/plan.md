@@ -623,7 +623,7 @@ profiles:
   nothing (6.3). A query charged at the reservation and then not run because the audit
   database went away stays charged. A reconnect is a new session with a new budget (9.3).
 
-**6.3 Budgets survive restarts** ✅ done
+**6.3 Budgets survive restarts** ✅ done (`b756700`)
 - Session usage is rebuilt from the audit DB when the server starts.
 - Tests: an integration test that restarts the Warden and finds the budget still used.
 - As built: usage is read back per session, the first time a server sees it, rather than for
@@ -657,10 +657,44 @@ The audit DB is always Postgres, whatever the warehouse engine is. Config sets
 mode, local dev runs only the compose `audit` container, and the warehouse is the Snowflake
 account.
 
-**7.1 Dialect-aware checks**
+**7.1 Dialect-aware checks** ✅ done
 - The dialect comes from config. The shape, access and lineage tests are parametrized over
   `postgres` and `snowflake`. The built-in function denylist (Postgres-only today) becomes
   per-dialect, adding Snowflake ones such as `SYSTEM$…`, and the LIMIT rewrite handles `TOP`.
+- As built: the `Warden` takes the dialect (`postgres` or `snowflake`; anything else is an
+  error) and, new, a `default_schema`, for 7.2 to pass the connection's. `warehouse.engine`
+  still takes only `postgres`: `snowflake` is accepted in 7.2, with the engine that runs it.
+- Tests: the shape, access, lineage and masking-check tests (271) each run under both
+  dialects. `tests/unit/dialects.py` gives the Snowflake run a catalog with upper-case names,
+  as Snowflake stores them, and compares text that names things without regard to case; 8
+  cases of Postgres-only syntax (`DO`, writing CTEs, `FOR SHARE`, `WINDOW`, `now()`) are marked
+  `postgres_only`. Everything else gave the same verdict under both without changes to the
+  checks. `test_snowflake_checks.py` has what only Snowflake has.
+- `BUILTIN_DENIED_FUNCTIONS` is per dialect. Snowflake's: `system$*`, `result_scan` and
+  `last_query_id` (what earlier queries returned, which no check or mask saw), `get_ddl`,
+  `query_history*`, `login_history*`, policy and stage-file functions. A config can't
+  allow-list a function on either list. A function known to one dialect only is refused in
+  the other as any unknown function is.
+- `TOP n` needed nothing: sqlglot reads it as a LIMIT, so it is capped, lowered and counted
+  as one under `limit: require`, and what runs says `LIMIT`.
+- Trying Snowflake SQL against the checks found ways to read something without naming it,
+  which the access and masking checks then never saw. Closed, in the shape check so that
+  they hold with no profile rules too:
+  - `IDENTIFIER('name')` / `IDENTIFIER($var)` and `TABLE('name')` / `TABLE($var)`: a table or
+    column named by a string or variable (`FUNCTION_NOT_ALLOWED`).
+  - `@stage/file`, `@%table`, `'@stage/file'` in FROM: a stage's files (`TABLE_NOT_ALLOWED`).
+  - `$1`, `$3`: a column by position, which read a column the profile may not; and `$var`
+    (`COLUMN_NOT_ALLOWED`).
+  - `sequence.nextval`, which advances a sequence (`NOT_READ_ONLY`).
+- One more, in the access check and for both dialects: a `*` handed to a function
+  (`OBJECT_CONSTRUCT(*)`) read every column of a table the profile may read only some of. Now
+  any `*` but `COUNT(*)` needs the whole table (`STAR_NOT_ALLOWED`).
+- Checked and already right: `QUALIFY`, `LATERAL FLATTEN`, `v:path`, `* EXCLUDE / RENAME /
+  REPLACE`, `CONNECT BY`, `PIVOT`, `MATCH_RECOGNIZE`, time travel (`AT`) and `SAMPLE` all go
+  through the access and masking checks as the clauses they are; `SHOW`, `USE`, `CALL`,
+  `EXECUTE IMMEDIATE`, `COPY`, `PUT`, `SET` are `NOT_A_SELECT`.
+- Left for 7.2: nothing here has met a real Snowflake. The checks only read the SQL; whether
+  what they regenerate runs as written is for the engine's tests.
 
 **7.2 `SnowflakeEngine`** (optional `[snowflake]` extra)
 - Execution uses a read-only role, `STATEMENT_TIMEOUT_IN_SECONDS`, and a `QUERY_TAG` set to the

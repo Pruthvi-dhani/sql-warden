@@ -71,7 +71,8 @@ class ShapeCheck:
             )
         return (
             self._read_only(statement, ctx.dialect)
-            or self._functions(statement)
+            or self._named_outright(statement, ctx.dialect)
+            or self._functions(statement, ctx.dialect)
             or self._joins(statement)
             or self._nesting(statement)
             or self._limit(statement, ctx)
@@ -92,20 +93,69 @@ class ShapeCheck:
             )
         lock = query.find(exp.Lock)
         if lock is not None:
+            # Some dialects have no syntax for it to print; the lock was asked for all the same.
+            written = lock.sql(dialect=dialect) or "FOR UPDATE"
             return Refusal(
-                RefusalCode.NOT_READ_ONLY,
-                f"{lock.sql(dialect=dialect)} locks rows; queries must not take locks",
+                RefusalCode.NOT_READ_ONLY, f"{written} locks rows; queries must not take locks"
+            )
+        if dialect == "snowflake":
+            for column in query.find_all(exp.Column):
+                if column.table and column.name.upper() == "NEXTVAL" and not column.this.quoted:
+                    return Refusal(
+                        RefusalCode.NOT_READ_ONLY,
+                        f"{column.sql(dialect=dialect)} advances a sequence; queries must not "
+                        "modify data",
+                    )
+        return None
+
+    def _named_outright(self, query: exp.Query, dialect: str) -> Refusal | None:
+        """Everything a query reads must be named in its text, where the access and masking
+        checks can see it. Snowflake has several ways around that: a name given as a string or
+        a variable, a column given by its position, a stage's files."""
+        if dialect != "snowflake":
+            return None
+        if query.find(exp.DynamicIdentifier) is not None:
+            return Refusal(
+                RefusalCode.FUNCTION_NOT_ALLOWED,
+                "identifier() is never allowed: it names a table or column with a string or a "
+                "variable, which can't be checked; write the name itself",
+            )
+        for wrapped in query.find_all(exp.TableFromRows):
+            inner = wrapped.this
+            if isinstance(inner, exp.Dot):  # information_schema.some_function()
+                inner = inner.expression
+            if not isinstance(inner, exp.Func):
+                return Refusal(
+                    RefusalCode.FUNCTION_NOT_ALLOWED,
+                    f"{wrapped.sql(dialect=dialect)} names a table with a string or a "
+                    "variable, which can't be checked; write the table's name itself",
+                )
+        for table in query.find_all(exp.Table):
+            if not isinstance(table.this, exp.Identifier | exp.Func):
+                return Refusal(
+                    RefusalCode.TABLE_NOT_ALLOWED,
+                    f"{table.this.sql(dialect=dialect)} is not a table: files in stages can't "
+                    "be queried",
+                )
+        parameter = query.find(exp.Parameter)
+        if parameter is not None:
+            written = parameter.sql(dialect=dialect)
+            return Refusal(
+                RefusalCode.COLUMN_NOT_ALLOWED,
+                f"{written} is a column given by its position, or a session variable; neither "
+                "can be checked, so name the column or write the value",
             )
         return None
 
-    def _functions(self, query: exp.Query) -> Refusal | None:
+    def _functions(self, query: exp.Query, dialect: str) -> Refusal | None:
         for func in query.find_all(exp.Func):
             name = _function_name(func)
-            pattern = self.rules.denied_by(name)
-            if pattern in BUILTIN_DENIED_FUNCTIONS:
+            pattern = self.rules.denied_by(name, dialect)
+            if pattern in BUILTIN_DENIED_FUNCTIONS[dialect]:
                 return Refusal(
                     RefusalCode.FUNCTION_NOT_ALLOWED,
-                    f"{name}() is never allowed: it can act on the server beyond reading data",
+                    f"{name}() is never allowed: it can act on the server, or read what the "
+                    "checks can't see",
                 )
             if pattern is not None:
                 return Refusal(

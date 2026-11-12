@@ -6,10 +6,32 @@ import pytest
 from sql_warden import cli as cli_module
 from sql_warden.audit import AuditError, AuditEvent, MemoryAuditSink
 from sql_warden.engines import Column, CostEstimate, EngineError, Result, Table
+from tests.unit import dialects
 
 ONE_ROW = Result(columns=("id",), rows=((1,),), truncated=False, duration_ms=1.0)
 PRODUCTS = Table("public", "products", (Column("id", "integer"), Column("name", "text")))
 CHEAP = CostEstimate(total_cost=1.0, est_rows=1, top_node="Result")
+
+
+@pytest.fixture(params=dialects.DIALECTS)
+def dialect(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Runs the test once per SQL dialect; tests/unit/dialects.py has what goes with it."""
+    name: str = request.param
+    monkeypatch.setattr(dialects, "_current", name)
+    return name
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Leave out the Snowflake run of tests marked postgres_only: not skipped, since there
+    is nothing to come back to."""
+
+    def postgres_only_under_snowflake(item: pytest.Item) -> bool:
+        params = getattr(getattr(item, "callspec", None), "params", {})
+        return params.get("dialect") == "snowflake" and bool(
+            item.get_closest_marker("postgres_only")
+        )
+
+    items[:] = [item for item in items if not postgres_only_under_snowflake(item)]
 
 
 @dataclass

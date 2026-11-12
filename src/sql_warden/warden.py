@@ -9,6 +9,7 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sql_warden.audit import AuditError, AuditEvent, AuditSink
 from sql_warden.catalog import Catalog
 from sql_warden.config import (
+    DIALECTS,
     EVERYTHING,
     IMPLICIT_PROFILE,
     BudgetConfig,
@@ -89,10 +90,18 @@ class Warden:
         mask_key: bytes | None = None,
         budget: BudgetConfig | None = None,
         sessions: SessionStore | None = None,
+        default_schema: str | None = None,
     ) -> None:
+        if dialect not in DIALECTS:
+            raise ValueError(
+                f"unknown SQL dialect '{dialect}': the checks read {' and '.join(DIALECTS)}"
+            )
         self.engine = engine
         self.audit = audit
         self.dialect = dialect
+        """The SQL dialect the checks read queries in: the warehouse's."""
+        self.default_schema = default_schema or DEFAULT_SCHEMAS[dialect]
+        """Where a table named without a schema is looked up, as the database stores it."""
         self.profile = profile
         """The profile this Warden serves. Fixed for its lifetime."""
         self.session_id = new_session_id()
@@ -109,13 +118,31 @@ class Warden:
         shape_check = ShapeCheck(shape or ShapeConfig(), max_rows=engine.max_rows)
         # The implicit profile has no table rules, so there is nothing for an access check.
         access_checks = (
-            [AccessCheck(self.catalog, access, profile=profile, dialect=dialect)]
+            [
+                AccessCheck(
+                    self.catalog,
+                    access,
+                    profile=profile,
+                    dialect=dialect,
+                    default_schema=self.default_schema,
+                )
+            ]
             if access is not None
             else []
         )
         # Only for a profile with masked columns: without any, there is nothing to follow.
         masking_checks = (
-            [MaskingCheck(self.catalog, masks, profile=profile, dialect=dialect)] if masks else []
+            [
+                MaskingCheck(
+                    self.catalog,
+                    masks,
+                    profile=profile,
+                    dialect=dialect,
+                    default_schema=self.default_schema,
+                )
+            ]
+            if masks
+            else []
         )
         # Last of the built-in checks: the planner sees only SQL the others approved.
         self.cost_check = CostCheck(engine, cost or CostConfig(), profile=profile)
@@ -397,7 +424,7 @@ class Warden:
         if parsed.catalog:
             return None
         normalize_identifiers(parsed, dialect=self.dialect)
-        schema = parsed.db or DEFAULT_SCHEMAS[self.dialect]
+        schema = parsed.db or self.default_schema
         return next((t for t in self.tables() if (t.schema, t.name) == (schema, parsed.name)), None)
 
     def all_columns(self, table: Table) -> bool:

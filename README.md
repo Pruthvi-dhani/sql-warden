@@ -28,8 +28,10 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 > `sql-warden audit`; the database planner's cost estimate gates every query before it runs;
 > and sensitive columns come back masked per profile. Every request belongs to a session,
 > and a session can have a budget: queries, total cost, rows and refusals. A session's usage
-> is read back from the audit log, so its budget outlives the server that counted it, which
-> completes Phase 6. Next: the Snowflake engine. See the [plan](docs/plan.md) for the roadmap.
+> is read back from the audit log, so its budget outlives the server that counted it. The
+> checks now read Snowflake SQL as well as Postgres; the Snowflake engine that runs it is
+> next, and until then `warehouse.engine` takes only `postgres`. See the
+> [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -197,6 +199,20 @@ Sessions are what [budgets](#session-budgets) count against.
   Functions sqlglot doesn't recognise as standard SQL are refused unless they are listed in
   `shape.allowed_functions`. Built-in dangerous ones (`pg_sleep*`, `pg_read_file`, `lo_*`,
   `dblink*`, `set_config`, `query_to_xml`, ...) are refused even if listed.
+
+  The checks read a query in its warehouse's dialect, Postgres or Snowflake, and each has its
+  own list of those functions (Snowflake's: `system$*`, `result_scan`, `get_ddl`,
+  `query_history*`, ...). Read as Snowflake, a query must also name outright everything it
+  reads, so these are refused too, even where no profile limits tables:
+
+  | Try                                                   | Refused with           |
+  |-------------------------------------------------------|------------------------|
+  | `select * from identifier('secrets')`, `table('secrets')`, `table($t)` | `FUNCTION_NOT_ALLOWED` |
+  | `select $1 from @my_stage/file.csv` (a stage's files)  | `TABLE_NOT_ALLOWED`    |
+  | `select $3 from products` (a column by position), `$variable` | `COLUMN_NOT_ALLOWED` |
+  | `select my_sequence.nextval`                           | `NOT_READ_ONLY`        |
+
+  `select top 5000 ...` is a LIMIT like any other: it is lowered to the row cap.
 - **access**: only the tables and columns the server's [profile](#profiles) allows, wherever
   the query uses them (selected, filtered, joined, grouped or sorted on, in subqueries and
   CTEs). With the example config's `public` profile:

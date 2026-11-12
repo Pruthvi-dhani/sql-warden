@@ -61,4 +61,5 @@ addopts = ["--strict-markers", "--import-mode=importlib"]
 markers = [
     "integration: needs Docker (Postgres via Testcontainers)",
     "snowflake: needs a live Snowflake account (SNOWFLAKE_* env vars)",
+    "postgres_only: syntax or behaviour only Postgres has; not run under the snowflake dialect",
 ]

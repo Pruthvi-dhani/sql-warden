@@ -3,7 +3,10 @@ import pytest
 from sql_warden.config import ShapeConfig
 from sql_warden.models import Refusal, RefusalCode
 from sql_warden.pipeline import CheckContext, ParseCheck, ShapeCheck
+from tests.unit import dialects
 
+pytestmark = pytest.mark.usefixtures("dialect")  # every test here runs under each dialect
+PG = pytest.mark.postgres_only
 C = RefusalCode
 
 
@@ -11,7 +14,7 @@ def _check(
     sql: str, rules: ShapeConfig | None = None, *, max_rows: int = 100
 ) -> tuple[CheckContext, Refusal | None]:
     """Parse and shape-check sql. Parsing must succeed: these tests are about shape."""
-    ctx = CheckContext(sql=sql, dialect="postgres")
+    ctx = CheckContext(sql=sql, dialect=dialects.current())
     assert ParseCheck().run(ctx) is None
     return ctx, ShapeCheck(rules or ShapeConfig(), max_rows=max_rows).run(ctx)
 
@@ -26,7 +29,7 @@ def _rewritten(
     """The SQL that would run, and the rewrite notes, for an allowed query."""
     ctx, refusal = _check(sql, rules, max_rows=max_rows)
     assert refusal is None, refusal
-    return ctx.statements[0].sql(dialect="postgres", comments=False), ctx.rewrites
+    return dialects.text(ctx.sql_to_run()), ctx.rewrites
 
 
 @pytest.mark.parametrize(
@@ -47,7 +50,8 @@ def _rewritten(
         "select exists (select 1 from orders where customer_id = 1)",
         "(select id from products)",
         "select date_trunc('day', ordered_at), count(*) from orders group by 1",
-        "select coalesce(email, 'none'), lower(name), now() from customers",
+        "select coalesce(email, 'none'), lower(name), current_date from customers",
+        pytest.param("select now()", marks=PG),  # not a function Snowflake has
         "select string_agg(name, ', ') from products",
         "select * from generate_series(1, 10)",
         "select id::text, price_cents / 100.0 from products",
@@ -83,20 +87,23 @@ def test_reads_are_allowed(sql: str) -> None:
         ("copy orders to stdout", C.NOT_A_SELECT, "not COPY"),
         ("set statement_timeout = 0", C.NOT_A_SELECT, "not SET"),
         ("begin", C.NOT_A_SELECT, "not BEGIN"),
-        ("do $$ begin perform 1; end $$", C.NOT_A_SELECT, "not DO"),
+        pytest.param("do $$ begin perform 1; end $$", C.NOT_A_SELECT, "not DO", marks=PG),
         ("explain analyze select 1", C.NOT_A_SELECT, "not EXPLAIN"),
         ("call some_procedure()", C.NOT_A_SELECT, "not CALL"),
         ("values (1), (2)", C.NOT_A_SELECT, "not VALUES"),
         ("table orders", C.NOT_A_SELECT, "only SELECT queries are allowed"),
-        (
+        # Postgres lets a CTE write; in Snowflake this isn't SQL at all (a parse error).
+        pytest.param(
             "with gone as (delete from orders returning *) select count(*) from gone",
             C.NOT_READ_ONLY,
             "the query contains a DELETE in the CTE gone; queries must not modify data",
+            marks=PG,
         ),
-        (
+        pytest.param(
             "with x as (update products set price_cents = 0 returning id) select * from x",
             C.NOT_READ_ONLY,
             "UPDATE in the CTE x",
+            marks=PG,
         ),
         (
             "select * into stolen from customers",
@@ -108,13 +115,25 @@ def test_reads_are_allowed(sql: str) -> None:
             C.NOT_READ_ONLY,
             "FOR UPDATE locks rows; queries must not take locks",
         ),
-        ("select * from orders for share", C.NOT_READ_ONLY, "FOR SHARE locks rows"),
-        ("select * from orders for update skip locked", C.NOT_READ_ONLY, "FOR UPDATE SKIP LOCKED"),
-        (
+        pytest.param(
+            "select * from orders for share", C.NOT_READ_ONLY, "FOR SHARE locks rows", marks=PG
+        ),
+        pytest.param(
+            "select * from orders for update skip locked",
+            C.NOT_READ_ONLY,
+            "FOR UPDATE SKIP LOCKED",
+            marks=PG,
+        ),
+        # Each dialect has its own list of these; unknown to the other, it is refused there
+        # too, as any function sql-warden doesn't know.
+        pytest.param(
             "select pg_sleep(60)",
             C.FUNCTION_NOT_ALLOWED,
-            "pg_sleep() is never allowed: it can act on the server beyond reading data",
+            "pg_sleep() is never allowed: it can act on the server, or read what the checks "
+            "can't see",
+            marks=PG,
         ),
+        ("select pg_sleep(60)", C.FUNCTION_NOT_ALLOWED, "pg_sleep()"),
         ("select pg_catalog.pg_sleep(1)", C.FUNCTION_NOT_ALLOWED, "pg_sleep()"),
         ('select "pg_sleep"(1)', C.FUNCTION_NOT_ALLOWED, "pg_sleep()"),
         ("select PG_SLEEP_FOR('1 minute')", C.FUNCTION_NOT_ALLOWED, "pg_sleep_for()"),
@@ -178,7 +197,7 @@ def test_refusals_have_a_code_and_a_specific_reason(
     assert refusal is not None, f"{sql!r} was allowed"
     assert refusal.code is code
     if reason is not None:
-        assert reason in refusal.reason
+        assert reason in dialects.text(refusal.reason)
 
 
 class TestLimits:

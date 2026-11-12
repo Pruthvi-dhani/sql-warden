@@ -35,7 +35,7 @@ DEFAULT_AUDIT_DSN = "postgresql://warden_audit:warden_audit@localhost:5434/audit
 # Functions refused whatever the config says: they stall or signal the server, read its files,
 # reach other databases, change session settings, take locks, write, or run SQL given as a
 # string (which would slip past every check). Glob patterns, matched against lowercase names.
-BUILTIN_DENIED_FUNCTIONS = (
+_POSTGRES_DENIED_FUNCTIONS = (
     "pg_sleep*",
     "pg_read_file",
     "pg_read_binary_file",
@@ -70,6 +70,34 @@ BUILTIN_DENIED_FUNCTIONS = (
     "schema_to_xml*",
     "database_to_xml*",
 )
+# Snowflake's: they stall or cancel sessions and change the account (SYSTEM$...), read what
+# earlier queries returned, which no check or mask ever saw (RESULT_SCAN), show how objects
+# are defined or who ran what, or reach files in stages.
+_SNOWFLAKE_DENIED_FUNCTIONS = (
+    "system$*",
+    "result_scan",
+    "last_query_id",
+    "last_transaction",
+    "get_ddl",
+    "query_history*",
+    "login_history*",
+    "policy_references",
+    "policy_context",
+    "get_presigned_url",
+    "get_stage_location",
+    "get_absolute_path",
+    "get_relative_path",
+    "build_stage_file_url",
+    "build_scoped_file_url",
+    "external_table_files*",
+    "infer_schema",
+)
+BUILTIN_DENIED_FUNCTIONS = {
+    "postgres": _POSTGRES_DENIED_FUNCTIONS,
+    "snowflake": _SNOWFLAKE_DENIED_FUNCTIONS,
+}
+"""Per SQL dialect: the checks read a query as its warehouse will."""
+DIALECTS = tuple(BUILTIN_DENIED_FUNCTIONS)
 
 # ${VAR} or ${VAR:-default}, in any string value.
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -118,7 +146,8 @@ class ShapeConfig(_Section):
     @model_validator(mode="after")
     def _nothing_allowed_is_denied(self) -> Self:
         for name in self.allowed_functions:
-            pattern = self.denied_by(name)
+            # Against every dialect's list: no config can allow what one of them never does.
+            pattern = next(filter(None, (self.denied_by(name, d) for d in DIALECTS)), None)
             if pattern is not None:
                 raise PydanticCustomError(
                     "function_denied",
@@ -127,10 +156,11 @@ class ShapeConfig(_Section):
                 )
         return self
 
-    def denied_by(self, function: str) -> str | None:
-        """The denylist pattern that matches function, or None if it is not denied."""
+    def denied_by(self, function: str, dialect: str = "postgres") -> str | None:
+        """The denylist pattern that matches function in that dialect, or None if it is not
+        denied."""
         name = function.lower()
-        patterns = (*BUILTIN_DENIED_FUNCTIONS, *self.denied_functions)
+        patterns = (*BUILTIN_DENIED_FUNCTIONS[dialect], *self.denied_functions)
         return next((pattern for pattern in patterns if fnmatchcase(name, pattern)), None)
 
 

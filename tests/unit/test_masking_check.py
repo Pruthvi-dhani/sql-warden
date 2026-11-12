@@ -8,9 +8,12 @@ from sql_warden.engines import EngineUnavailable
 from sql_warden.models import Decision, RefusalCode
 from sql_warden.profiles import Access
 from sql_warden.warden import Warden
+from tests.unit import dialects
 from tests.unit.conftest import FakeEngine
 from tests.unit.test_lineage import CATALOG, EMAIL, SSN
 from tests.unit.test_masking import KEY
+
+pytestmark = pytest.mark.usefixtures("dialect")  # every test here runs under each dialect
 
 EVERYTHING = Access("*")
 REDACT = MaskRule.model_validate("redact")
@@ -27,12 +30,16 @@ def _warden(
     engine: FakeEngine | None = None,
     access: Access | None = EVERYTHING,
 ) -> Warden:
+    stored = {
+        dialects.names(column): rule for column, rule in (MASKS if masks is None else masks).items()
+    }
     return Warden(
-        engine or FakeEngine(catalog=CATALOG),
+        engine or FakeEngine(catalog=dialects.catalog(CATALOG)),
         audit=MemoryAuditSink(),
+        dialect=dialects.current(),
         profile="public",
         access=access,
-        masks=MASKS if masks is None else masks,
+        masks=stored,
         mask_key=KEY,
     )
 
@@ -41,7 +48,7 @@ def _refusal(decision: Decision) -> tuple[str, str, str]:
     refused = decision.refused_by
     assert refused is not None
     assert refused.refusal is not None
-    return refused.check, refused.refusal.code, refused.refusal.reason
+    return refused.check, refused.refusal.code, dialects.text(refused.refusal.reason)
 
 
 def test_it_runs_after_access_and_before_cost() -> None:
@@ -117,18 +124,20 @@ def test_selecting_it_as_it_is_or_counting_it_is_allowed(sql: str) -> None:
 def test_what_runs_is_the_query_as_written() -> None:
     # The copy with every star expanded is only for following columns.
     decision = _warden().check("select * from customers")
-    assert decision.sql == "SELECT * FROM public.customers LIMIT 101"
+    assert decision.sql is not None
+    assert dialects.text(decision.sql) == "SELECT * FROM public.customers LIMIT 101"
 
 
 def test_nothing_is_planned_or_run_for_a_refused_query() -> None:
-    engine = FakeEngine(catalog=CATALOG)
+    engine = FakeEngine(catalog=dialects.catalog(CATALOG))
     outcome = _warden(engine=engine).run("select id from customers where ssn = '123-45-6789'")
     assert outcome.result is None
     assert (engine.explained, engine.executed) == ([], [])
 
 
 def test_the_access_check_still_comes_first() -> None:
-    narrow = Access({("public", "customers"): frozenset({"id", "email"})})
+    customers = dialects.names(("public", "customers"))
+    narrow = Access({customers: frozenset({dialects.stored("id"), dialects.stored("email")})})
     check, code, _ = _refusal(_warden(access=narrow).check("select id from customers order by ssn"))
     assert (check, code) == ("access", RefusalCode.COLUMN_NOT_ALLOWED)
 

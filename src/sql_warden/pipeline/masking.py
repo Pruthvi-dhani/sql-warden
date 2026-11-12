@@ -187,11 +187,13 @@ class MaskingCheck:
         *,
         profile: str,
         dialect: str = "postgres",
+        default_schema: str | None = None,
     ) -> None:
         self._catalog = catalog
         self.masks = dict(masks)
         self._profile = profile
         self._dialect = dialect
+        self._default_schema = default_schema or DEFAULT_SCHEMAS[dialect]
 
     def run(self, ctx: CheckContext) -> Refusal | None:
         try:
@@ -200,7 +202,7 @@ class MaskingCheck:
                 self.masks,
                 schema=self._catalog.schema(),
                 dialect=self._dialect,
-                default_schema=DEFAULT_SCHEMAS[self._dialect],
+                default_schema=self._default_schema,
             )
         except EngineError as exc:
             return Refusal(

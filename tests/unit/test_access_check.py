@@ -6,7 +6,11 @@ from sql_warden.engines import Column, EngineUnavailable, Table
 from sql_warden.models import Decision
 from sql_warden.profiles import Access
 from sql_warden.warden import Warden
+from tests.unit import dialects
 from tests.unit.conftest import FakeEngine
+
+pytestmark = pytest.mark.usefixtures("dialect")  # every test here runs under each dialect
+PG = pytest.mark.postgres_only
 
 
 def _table(schema: str, name: str, *columns: str) -> Table:
@@ -35,15 +39,43 @@ ADMIN = Access(EVERYTHING)
 SHAPE = ShapeConfig(allowed_functions=("to_jsonb", "row_to_json"))
 
 
-def _decide(sql: str, access: Access | None = PUBLIC, profile: str = "public") -> Decision:
-    warden = Warden(
-        FakeEngine(catalog=CATALOG),
+def _stored(access: Access | None) -> Access | None:
+    """access, naming tables and columns as the running dialect stores them."""
+    if access is None or access.tables == EVERYTHING:
+        return access
+    assert not isinstance(access.tables, str)
+    return Access(
+        {
+            dialects.names(table): columns
+            if columns == EVERYTHING
+            else frozenset(dialects.stored(column) for column in columns)
+            for table, columns in access.tables.items()
+        }
+    )
+
+
+def _warden(
+    engine: FakeEngine | None = None,
+    access: Access | None = PUBLIC,
+    profile: str = "public",
+) -> Warden:
+    return Warden(
+        engine or FakeEngine(catalog=dialects.catalog(CATALOG)),
         audit=MemoryAuditSink(),
+        dialect=dialects.current(),
         shape=SHAPE,
         profile=profile,
-        access=access,
+        access=_stored(access),
     )
-    return warden.check(sql)
+
+
+def _decide(sql: str, access: Access | None = PUBLIC, profile: str = "public") -> Decision:
+    return _warden(access=access, profile=profile).check(sql)
+
+
+def _sql(decision: Decision) -> str:
+    assert decision.sql is not None
+    return dialects.text(decision.sql)
 
 
 def _refusal(sql: str, access: Access | None = PUBLIC) -> tuple[str, str]:
@@ -51,7 +83,7 @@ def _refusal(sql: str, access: Access | None = PUBLIC) -> tuple[str, str]:
     assert refused_by is not None, f"allowed: {sql}"
     assert refused_by.check == "access"
     assert refused_by.refusal is not None
-    return refused_by.refusal.code, refused_by.refusal.reason
+    return refused_by.refusal.code, dialects.text(refused_by.refusal.reason)
 
 
 @pytest.mark.parametrize(
@@ -97,7 +129,7 @@ def test_allowed(sql: str, runs: str | None) -> None:
     assert decision.allowed, decision.refused_by
     assert [step.check for step in decision.trace] == ["parse", "shape", "access", "cost"]
     if runs is not None:
-        assert decision.sql == runs
+        assert _sql(decision) == runs
 
 
 TABLE = "TABLE_NOT_ALLOWED"
@@ -161,6 +193,9 @@ STAR = "STAR_NOT_ALLOWED"
         ("select xmin from products", COLUMN, "column xmin"),
         ("select id from products where (id, category) = (1, 'x')", COLUMN, "column category"),
         ("select id from (select * from products) t", STAR, "* reads every column"),
+        # A star handed to a function reads every column just the same; only COUNT(*) doesn't.
+        ("select to_jsonb(*) from products", STAR, "* reads every column of public.products"),
+        ("select count(distinct *) from products", STAR, "* reads every column"),
         ("select products.id from products p", COLUMN, "products is not a table this query"),
     ],
 )
@@ -173,7 +208,7 @@ def test_refused(sql: str, code: str, reason: str) -> None:
 class TestEveryTable:
     def test_reads_any_table_and_star(self) -> None:
         decision = _decide("select * from employee_salaries", ADMIN, "admin")
-        assert decision.sql == "SELECT * FROM public.employee_salaries LIMIT 101"
+        assert _sql(decision) == "SELECT * FROM public.employee_salaries LIMIT 101"
 
     @pytest.mark.parametrize(
         ("sql", "code"),
@@ -194,7 +229,7 @@ class TestNoRules:
     def test_the_implicit_profile_has_no_access_check(self) -> None:
         decision = _decide("select * from employee_salaries", access=None, profile="all")
         assert [step.check for step in decision.trace] == ["parse", "shape", "cost"]
-        assert decision.sql == "SELECT * FROM employee_salaries LIMIT 101"
+        assert _sql(decision) == "SELECT * FROM employee_salaries LIMIT 101"
 
     def test_a_profile_that_lists_no_tables_reads_nothing(self) -> None:
         assert _refusal("select id from products", Access({}))[0] == TABLE
@@ -205,9 +240,7 @@ class TestNoRules:
 
 def test_an_unreadable_catalog_refuses_rather_than_guesses() -> None:
     engine = FakeEngine(error=EngineUnavailable("could not connect to the database"))
-    decision = Warden(engine, audit=MemoryAuditSink(), profile="public", access=PUBLIC).check(
-        "select id from products"
-    )
+    decision = _warden(engine).check("select id from products")
     refused_by = decision.refused_by
     assert refused_by is not None
     assert refused_by.refusal is not None
@@ -216,9 +249,7 @@ def test_an_unreadable_catalog_refuses_rather_than_guesses() -> None:
 
 
 def test_refusals_happen_before_anything_runs() -> None:
-    engine = FakeEngine(catalog=CATALOG)
-    outcome = Warden(engine, audit=MemoryAuditSink(), profile="public", access=PUBLIC).run(
-        "select * from employee_salaries"
-    )
+    engine = FakeEngine(catalog=dialects.catalog(CATALOG))
+    outcome = _warden(engine).run("select * from employee_salaries")
     assert outcome.result is None
     assert engine.executed == []
