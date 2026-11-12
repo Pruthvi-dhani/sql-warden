@@ -143,6 +143,21 @@ class CostConfig(_Section):
     a 1M-row table costs about 20,000; a cross join of two, about 10^10."""
 
 
+class BudgetConfig(_Section):
+    """What one session may use in total, across all its queries. A limit left out is not
+    enforced."""
+
+    max_queries: PositiveInt | None = None
+    """Queries that were allowed and sent to the database."""
+    max_total_cost: PositiveFloat | None = None
+    """The sum of their estimated costs, in the planner's units (see CostConfig)."""
+    max_rows_returned: PositiveInt | None = None
+    """Rows returned, over all of them."""
+    max_refusals: PositiveInt | None = None
+    """Refused requests, dry runs included: stops a caller from trying query after query
+    until one gets through."""
+
+
 class MaskingConfig(_Section):
     key: SecretStr | None = None
     """The key for hmac masks, shared by every profile: a value gets one token whichever

@@ -32,6 +32,7 @@ from sql_warden.pipeline.access import DEFAULT_SCHEMAS
 from sql_warden.pipeline.lineage import Lineage, MaskedColumn
 from sql_warden.pipeline.masking import Mask, Null, Redact, build_mask
 from sql_warden.profiles import Access
+from sql_warden.sessions import new_session_id
 
 
 class Warden:
@@ -62,6 +63,9 @@ class Warden:
         self.dialect = dialect
         self.profile = profile
         """The profile this Warden serves. Fixed for its lifetime."""
+        self.session_id = new_session_id()
+        """The session of requests that don't name one: this Warden's own, as long as it
+        lives. For the CLI and a stdio server that is the process, which serves one caller."""
         self.access = access
         self.masks: dict[MaskedColumn, MaskRule] = dict(masks or {})
         """The profile's masked columns: (schema, table, column) → its rule."""
@@ -94,19 +98,24 @@ class Warden:
             ]
         )
 
-    def check(self, sql: str, *, client: str | None = None) -> Decision:
+    def check(
+        self, sql: str, *, client: str | None = None, session_id: str | None = None
+    ) -> Decision:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
         started = time.perf_counter()
-        outcome = QueryOutcome(self._decide(sql)[0], result=None)
+        outcome = QueryOutcome(self._decide(sql, session_id)[0], result=None)
         return self._recorded(sql, outcome, started, dry_run=True, client=client).decision
 
-    def run(self, sql: str, *, client: str | None = None) -> QueryOutcome:
+    def run(
+        self, sql: str, *, client: str | None = None, session_id: str | None = None
+    ) -> QueryOutcome:
         """Check the query and, if allowed, execute it. Engine errors are reported in the
         outcome, not raised, so the decision is never lost.
 
-        client names who asked (the MCP client, or cli), for the audit record."""
+        client names who asked (the MCP client, or cli), for the audit record. session_id is
+        the session the request belongs to: without one, this Warden's own."""
         started = time.perf_counter()
-        decision, columns = self._decide(sql)
+        decision, columns = self._decide(sql, session_id)
         if decision.sql is None:
             return self._recorded(sql, QueryOutcome(decision, None), started, client=client)
         try:
@@ -128,11 +137,13 @@ class Warden:
             raise
         return self._recorded(sql, outcome, started, client=client)
 
-    def _decide(self, sql: str) -> tuple[Decision, int | None]:
+    def _decide(self, sql: str, session_id: str | None = None) -> tuple[Decision, int | None]:
         """The decision, and how many columns the result will have if any are masked (None
         if none are), to check the rows against before masking them by position."""
         ctx = CheckContext(sql=sql, dialect=self.dialect)
-        decision = replace(self.pipeline.run(ctx), profile=self.profile)
+        decision = replace(
+            self.pipeline.run(ctx), profile=self.profile, session_id=session_id or self.session_id
+        )
         if ctx.cost is not None:  # kept on a refusal too: the audit record shows the estimate
             limit = self.cost_check.limits.max_total_cost
             decision = replace(decision, cost=ctx.cost, cost_limit=limit)
@@ -243,6 +254,7 @@ class Warden:
             code=refusal.code if refusal else None,
             reason=refusal.reason if refusal else None,
             error=None if error is None else str(error),
+            session_id=decision.session_id,
             client=client,
             cost_estimate=None if decision.cost is None else decision.cost.total_cost,
             masked_columns=tuple(masked.column for masked in decision.masked),

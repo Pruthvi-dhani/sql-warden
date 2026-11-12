@@ -45,6 +45,7 @@ from sql_warden.server import (
     describe_one_table,
     describe_tables,
 )
+from sql_warden.sessions import valid_session_id
 from sql_warden.warden import Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
@@ -135,6 +136,25 @@ def open_audit(config: WardenConfig) -> PostgresAuditSink:
             "sql-warden records every request and won't run without its audit database."
         ) from exc
     return sink
+
+
+def _session_name(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+    if value is not None and not valid_session_id(value):
+        raise click.BadParameter(
+            "a session name is up to 64 letters, digits, '.', '_', ':' or '-', starting with "
+            "a letter or digit"
+        )
+    return value
+
+
+def session_option[F: Callable[..., Any]](command: F) -> F:
+    return click.option(
+        "--session",
+        "session_id",
+        callback=_session_name,
+        help="The session this call belongs to, e.g. nightly-report: calls made with the "
+        "same name are one session in the audit log. Default: a session of its own.",
+    )(command)
 
 
 def json_option[F: Callable[..., Any]](command: F) -> F:
@@ -244,6 +264,7 @@ def cli(ctx: click.Context, config_path: Path | None) -> None:
 @cli.command()
 @click.argument("sql")
 @engine_options
+@session_option
 @json_option
 @click.pass_obj
 def check(
@@ -254,6 +275,7 @@ def check(
     timeout_ms: int | None,
     profile: str | None,
     audit_dsn: str | None,
+    session_id: str | None,
     as_json: bool,
 ) -> None:
     """Dry run: show what each check decides about SQL, without executing it.
@@ -261,7 +283,7 @@ def check(
     Exits 0 if the query would be allowed, 2 if a check refuses it, 1 on any other error.
     """
     warden = build_warden(settings(state, dsn, max_rows, timeout_ms, audit_dsn), profile)
-    decision = warden.check(sql, client=CLIENT)
+    decision = warden.check(sql, client=CLIENT, session_id=session_id)
     if as_json:
         click.echo(describe(decision).model_dump_json(exclude_none=True))
     else:
@@ -273,6 +295,7 @@ def check(
 @cli.command()
 @click.argument("sql")
 @engine_options
+@session_option
 @json_option
 @click.pass_obj
 def query(
@@ -283,6 +306,7 @@ def query(
     timeout_ms: int | None,
     profile: str | None,
     audit_dsn: str | None,
+    session_id: str | None,
     as_json: bool,
 ) -> None:
     """Run SQL through the checks and, if allowed, against the warehouse.
@@ -290,7 +314,7 @@ def query(
     Exits 0 if it ran, 2 if a check refused it, 1 if the database failed or on any other error.
     """
     warden = build_warden(settings(state, dsn, max_rows, timeout_ms, audit_dsn), profile)
-    outcome = warden.run(sql, client=CLIENT)
+    outcome = warden.run(sql, client=CLIENT, session_id=session_id)
     if as_json:
         click.echo(describe(outcome.decision, outcome).model_dump_json(exclude_none=True))
     if outcome.error is not None:
@@ -407,6 +431,11 @@ def audit_group() -> None:
 )
 @click.option("--profile", help="Only events for this profile.")
 @click.option(
+    "--session",
+    "session_id",
+    help="Only events of this session: a response's session_id, or a --session name.",
+)
+@click.option(
     "--decision",
     type=click.Choice(["allowed", "refused", "failed"]),
     help="Only events with this outcome.",
@@ -421,6 +450,7 @@ def tail(
     state: CliState,
     limit: int,
     profile: str | None,
+    session_id: str | None,
     decision: Any,
     follow: bool,
     as_json: bool,
@@ -433,7 +463,8 @@ def tail(
         click.echo(json.dumps(audit_json(event)) if as_json else format_audit_line(event))
 
     try:
-        events = reader.recent(limit, profile=profile, decision=decision)
+        filters = {"profile": profile, "decision": decision, "session_id": session_id}
+        events = reader.recent(limit, **filters)
         if not as_json:
             if events or follow:
                 click.echo(AUDIT_HEADER)
@@ -445,12 +476,13 @@ def tail(
             return
         # Everything already in the window counts as printed: only new events follow.
         start = max([e.ts for e in events] + [datetime.datetime.now(datetime.UTC)])
-        seen = {e.id: e.ts for e in reader.since(start - FOLLOW_LOOKBACK, profile=profile)}
+        everything = {**filters, "decision": None}
+        seen = {e.id: e.ts for e in reader.since(start - FOLLOW_LOOKBACK, **everything)}
         seen.update({e.id: e.ts for e in events})
         newest = start
         while True:
             _sleep(FOLLOW_INTERVAL_S)
-            for event in reader.since(newest - FOLLOW_LOOKBACK, profile=profile, decision=decision):
+            for event in reader.since(newest - FOLLOW_LOOKBACK, **filters):
                 if event.id not in seen:
                     emit(event)
                     seen[event.id] = event.ts

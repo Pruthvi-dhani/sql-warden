@@ -134,6 +134,8 @@ class TestJson:
         assert returned is not None
         # Each call is its own request, with its own audit record.
         assert printed.pop("audit_id") != returned.pop("audit_id")
+        # And its own session: the CLI's call, and the server's connection.
+        assert printed.pop("session_id") != returned.pop("session_id")
         assert _without_timings(printed) == _without_timings(returned)
 
 

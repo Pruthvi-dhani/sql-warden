@@ -90,6 +90,8 @@ class Decision:
     """How the checks changed the query, e.g. "added LIMIT 101"."""
     profile: str | None = None
     """The profile the query was checked for; the Warden always sets it."""
+    session_id: str | None = None
+    """The session the request belongs to; the Warden always sets it."""
     cost: CostEstimate | None = None
     """The planner's estimate, once the cost check got one, whether or not it refused."""
     cost_limit: float | None = None

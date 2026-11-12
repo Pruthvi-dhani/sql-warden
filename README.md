@@ -26,8 +26,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 > **Status:** under construction. The parse and shape checks, read-only engine, CLI, MCP server, Claude Code hookup, browser test portal, and per-profile table and column access
 > work today; every request is recorded in the audit database, readable with
 > `sql-warden audit`; the database planner's cost estimate gates every query before it runs;
-> and sensitive columns come back masked per profile, which completes Phase 5. Next: sessions
-> and query budgets. See the [plan](docs/plan.md) for the roadmap.
+> and sensitive columns come back masked per profile. Every request now belongs to a session,
+> which the audit log records; the budgets that sessions are for come next. See the
+> [plan](docs/plan.md) for the roadmap.
 
 ## Development
 
@@ -149,7 +150,34 @@ uv run sql-warden audit tail -f                          # follow along as an ag
 uv run sql-warden audit tail --profile public --decision refused -n 50
 uv run sql-warden audit tail --json | jq -r .sql          # one JSON object per event
 uv run sql-warden audit show 5019a2f1 --json             # an id, or its first few characters
+uv run sql-warden audit tail --session nightly-report    # everything one session asked
 ```
+
+#### Sessions
+
+Every request belongs to a session, and its record in the audit log says which
+(`session_id`, also in `--json` and the MCP results). A session is one caller's run of
+requests:
+
+| Caller                         | Its session                                                     |
+|--------------------------------|-----------------------------------------------------------------|
+| an agent over stdio            | the server process: the agent starts it, and it serves only that agent |
+| a client over HTTP             | its connection; reconnecting starts a new session                |
+| `sql-warden query` and `check` | each call, unless calls are given the same `--session NAME`      |
+
+```bash
+uv run sql-warden query "select count(*) from orders" --session nightly-report
+uv run sql-warden check "select * from customers"     --session nightly-report
+uv run sql-warden audit tail --session nightly-report
+```
+
+A name is up to 64 letters, digits, `.`, `_`, `:` or `-`. Over HTTP the id is sql-warden's own,
+derived from the transport's `Mcp-Session-Id` rather than being it: whoever holds that header's
+value can use the connection, so it stays out of responses and the audit log.
+
+Sessions are what query budgets will count against (next in the [plan](docs/plan.md)): how
+many queries a session may run, what they may cost in total, how many rows it may take, and
+how many refusals it gets before it is stopped.
 
 #### The checks so far
 
@@ -256,7 +284,8 @@ Results are structured, so an agent can tell why a query was refused and fix it:
 ```
 
 An allowed query comes back with `sql` (what ran), `rewrites`, the `trace` and a `result`
-(`columns`, `rows`, `row_count`, `truncated`). Exact numbers come back as strings and times as
+(`columns`, `rows`, `row_count`, `truncated`). Every response names its `session_id` and
+`audit_id`. Exact numbers come back as strings and times as
 ISO 8601. `run_query` flags refusals and database errors as tool errors; `check_query` treats a
 refusal as an answer.
 

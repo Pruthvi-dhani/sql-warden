@@ -30,10 +30,15 @@ class AuditReader:
         self._conn: psycopg.Connection[dict[str, Any]] | None = None
 
     def recent(
-        self, limit: int, *, profile: str | None = None, decision: Decision | None = None
+        self,
+        limit: int,
+        *,
+        profile: str | None = None,
+        decision: Decision | None = None,
+        session_id: str | None = None,
     ) -> list[AuditEvent]:
         """The last limit events, oldest first, as tail prints them."""
-        where, params = _filters(profile, decision)
+        where, params = _filters(profile, decision, session_id)
         query = sql.SQL("{} {} ORDER BY ts DESC, id DESC LIMIT %s").format(_SELECT, where)
         return self._events(query, [*params, limit])[::-1]
 
@@ -43,9 +48,10 @@ class AuditReader:
         *,
         profile: str | None = None,
         decision: Decision | None = None,
+        session_id: str | None = None,
     ) -> list[AuditEvent]:
         """Every event at or after ts, oldest first."""
-        where, params = _filters(profile, decision, since=ts)
+        where, params = _filters(profile, decision, session_id, since=ts)
         query = sql.SQL("{} {} ORDER BY ts, id").format(_SELECT, where)
         return self._events(query, params)
 
@@ -94,11 +100,21 @@ class AuditReader:
 
 
 def _filters(
-    profile: str | None, decision: Decision | None, *, since: datetime.datetime | None = None
+    profile: str | None,
+    decision: Decision | None,
+    session_id: str | None = None,
+    *,
+    since: datetime.datetime | None = None,
 ) -> tuple[sql.Composable, list[Any]]:
     conditions: list[sql.Composable] = []
     params: list[Any] = []
-    for column, value in (("profile", profile), ("decision", decision), ("ts", since)):
+    filters = (
+        ("profile", profile),
+        ("decision", decision),
+        ("session_id", session_id),
+        ("ts", since),
+    )
+    for column, value in filters:
         if value is not None:
             op = ">=" if column == "ts" else "="
             conditions.append(sql.SQL("{} {} %s").format(sql.Identifier(column), sql.SQL(op)))

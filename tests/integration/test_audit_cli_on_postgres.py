@@ -39,7 +39,7 @@ def _event(n: int, **fields: Any) -> AuditEvent:
 
 
 SEEDED = [
-    _event(1),
+    _event(1, session_id="nightly-report"),
     _event(2, profile="admin", sql="select count(*) from employee_salaries"),
     _event(
         3,
@@ -52,7 +52,14 @@ SEEDED = [
         truncated=None,
         id=uuid.UUID("abcd0000-0000-4000-8000-000000000001"),
     ),
-    _event(4, decision="failed", error="division by zero", rows_returned=None, truncated=None),
+    _event(
+        4,
+        decision="failed",
+        error="division by zero",
+        rows_returned=None,
+        truncated=None,
+        session_id="nightly-report",
+    ),
     _event(
         5,
         dry_run=True,
@@ -93,6 +100,9 @@ def test_tail_shows_the_latest_oldest_first(sink: PostgresAuditSink) -> None:
         (["--decision", "refused"], [SEEDED[2]]),
         (["--profile", "public", "--decision", "allowed", "-n", "1"], [SEEDED[4]]),
         (["--profile", "nobody"], []),
+        (["--session", "nightly-report"], [SEEDED[0], SEEDED[3]]),
+        (["--session", "nightly-report", "--decision", "failed"], [SEEDED[3]]),
+        (["--session", "nightly"], []),  # the whole name, not the start of one
     ],
 )
 def test_tail_filters(
@@ -156,13 +166,18 @@ def test_a_request_can_be_looked_up_by_its_audit_id(
         ["query", "select name from products where id = 7", "--json"],
         env={"SQL_WARDEN_DSN": warehouse.reader_dsn},
     )
-    audit_id = json.loads(outcome.output)["audit_id"]
+    payload = json.loads(outcome.output)
+    audit_id, session_id = payload["audit_id"], payload["session_id"]
     code, output = _run("show", audit_id[:8])
     assert code == 0, output
     lines = output.splitlines()
     assert lines[0] == f"event    {audit_id}"
-    assert lines[5].startswith("result   allowed, 1 row (")
+    assert lines[4] == f"session  {session_id}"
+    assert lines[6].startswith("result   allowed, 1 row (")
     assert "  SELECT name FROM products WHERE id = 7 LIMIT 101" in lines
+    # And everything its session asked: here, just that.
+    code, output = _run("tail", "--session", session_id, "--json")
+    assert [json.loads(line)["id"] for line in output.splitlines()] == [audit_id]
 
 
 def test_before_anything_is_recorded(audit_dsn: str) -> None:

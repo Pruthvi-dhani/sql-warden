@@ -237,9 +237,59 @@ class TestFailClosed:
         assert refused.check == "audit"
 
 
+class TestSessions:
+    def test_a_request_belongs_to_the_wardens_own_session_unless_it_names_one(self) -> None:
+        warden = _warden()
+        first = warden.run("select 1")
+        second = warden.check("select 2")
+        named = warden.run("select 3", session_id="nightly-report")
+        assert isinstance(warden.audit, MemoryAuditSink)
+        assert [event.session_id for event in warden.audit.events] == [
+            warden.session_id,
+            warden.session_id,
+            "nightly-report",
+        ]
+        assert first.decision.session_id == second.session_id == warden.session_id
+        assert named.decision.session_id == "nightly-report"
+
+    def test_each_warden_has_a_session_of_its_own(self) -> None:
+        assert _warden().session_id != _warden().session_id
+
+    def test_refusals_and_failures_are_recorded_with_their_session(self) -> None:
+        warden = _warden(FakeEngine(error=QueryFailed("division by zero")))
+        refused = warden.run("delete from orders", session_id="s-1")
+        failed = warden.run("select 1 / 0", session_id="s-1")
+        assert isinstance(warden.audit, MemoryAuditSink)
+        assert [(e.decision, e.session_id) for e in warden.audit.events] == [
+            ("refused", "s-1"),
+            ("failed", "s-1"),
+        ]
+        assert refused.decision.session_id == failed.decision.session_id == "s-1"
+
+    def test_a_request_that_cant_be_recorded_still_says_its_session(self) -> None:
+        outcome = _warden(audit=RecordFails()).run("select 1", session_id="s-1")
+        assert outcome.decision.session_id == "s-1"
+        assert describe(outcome.decision, outcome).session_id == "s-1"
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
 class TestMcp:
+    async def test_a_connection_with_no_id_of_its_own_is_the_wardens_session(
+        self, anyio_backend: str
+    ) -> None:
+        # In-process and over stdio there is one connection, and no transport session id.
+        warden = _warden()
+        async with Client(create_server(warden)) as client:
+            run = await client.call_tool("run_query", {"sql": "select 1"})
+            check = await client.call_tool("check_query", {"sql": "delete from orders"})
+        assert run.structured_content is not None
+        assert check.structured_content is not None
+        assert run.structured_content["session_id"] == warden.session_id
+        assert check.structured_content["session_id"] == warden.session_id
+        assert isinstance(warden.audit, MemoryAuditSink)
+        assert {event.session_id for event in warden.audit.events} == {warden.session_id}
+
     async def test_the_client_name_is_recorded(self, anyio_backend: str) -> None:
         warden = _warden()
         info = Implementation(name="claude-code", version="2.1.3")
@@ -272,6 +322,37 @@ class TestCli:
             ("cli", True),
         ]
         assert all(sink.schema_applied for sink in audit_sinks.built)
+
+    def test_each_call_is_a_session_of_its_own(
+        self, engines: list[FakeEngine], audit_sinks: AuditSinks
+    ) -> None:
+        CliRunner().invoke(cli, ["query", "select 1"])
+        CliRunner().invoke(cli, ["query", "select 1"])
+        first, second = (event.session_id for event in audit_sinks.events)
+        assert first
+        assert second
+        assert first != second
+
+    def test_calls_given_the_same_session_share_it(
+        self, engines: list[FakeEngine], audit_sinks: AuditSinks
+    ) -> None:
+        CliRunner().invoke(cli, ["query", "select 1", "--session", "nightly-report"])
+        CliRunner().invoke(cli, ["check", "delete from orders", "--session", "nightly-report"])
+        printed = CliRunner().invoke(
+            cli, ["check", "select 2", "--session", "nightly-report", "--json"]
+        )
+        assert [event.session_id for event in audit_sinks.events] == ["nightly-report"] * 3
+        assert json.loads(printed.output)["session_id"] == "nightly-report"
+
+    @pytest.mark.parametrize("name", ["", "has space", "-x", "a" * 65])
+    def test_a_name_that_cant_be_a_session_is_an_error(
+        self, engines: list[FakeEngine], audit_sinks: AuditSinks, name: str
+    ) -> None:
+        outcome = CliRunner().invoke(cli, ["query", "select 1", f"--session={name}"])
+        assert outcome.exit_code == EXIT_ERROR
+        assert "a session name is up to 64 letters, digits" in outcome.output
+        assert engines == [] or engines[0].executed == []
+        assert audit_sinks.events == []
 
     def test_the_demo_audit_database_is_the_default(
         self, engines: list[FakeEngine], audit_sinks: AuditSinks

@@ -240,7 +240,13 @@ class TestTailCommand:
         CliRunner().invoke(
             cli, ["audit", "tail", "-n", "5", "--profile", "public", "--decision", "refused"]
         )
-        assert reader.calls == [("recent", (5, {"profile": "public", "decision": "refused"}))]
+        filters = {"profile": "public", "decision": "refused", "session_id": None}
+        assert reader.calls == [("recent", (5, filters))]
+
+    def test_one_session(self, reader: FakeReader) -> None:
+        CliRunner().invoke(cli, ["audit", "tail", "--session", "nightly-report"])
+        filters = {"profile": None, "decision": None, "session_id": "nightly-report"}
+        assert reader.calls == [("recent", (20, filters))]
 
     def test_an_empty_log(self, reader: FakeReader) -> None:
         assert CliRunner().invoke(cli, ["audit", "tail"]).output == "(no audit events)\n"

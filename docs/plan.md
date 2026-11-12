@@ -52,6 +52,7 @@ src/sql_warden/
     postgres.py      # read-only transaction, statement timeout, row cap via server-side cursor
   warden.py          # Warden facade: parse -> checks -> regenerate SQL -> execute
   audit/             # schema.sql, sink.py: AuditEvent, AuditSink, Memory/PostgresAuditSink
+  sessions.py        # Usage, SessionStore, MemorySessionStore: what each session has used
   server.py          # MCP tools (run_query, check_query, list_tables); stdio + loopback HTTP
   render.py          # CLI text output
   cli.py             # click: query / check / serve / config validate
@@ -62,9 +63,8 @@ tests/unit/  tests/integration/ (marker: integration)
 Still to come:
 ```
 src/sql_warden/
-  pipeline/  cost.py  budget.py  masking.py  lineage.py
-  engines/   snowflake.py          # plus explain() on the Engine protocol
-  sessions.py                      # session + budget store
+  pipeline/  budget.py
+  engines/   snowflake.py
 tests/portal/  tests/snowflake/ (marker: snowflake)
 ```
 The SQL is parsed once with sqlglot, and every check reads that same AST. EXPLAIN runs only
@@ -530,7 +530,7 @@ profiles:
 - Still not reachable from `warden.yaml`: the `Warden` takes `masks` as an argument, and the
   config section opens in 5.3.
 
-**5.3 Apply masks at execution** ✅ done
+**5.3 Apply masks at execution** ✅ done (`d021cdc`)
 - The masks run on result rows in `Warden`. Masked columns are listed in the result metadata
   and in the audit record.
 - Tests: an integration test on `customers.ssn` and `email`.
@@ -556,17 +556,39 @@ profiles:
 - The portal examples gained a masking group for `support`; the integration test checks each.
 
 ## Phase 6 — Sessions & query budgets
-**6.1 Session store**
+**6.1 Session store** ✅ done
 - Each session has a `session_id` (per MCP connection; the CLI takes `--session`). Budgets:
   `max_queries`, `max_total_cost`, `max_rows_returned`, and `max_refusals`, which stops an
-  agent from brute-forcing its way through the checks. Limits come from a `budgets` section
-  with per-profile overrides. The store is thread-safe and in-memory,
+  agent from brute-forcing its way through the checks. The store is thread-safe and in-memory,
   behind a `SessionStore` protocol so that 9.3 can swap in a Postgres-backed store.
 - Tests: unit tests, including concurrent increments.
+- As built: every request belongs to a session, and `audit_events.session_id` is always set.
+  - Each `Warden` has a session of its own (`Warden.session_id`, random), used by requests
+    that name none. Over stdio that is the server process, which serves one agent. For the
+    CLI it is the one call, unless `query`/`check` are given `--session NAME` (up to 64
+    letters, digits, `.`, `_`, `:`, `-`).
+  - Over HTTP a session is a connection. `server.session_of` derives the id from the
+    transport's `Mcp-Session-Id` (a SHA-256, cut to 32 hex characters) instead of using it:
+    whoever holds the transport's id can use the connection, so it stays out of responses
+    and the audit log. A reconnect is a new session; that a session-only budget can be reset
+    this way is what 9.3's per-identity budgets are for.
+  - `Decision.session_id`, `session_id` in MCP responses and `--json`, and
+    `sql-warden audit tail --session ID`.
+- `sessions.py` has `Usage` (queries, total cost, rows returned, refusals), the `SessionStore`
+  protocol and `MemorySessionStore`. `charge(session_id, spent, within=budget)` checks and adds
+  in one step: with a budget, the charge is made only if the total stays within every limit
+  (equal is within), all of it or none, and a refused `Charge` names the limit. That is the
+  operation 9.3's `UPDATE … RETURNING` will do, and why callers charging at once can't pass a
+  limit between them. A session never charged uses nothing and isn't kept. The store keeps
+  10,000 sessions, then forgets the one charged longest ago.
+- Nothing is charged yet: the `Warden` gets the store, and warden.yaml its `budgets` section,
+  in 6.2 with the check that enforces them, so a limit in the file is never one that is
+  ignored. `config.BudgetConfig` (the four limits, each optional) is there for the store.
 
 **6.2 Budget check + post-execution accounting**
 - Before running, the check refuses `BUDGET_EXHAUSTED` with the remaining budget. After
   running, it charges the actual cost and rows. A new `budget_status` MCP tool shows the state.
+  Limits come from a `budgets` section with per-profile overrides.
 - Tests: unit tests (the last query allowed, the next refused); an MCP tool test.
 
 **6.3 Budgets survive restarts**

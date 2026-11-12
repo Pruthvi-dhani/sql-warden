@@ -12,12 +12,14 @@ uv run python -m tests.portal                      # opens http://127.0.0.1:8765
 Options are the same as `sql-warden`'s: `--config`, `--dsn`, `--max-rows`, `--timeout-ms`,
 `--profile`, `--audit-dsn`, plus `--port` and `--no-open`. The portal only listens on
 127.0.0.1. Like `sql-warden serve`, it records every Run and Check in the audit database and
-won't start without it; each result's `audit_id` is in the console panel.
+won't start without it; each result's `audit_id` and `session_id` are in the console panel.
+A session is one connection to one profile's server, so
+`sql-warden audit tail --session <session_id>` lists what the page asked since it connected.
 
 It serves every profile in the config at once. With no config file (no `--config`, no
 `SQL_WARDEN_CONFIG` and no `./warden.yaml`) it serves the implicit profile `all` and, so there
-is something to switch between, `warden.example.yaml`'s profiles too: `all`, `public` and
-`admin`. With the example config:
+is something to switch between, `warden.example.yaml`'s profiles too: `all`, `public`,
+`support` and `admin`. With the example config:
 
 ```bash
 uv run python -m tests.portal --config warden.example.yaml                  # starts on public

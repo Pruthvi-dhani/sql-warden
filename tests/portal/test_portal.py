@@ -259,6 +259,34 @@ def test_refusals_carry_check_code_and_reason(client: PortalClient) -> None:
     assert payload["trace"][-1]["passed"] is False
 
 
+def test_each_connection_is_a_session_and_the_audit_log_says_which(portal_url: str) -> None:
+    first, second = PortalClient(portal_url), PortalClient(portal_url)
+    first.connect()
+    second.connect()
+    ids = [
+        client.call_tool(tool, sql="select 1")["structuredContent"]["session_id"]
+        for client, tool in ((first, "run_query"), (first, "check_query"), (second, "run_query"))
+    ]
+    assert ids[0] == ids[1] != ids[2]
+    assert re.fullmatch(r"[0-9a-f]{32}", ids[0])
+    # Never the transport's own id: whoever holds that can use the connection.
+    assert first.session_id not in ids
+    assert second.session_id not in ids
+
+
+def test_the_audit_log_records_the_connections_session(engine: FakeEngine) -> None:
+    audit = MemoryAuditSink()
+    warden = Warden(engine, audit=audit)
+    with serving(create_portal_app(warden)) as base_url:
+        client = PortalClient(base_url)
+        client.connect()
+        payload = client.call_tool("run_query", sql="select 1")["structuredContent"]
+    (event,) = audit.events
+    assert event.session_id == payload["session_id"] != warden.session_id
+    assert client.session_id is not None
+    assert client.session_id not in repr(event)
+
+
 def test_an_unknown_session_gets_404_so_the_page_reconnects(portal_url: str) -> None:
     stale = PortalClient(portal_url, session_id="0" * 32)
     status, _, _ = stale.post(

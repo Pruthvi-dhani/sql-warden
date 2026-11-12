@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from mcp import Client, StdioServerParameters
 
@@ -96,6 +97,25 @@ async def test_refusals_reach_the_agent(params: StdioServerParameters, sql: str,
     payload = _structured(result)
     assert (payload["check"], payload["code"]) == ("shape", code)
     assert payload["reason"]
+
+
+async def test_one_stdio_server_is_one_session(
+    params: StdioServerParameters, audit_dsn: str
+) -> None:
+    sessions = []
+    for _ in range(2):  # the agent starts the server, and later starts it again
+        async with Client(params) as client:
+            ran = _structured(await client.call_tool("run_query", {"sql": "select 1"}))
+            checked = _structured(await client.call_tool("check_query", {"sql": "delete from t"}))
+        assert ran["session_id"] == checked["session_id"]
+        sessions.append(ran["session_id"])
+        with psycopg.connect(audit_dsn) as conn:
+            recorded = conn.execute(
+                "SELECT id::text FROM audit_events WHERE session_id = %s ORDER BY ts",
+                (ran["session_id"],),
+            ).fetchall()
+        assert [row[0] for row in recorded] == [ran["audit_id"], checked["audit_id"]]
+    assert sessions[0] != sessions[1]
 
 
 def _structured(result: Any) -> dict[str, Any]:

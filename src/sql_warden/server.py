@@ -6,6 +6,7 @@ yet, so it never listens anywhere else.
 """
 
 import datetime
+import hashlib
 import ipaddress
 import uuid
 from decimal import Decimal
@@ -13,6 +14,7 @@ from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
@@ -86,6 +88,9 @@ class QueryResponse(BaseModel):
     refused: bool
     profile: str | None = None
     """The profile the query was checked for: what this server lets its callers see."""
+    session_id: str | None = None
+    """The session the request belongs to: this connection. The audit log records it, so
+    `sql-warden audit tail --session <session_id>` lists everything the session asked."""
     check: str | None = None
     """The check that refused the query."""
     code: str | None = None
@@ -163,6 +168,7 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
     return QueryResponse(
         refused=refusal is not None,
         profile=decision.profile,
+        session_id=decision.session_id,
         check=refused_by.check if refused_by else None,
         code=refusal.code if refusal else None,
         reason=refusal.reason if refusal else None,
@@ -231,14 +237,14 @@ def create_server(warden: Warden) -> MCPServer:
         which check, with a code and a reason. The result is an error when the query was
         refused or the database failed to run it.
         """
-        outcome = warden.run(sql, client=client_name(ctx))
+        outcome = warden.run(sql, client=client_name(ctx), session_id=session_of(ctx))
         return tool_result(describe(outcome.decision, outcome), is_error=outcome.result is None)
 
     @server.tool(annotations=READ_ONLY)
     def check_query(sql: str, ctx: Context[Any, Any]) -> Annotated[CallToolResult, QueryResponse]:
         """Dry run: say whether a SQL query would be allowed, its estimated cost, and the exact
         SQL that would run, without running it. The database only plans it."""
-        decision = warden.check(sql, client=client_name(ctx))
+        decision = warden.check(sql, client=client_name(ctx), session_id=session_of(ctx))
         return tool_result(describe(decision), is_error=decision.audit_id is None)
 
     @server.tool(annotations=READ_ONLY)
@@ -263,6 +269,20 @@ def client_name(ctx: Context[Any, Any]) -> str | None:
     if params is None:
         return None
     return f"{params.client_info.name} {params.client_info.version}"
+
+
+def session_of(ctx: Context[Any, Any]) -> str | None:
+    """sql-warden's id for the session this request belongs to, or None for the Warden's own.
+
+    Over HTTP each connection is a session. Its id is derived from the transport's
+    Mcp-Session-Id rather than being that id: whoever holds the transport's id can use the
+    connection, so it stays out of responses and the audit log. Over stdio there is one
+    connection per process, which is the Warden's own session."""
+    headers = ctx.headers
+    transport_id = None if headers is None else headers.get(MCP_SESSION_ID_HEADER)
+    if not transport_id:
+        return None
+    return hashlib.sha256(b"sql-warden session " + transport_id.encode()).hexdigest()[:32]
 
 
 def table_info(warden: Warden, table: Table) -> TableInfo:
