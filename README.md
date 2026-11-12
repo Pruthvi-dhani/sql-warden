@@ -29,9 +29,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 > and sensitive columns come back masked per profile. Every request belongs to a session,
 > and a session can have a budget: queries, total cost, rows and refusals. A session's usage
 > is read back from the audit log, so its budget outlives the server that counted it. The
-> checks now read Snowflake SQL as well as Postgres; the Snowflake engine that runs it is
-> next, and until then `warehouse.engine` takes only `postgres`. See the
-> [plan](docs/plan.md) for the roadmap.
+> warehouse can be Postgres or [Snowflake](#snowflake); the Snowflake engine is tested on an
+> emulator and has not yet run against a real account. See the [plan](docs/plan.md) for the
+> roadmap.
 
 ## Development
 
@@ -44,6 +44,10 @@ uv run mypy                               # strict
 uv run pytest                             # unit + integration tests
 uv run pytest -m "not integration"        # skip tests that need Docker
 ```
+
+The Snowflake engine has two more sets of tests, each run on its own (see
+[Snowflake](#snowflake)): `tests/fakesnow` on an emulator, and `tests/snowflake` against a
+real account.
 
 ### Demo stack
 
@@ -531,6 +535,80 @@ session budget: 2 of 25 queries, 0.12 of 50,000 cost, 6 of 500 rows, 0 of 10 ref
 - **Servers don't share their counts while running.** Two processes using one session at the
   same moment each count from what the audit log said when they first saw it, so between
   them they can overspend. One shared store fixes that (9.3).
+
+### Snowflake
+
+The warehouse can be Snowflake. The audit database stays Postgres either way. Install the
+connector, which is an optional extra, and say so in `warden.yaml`:
+
+```bash
+pip install 'sql-warden[snowflake]'       # in this repo, uv sync already has it
+```
+
+```yaml
+warehouse:
+  engine: snowflake
+  dsn: snowflake://WARDEN_READER:${SNOWFLAKE_PASSWORD}@myorg-myaccount/WAREHOUSE/PUBLIC?warehouse=WARDEN_XS&role=WARDEN_READER
+  statement_timeout_ms: 5000     # Snowflake counts whole seconds: rounded up
+  max_rows: 100
+cost:
+  max_total_cost: 10737418240    # bytes a query may scan; this is the default, 10 GiB
+profiles:
+  support:
+    tables:
+      PUBLIC.CUSTOMERS: "*"      # names as Snowflake stores them: upper case
+      PUBLIC.ORDERS: [ID, CUSTOMER_ID, QUANTITY]
+    masks:
+      PUBLIC.CUSTOMERS.SSN: redact
+```
+
+The connection string is `snowflake://USER:PASSWORD@ACCOUNT/DATABASE/SCHEMA`, with
+`warehouse`, `role`, `authenticator`, `private_key_file` and `private_key_file_pwd` as
+options after `?`. A password or programmatic access token goes in the password's place; for
+a key pair, leave it out and give `private_key_file`. Characters a URL can't hold are
+percent-encoded. A profile's own `dsn` works as for Postgres: usually another role.
+
+What is different from Postgres:
+
+- **Names are upper case.** Snowflake stores an unquoted name in upper case, and profiles and
+  masks name tables and columns as they are stored. `config validate` points out names that
+  aren't. A table named without a schema is looked up in the connection's schema.
+- **The cost is bytes.** `EXPLAIN` gives the bytes in the partitions a query may scan, so that
+  is what `cost.max_total_cost` and a budget's `max_total_cost` count, and a refusal says "this
+  query may scan 6.4 GiB, over profile support's limit of 1 GiB". There is no row estimate.
+  It measures reading, not work: a join that multiplies two small tables scans little. The
+  statement timeout is what stops that one.
+- **Read-only is the role's job.** Snowflake has no read-only session to ask for, so connect
+  as a role granted only `USAGE` and `SELECT`. The checks refuse everything but a `SELECT`
+  either way; the role is what holds if a check is wrong:
+
+  ```sql
+  CREATE ROLE WARDEN_READER;
+  GRANT USAGE ON WAREHOUSE WARDEN_XS TO ROLE WARDEN_READER;
+  GRANT USAGE ON DATABASE WAREHOUSE TO ROLE WARDEN_READER;
+  GRANT USAGE ON SCHEMA WAREHOUSE.PUBLIC TO ROLE WARDEN_READER;
+  GRANT SELECT ON ALL TABLES IN SCHEMA WAREHOUSE.PUBLIC TO ROLE WARDEN_READER;
+  ```
+- **Snowflake enforces the rest too:** the statement timeout
+  (`STATEMENT_TIMEOUT_IN_SECONDS`), one statement per request (`MULTI_STATEMENT_COUNT`), and
+  the row cap (`ROWS_PER_RESULTSET`).
+- **Queries are tagged.** Each query's `QUERY_TAG` is `sql-warden <audit_id>`, so Snowflake's
+  query history and sql-warden's audit log can be matched record for record.
+
+How far it is tested: against a stand-in for the connector (every `pytest`), and on
+[fakesnow](https://github.com/tekumara/fakesnow), which runs Snowflake SQL on DuckDB. fakesnow
+has no planner, so the cost check is tested on saved plans, one from Snowflake's documentation
+and the rest written in its shape. **It has not yet run against a real account.** The tests
+for that are written and only read:
+
+```bash
+uv run --with 'fakesnow==0.12.1' --with 'snowflake-connector-python<5' pytest tests/fakesnow
+SNOWFLAKE_DSN='snowflake://...' uv run pytest -m snowflake
+```
+
+fakesnow is kept out of the project's own dependencies because it pins the SQL parser to an
+older release and needs a connector before version 5; the first command lays it over the
+environment for that run only.
 
 ### Masked columns
 

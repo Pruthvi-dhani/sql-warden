@@ -148,7 +148,8 @@ class PostgresEngine:
         self.max_rows = max_rows
         self._connect_timeout_s = connect_timeout_s
 
-    def execute(self, sql: str) -> Result:
+    def execute(self, sql: str, *, tag: str | None = None) -> Result:
+        # tag is for engines whose database records one per query; the audit log has it here.
         started = time.perf_counter()
         # A server-side cursor streams rows, so the row cap bounds memory too.
         # It also only accepts queries: Postgres rejects anything else in DECLARE.
@@ -164,7 +165,7 @@ class PostgresEngine:
             duration_ms=(time.perf_counter() - started) * 1000,
         )
 
-    def explain(self, sql: str) -> CostEstimate:
+    def explain(self, sql: str, *, tag: str | None = None) -> CostEstimate:
         # The same read-only transaction and statement timeout as execute(): planning a
         # query with many joins can itself take a while.
         with self._read_only(sql, prefix=_EXPLAIN) as conn:

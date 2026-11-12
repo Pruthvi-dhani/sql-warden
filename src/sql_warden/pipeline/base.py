@@ -27,6 +27,8 @@ class CheckContext:
     """The session the request belongs to; the Warden always sets it."""
     dry_run: bool = False
     """True if the query is only being checked: then nothing may be charged for it."""
+    tag: str | None = None
+    """Names the request to the database when it plans or runs the query: its audit id."""
 
     def sql_to_run(self) -> str:
         """The SQL that runs if the query is allowed: the tree as the checks left it,

@@ -270,7 +270,7 @@ class TestCli:
         self, engines: list[FakeEngine], policy: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(FakeEngine, "tables", lambda self: CATALOG)
-        monkeypatch.setattr(FakeEngine, "execute", lambda self, sql: ROWS)
+        monkeypatch.setattr(FakeEngine, "execute", lambda self, sql, tag=None: ROWS)
         outcome = CliRunner().invoke(cli, ["query", "select id, email, phone, ssn from customers"])
         assert outcome.exit_code == 0, outcome.output
         assert "123-45-6789" not in outcome.output

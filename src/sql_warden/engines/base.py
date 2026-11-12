@@ -33,11 +33,16 @@ class CostEstimate:
 
     total_cost: float
     """The planner's estimate for the whole query, in the database's own units. Postgres:
-    abstract cost units, in which reading one page from disk in sequence costs 1.0."""
-    est_rows: int
-    """The rows the planner expects the query to return."""
+    abstract cost units, in which reading one page from disk in sequence costs 1.0.
+    Snowflake: the bytes in the micro-partitions the query may scan."""
+    est_rows: int | None
+    """The rows the planner expects the query to return. None where it doesn't say
+    (Snowflake)."""
     top_node: str
     """The step of the plan that adds the most cost of its own, e.g. "Seq Scan on orders"."""
+    unit: str | None = None
+    """What total_cost counts, where that has a name: "bytes" for Snowflake. None for
+    Postgres, whose units are only the planner's."""
     raw: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
     """The plan, as the database gave it."""
 
@@ -66,14 +71,17 @@ class Engine(Protocol):
     max_rows: int
     """The row cap: execute() returns at most this many rows."""
 
-    def execute(self, sql: str) -> Result:
-        """Run one read-only query, returning at most the engine's row cap."""
+    def execute(self, sql: str, *, tag: str | None = None) -> Result:
+        """Run one read-only query, returning at most the engine's row cap.
+
+        tag names the request (its audit id) to the database, where the database has
+        somewhere to put it: Snowflake's QUERY_TAG, which its query history shows."""
         ...
 
     def tables(self) -> tuple[Table, ...]:
         """The tables and views the engine's role can read, with their columns."""
         ...
 
-    def explain(self, sql: str) -> CostEstimate:
+    def explain(self, sql: str, *, tag: str | None = None) -> CostEstimate:
         """The planner's estimate for one read-only query, without running it."""
         ...

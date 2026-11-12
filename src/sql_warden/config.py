@@ -27,6 +27,8 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from sql_warden.engines.snowflake import DSN_FORM, SCHEME, SnowflakeDsn
+
 # The read-only role in the dev/docker-compose.yml demo stack.
 DEFAULT_DSN = "postgresql://warden_reader:warden_reader@localhost:5433/warehouse"
 # The demo stack's audit database, a separate Postgres instance.
@@ -116,12 +118,41 @@ class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def check_dsn(dsn: str, engine: str) -> None:
+    """Raise PydanticCustomError unless dsn is one the engine can connect with. The message
+    never repeats the DSN: it holds a password."""
+    if engine != "snowflake":
+        if dsn.startswith(f"{SCHEME}://"):
+            raise PydanticCustomError(
+                "dsn_engine",
+                "is a Snowflake connection string, but warehouse.engine is {engine}",
+                {"engine": engine},
+            )
+        return
+    try:
+        SnowflakeDsn.parse(dsn)
+    except ValueError as exc:
+        raise PydanticCustomError("dsn", "{problem}", {"problem": str(exc)}) from None
+
+
 class WarehouseConfig(_Section):
-    engine: Literal["postgres"] = "postgres"
+    engine: Literal["postgres", "snowflake"] = "postgres"
     dsn: str = DEFAULT_DSN
+    """How to connect. Postgres: a libpq connection string or URL. Snowflake:
+    snowflake://USER:PASSWORD@ACCOUNT/DATABASE/SCHEMA?warehouse=WAREHOUSE&role=ROLE."""
     statement_timeout_ms: PositiveInt = 5_000
+    """Snowflake counts in whole seconds, so there it is rounded up to the next one."""
     max_rows: PositiveInt = 100
     connect_timeout_s: PositiveInt = 5
+
+    @model_validator(mode="after")
+    def _dsn_fits_the_engine(self) -> Self:
+        if self.engine == "snowflake" and "dsn" not in self.model_fields_set:
+            raise PydanticCustomError(
+                "dsn_missing", "the snowflake engine needs a dsn: {form}", {"form": DSN_FORM}
+            )
+        check_dsn(self.dsn, self.engine)
+        return self
 
     @property
     def dialect(self) -> str:
@@ -164,13 +195,18 @@ class ShapeConfig(_Section):
         return next((pattern for pattern in patterns if fnmatchcase(name, pattern)), None)
 
 
+SNOWFLAKE_MAX_TOTAL_COST = 10 * 1024**3
+"""cost.max_total_cost when the engine is Snowflake and the file doesn't set it: 10 GiB."""
+
+
 class CostConfig(_Section):
     """Limits on what a query may cost, from the database planner's estimate (EXPLAIN): a
     query estimated above them is refused before it runs."""
 
     max_total_cost: PositiveFloat = 1_000_000
-    """In the planner's units (Postgres: reading one page in sequence costs 1). A full scan of
-    a 1M-row table costs about 20,000; a cross join of two, about 10^10."""
+    """In the planner's units. Postgres: reading one page in sequence costs 1; a full scan of
+    a 1M-row table costs about 20,000, a cross join of two about 10^10. Snowflake: bytes the
+    query may scan, and the default there is 10 GiB."""
 
 
 class BudgetConfig(_Section):
@@ -191,6 +227,15 @@ class BudgetConfig(_Section):
     def limited(self) -> bool:
         """True if any limit is set."""
         return any(limit is not None for limit in self.model_dump().values())
+
+
+def default_cost(dialect: str) -> CostConfig:
+    """The cost limits when none are given, in that dialect's planner's units."""
+    return (
+        CostConfig(max_total_cost=SNOWFLAKE_MAX_TOTAL_COST)
+        if dialect == "snowflake"
+        else CostConfig()
+    )
 
 
 class MaskingConfig(_Section):
@@ -391,6 +436,35 @@ class WardenConfig(_Section):
     default_profile: str | None = None
     """The profile a server uses when none is picked with --profile or SQL_WARDEN_PROFILE."""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _cost_in_the_engines_units(cls, data: object) -> object:
+        # The planner's units differ per engine, so the default limit does too.
+        if not isinstance(data, dict):
+            return data
+        warehouse, cost = data.get("warehouse"), data.get("cost")
+        snowflake = isinstance(warehouse, dict) and warehouse.get("engine") == "snowflake"
+        if not snowflake or (isinstance(cost, dict) and "max_total_cost" in cost):
+            return data
+        if cost is not None and not isinstance(cost, dict):
+            return data  # not a section at all: its own validation says so
+        return {**data, "cost": {**(cost or {}), "max_total_cost": SNOWFLAKE_MAX_TOTAL_COST}}
+
+    @model_validator(mode="after")
+    def _profile_dsns_fit_the_engine(self) -> Self:
+        for name, profile in (self.profiles or {}).items():
+            if profile.dsn is None:
+                continue
+            try:
+                check_dsn(profile.dsn, self.warehouse.engine)
+            except PydanticCustomError as exc:
+                raise PydanticCustomError(
+                    "profile_dsn",
+                    "profile {name}'s dsn {problem}",
+                    {"name": name, "problem": exc.message()},
+                ) from None
+        return self
+
     @field_validator("profiles")
     @classmethod
     def _profile_names(
@@ -516,6 +590,11 @@ def _env_value(match: re.Match[str], source: str) -> str:
 
 def describe_dsn(dsn: str) -> str:
     """A DSN for display: who connects where, never the password."""
+    if dsn.startswith(f"{SCHEME}://"):
+        try:
+            return SnowflakeDsn.parse(dsn).describe()
+        except ValueError:
+            return "(unparseable connection string)"
     try:
         parts = conninfo_to_dict(dsn)
     except psycopg.Error:

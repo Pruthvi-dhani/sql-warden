@@ -119,7 +119,7 @@ class TestOneEventPerRequest:
 
     def test_a_crash_in_the_engine_is_recorded_and_raised(self) -> None:
         class Broken(FakeEngine):
-            def execute(self, sql: str) -> Result:
+            def execute(self, sql: str, *, tag: str | None = None) -> Result:
                 raise RuntimeError("bug")
 
         warden = _warden(Broken())

@@ -1,4 +1,5 @@
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
@@ -16,6 +17,7 @@ from sql_warden.config import (
     CostConfig,
     MaskRule,
     ShapeConfig,
+    default_cost,
 )
 from sql_warden.engines import Engine, EngineError, Result, Table
 from sql_warden.models import (
@@ -145,7 +147,7 @@ class Warden:
             else []
         )
         # Last of the built-in checks: the planner sees only SQL the others approved.
-        self.cost_check = CostCheck(engine, cost or CostConfig(), profile=profile)
+        self.cost_check = CostCheck(engine, cost or default_cost(dialect), profile=profile)
         self.budget = budget or BudgetConfig()
         """What one session may use. Without limits there is no budget check, but usage is
         still counted."""
@@ -176,8 +178,12 @@ class Warden:
     ) -> Decision:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
         started = time.perf_counter()
-        outcome = QueryOutcome(self._decide(sql, session_id, dry_run=True)[0], result=None)
-        return self._recorded(sql, outcome, started, dry_run=True, client=client).decision
+        request = uuid.uuid4()
+        decision = self._decide(sql, session_id, dry_run=True, request=request)[0]
+        outcome = QueryOutcome(decision, result=None)
+        return self._recorded(
+            sql, outcome, started, dry_run=True, client=client, request=request
+        ).decision
 
     def run(
         self, sql: str, *, client: str | None = None, session_id: str | None = None
@@ -188,9 +194,12 @@ class Warden:
         client names who asked (the MCP client, or cli), for the audit record. session_id is
         the session the request belongs to: without one, this Warden's own."""
         started = time.perf_counter()
-        decision, columns = self._decide(sql, session_id)
+        request = uuid.uuid4()
+        decision, columns = self._decide(sql, session_id, request=request)
         if decision.sql is None:
-            return self._recorded(sql, QueryOutcome(decision, None), started, client=client)
+            return self._recorded(
+                sql, QueryOutcome(decision, None), started, client=client, request=request
+            )
         try:
             self.audit.ping()
         except Exception as exc:
@@ -198,7 +207,7 @@ class Warden:
             refused = _withheld(decision, f"{_audit_problem(exc)}; the query was not run")
             return QueryOutcome(self._with_budget(refused), result=None)
         try:
-            result = self.engine.execute(decision.sql)
+            result = self.engine.execute(decision.sql, tag=_tag(request))
             # Known only now, so charged now: the query that takes a session past its rows
             # still comes back, and the next request finds the budget used up.
             if not self._count(self._session(decision), Usage(rows_returned=len(result.rows))):
@@ -213,9 +222,9 @@ class Warden:
             # A bug, not a database error: still leave a record of the attempt, then let it
             # surface.
             failed = QueryOutcome(decision, result=None, error=EngineError(_crash(exc)))
-            self._recorded(sql, failed, started, client=client)
+            self._recorded(sql, failed, started, client=client, request=request)
             raise
-        return self._recorded(sql, outcome, started, client=client)
+        return self._recorded(sql, outcome, started, client=client, request=request)
 
     def budget_status(self, session_id: str | None = None) -> BudgetStatus:
         """What the session (without one, this Warden's own) has used, against its budget.
@@ -231,7 +240,12 @@ class Warden:
             raise SessionStoreError(_audit_problem(exc, reading=True)) from exc
 
     def _decide(
-        self, sql: str, session_id: str | None = None, *, dry_run: bool = False
+        self,
+        sql: str,
+        session_id: str | None = None,
+        *,
+        dry_run: bool = False,
+        request: uuid.UUID | None = None,
     ) -> tuple[Decision, int | None]:
         """The decision, and how many columns the result will have if any are masked (None
         if none are), to check the rows against before masking them by position.
@@ -239,7 +253,13 @@ class Warden:
         Unless it is a dry run, an allowed query is charged to its session here: it is about
         to run. A refusal is charged either way."""
         session_id = session_id or self.session_id
-        ctx = CheckContext(sql=sql, dialect=self.dialect, session_id=session_id, dry_run=dry_run)
+        ctx = CheckContext(
+            sql=sql,
+            dialect=self.dialect,
+            session_id=session_id,
+            dry_run=dry_run,
+            tag=None if request is None else _tag(request),
+        )
         decision = replace(self._checked(ctx), profile=self.profile, session_id=session_id)
         if ctx.cost is not None:  # kept on a refusal too: the audit record shows the estimate
             limit = self.cost_check.limits.max_total_cost
@@ -346,10 +366,13 @@ class Warden:
         *,
         dry_run: bool = False,
         client: str | None,
+        request: uuid.UUID,
     ) -> QueryOutcome:
-        """The outcome, once its audit record is written; if it can't be, a refusal instead."""
+        """The outcome, once its audit record is written; if it can't be, a refusal instead.
+
+        request becomes the record's id: the one the database was given as the query's tag."""
         outcome = replace(outcome, decision=self._with_budget(outcome.decision))
-        event = self._event(sql, outcome, started, dry_run=dry_run, client=client)
+        event = self._event(sql, outcome, started, dry_run=dry_run, client=client, request=request)
         writing = time.perf_counter()
         try:
             self.audit.record(event)
@@ -376,11 +399,13 @@ class Warden:
         *,
         dry_run: bool,
         client: str | None,
+        request: uuid.UUID,
     ) -> AuditEvent:
         decision, result, error = outcome.decision, outcome.result, outcome.error
         refused_by = decision.refused_by
         refusal = refused_by.refusal if refused_by else None
         return AuditEvent(
+            id=request,
             profile=self.profile,
             sql=sql,
             decision="refused" if refusal else "failed" if error else "allowed",
@@ -436,6 +461,12 @@ class Warden:
         if self.access is None:
             return EVERYTHING
         return self.access.columns(table.schema, table.name)
+
+
+def _tag(request: uuid.UUID) -> str:
+    """What the database is told a request is: Snowflake keeps it as the query's QUERY_TAG,
+    so its query history can be matched to the audit log, record for record."""
+    return f"sql-warden {request}"
 
 
 def trace_step(entry: TraceEntry) -> dict[str, object]:

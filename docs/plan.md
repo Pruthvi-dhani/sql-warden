@@ -51,6 +51,7 @@ src/sql_warden/
   engines/
     base.py          # Engine protocol (max_rows, execute(sql) -> Result, tables()), engine errors
     postgres.py      # read-only transaction, statement timeout, row cap via server-side cursor
+    snowflake.py     # SnowflakeDsn, SnowflakeEngine: one session, EXPLAIN USING JSON as bytes
   warden.py          # Warden facade: parse -> checks -> regenerate SQL -> execute
   audit/             # schema.sql, sink.py: AuditEvent, AuditSink, Memory/PostgresAuditSink
   sessions.py        # Usage, SessionStore, MemorySessionStore: what each session has used
@@ -61,12 +62,8 @@ dev/  docker-compose.yml (project sql-warden-demo), warehouse_seed.sql
 warden.example.yaml
 tests/unit/  tests/integration/ (marker: integration)
 ```
-Still to come:
-```
-src/sql_warden/
-  engines/   snowflake.py
-tests/portal/  tests/snowflake/ (marker: snowflake)
-```
+tests/fakesnow/ (run on its own) and tests/snowflake/ (marker: snowflake) are for the Snowflake
+engine.
 The SQL is parsed once with sqlglot, and every check reads that same AST. EXPLAIN runs only
 after shape and access have passed, so unvetted SQL never reaches the database, not even through
 the planner. Execution always runs inside a `READ ONLY` transaction with `statement_timeout` and
@@ -657,7 +654,7 @@ The audit DB is always Postgres, whatever the warehouse engine is. Config sets
 mode, local dev runs only the compose `audit` container, and the warehouse is the Snowflake
 account.
 
-**7.1 Dialect-aware checks** ✅ done
+**7.1 Dialect-aware checks** ✅ done (`99857c7`)
 - The dialect comes from config. The shape, access and lineage tests are parametrized over
   `postgres` and `snowflake`. The built-in function denylist (Postgres-only today) becomes
   per-dialect, adding Snowflake ones such as `SYSTEM$…`, and the LIMIT rewrite handles `TOP`.
@@ -696,7 +693,7 @@ account.
 - Left for 7.2: nothing here has met a real Snowflake. The checks only read the SQL; whether
   what they regenerate runs as written is for the engine's tests.
 
-**7.2 `SnowflakeEngine`** (optional `[snowflake]` extra)
+**7.2 `SnowflakeEngine`** (optional `[snowflake]` extra) ✅ done
 - Execution uses a read-only role, `STATEMENT_TIMEOUT_IN_SECONDS`, and a `QUERY_TAG` set to the
   audit id. `explain()` runs `EXPLAIN USING JSON` and turns
   `bytesAssigned`/`partitionsAssigned` into a CostEstimate. The catalog comes from
@@ -712,6 +709,43 @@ account.
     is how the cost check is tested.
   - **Live**: `tests/snowflake/`, marker `snowflake`, skipped unless `SNOWFLAKE_*` env vars are
     set. It confirms the cost check and the read-only role against a real account.
+- As built, the config: `warehouse.engine: snowflake` with a `dsn` of the form
+  `snowflake://USER:PASSWORD@ACCOUNT/DATABASE/SCHEMA?warehouse=…&role=…` (also
+  `authenticator`, `private_key_file`, `private_key_file_pwd`). One string, so a profile's
+  own `dsn`, `--dsn` and `SQL_WARDEN_DSN` work as for Postgres; a dsn that doesn't fit the
+  engine is a config error that never repeats it. The schema in it becomes the Warden's
+  `default_schema`. `config validate` notes profile names that aren't upper case.
+- The engine keeps one session, opened on first use, shared by threads, and replaced once if
+  it is lost (connection errors, SQLSTATE 08). It asks Snowflake to enforce the statement
+  timeout (`STATEMENT_TIMEOUT_IN_SECONDS`, rounded up to whole seconds), one statement per
+  request (`MULTI_STATEMENT_COUNT`) and, per query, the row cap plus one
+  (`ROWS_PER_RESULTSET`). Snowflake has no read-only session, so that part is the role's
+  grants; the README has the grants.
+- `QUERY_TAG` is `sql-warden <audit_id>`, on the EXPLAIN and on the query. For that the
+  request's id is made before anything runs and handed down: `Engine.execute` and `explain`
+  take an optional `tag` (Postgres ignores it), and it becomes the audit record's id.
+- Cost: `EXPLAIN USING JSON`'s `GlobalStats.bytesAssigned`, the bytes in the partitions left
+  after pruning. `CostEstimate` gained `unit` ("bytes") and `est_rows` may be None, since
+  Snowflake gives no row estimate. `cost.max_total_cost` defaults to 10 GiB for Snowflake, and
+  refusals, the CLI and `config validate` print bytes as GiB and MiB. A plan that can't be read
+  is `COST_UNAVAILABLE`. Bytes measure reading, not work: a join that multiplies small tables
+  scans little, and only the statement timeout stops it.
+- The tiers, as built:
+  - Every `pytest`: `test_snowflake_engine.py` drives the engine with a stand-in for
+    `snowflake.connector.connect`, raising the connector's real error classes (88 tests).
+  - Saved plans (`tests/unit/fixtures/snowflake_explain/`): one is the example in Snowflake's
+    documentation; the others are written by hand in its shape. There is no account to
+    record from yet, and the fixtures' README says so.
+  - fakesnow (`tests/fakesnow`, 31 tests): **not** a dev dependency and not in every `pytest`,
+    which the plan had wanted. fakesnow 0.12.1 pins `sqlglot~=30.22.0` (the checks are on
+    30.27) and doesn't import with connector 5, so in the lock file it would hold the
+    security-critical parser and the connector back. It runs laid over the environment
+    instead (`uv run --with 'fakesnow==0.12.1' --with 'snowflake-connector-python<5' pytest
+    tests/fakesnow`), as its own CI job. The unit suite passes on sqlglot 30.22 too. It has
+    no planner, so `explain` is stubbed with a saved plan there.
+  - Live (`tests/snowflake`, 8 tests, `SNOWFLAKE_DSN`): written, read-only, and never yet run.
+    That is the standing caveat on this point: the error codes, the EXPLAIN shape beyond the
+    documented example, and the three session parameters are from Snowflake's documentation.
 
 ## Phase 8 — Hardening & CI
 **8.1 Startup safety checks**

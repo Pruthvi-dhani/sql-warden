@@ -64,10 +64,14 @@ class CostInfo(BaseModel):
     """The planner's estimate for the whole query, in its own units."""
     max_total_cost: float
     """The profile's limit: a query estimated above it is refused with COST_TOO_HIGH."""
-    est_rows: int
-    """The rows the planner expects the query to return."""
+    est_rows: int | None = None
+    """The rows the planner expects the query to return. Missing where it doesn't say
+    (Snowflake)."""
     top_node: str
     """The step of the plan that adds the most cost, e.g. "Seq Scan on orders"."""
+    unit: str | None = None
+    """What total_cost counts, where it has a name: "bytes" (that the query may scan) for
+    Snowflake. Missing for Postgres, whose units are only the planner's."""
 
 
 class QueryRows(BaseModel):
@@ -254,6 +258,7 @@ def describe(decision: Decision, outcome: QueryOutcome | None = None) -> QueryRe
             max_total_cost=decision.cost_limit,
             est_rows=decision.cost.est_rows,
             top_node=decision.cost.top_node,
+            unit=decision.cost.unit,
         ),
         budget=None if decision.budget is None else budget_info(decision.budget),
         trace=[TraceStep.model_validate(trace_step(entry)) for entry in decision.trace],

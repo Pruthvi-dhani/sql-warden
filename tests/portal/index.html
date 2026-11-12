@@ -358,10 +358,13 @@ function renderDecision(tool, result) {
   if (payload.cost) {
     const c = payload.cost;
     const over = c.total_cost > c.max_total_cost;
+    // Snowflake's planner gives bytes it may scan and no row estimate; Postgres gives its own units.
+    const unit = c.unit ? ` ${c.unit}` : "";
+    const rows = c.est_rows == null ? "" : ` · about ${c.est_rows.toLocaleString()} ${c.est_rows === 1 ? "row" : "rows"}`;
     box.append(el("div", { class: "label" }, "Estimated cost (from the planner; nothing runs to get it)"),
       el("div", { class: `cost ${over ? "over" : ""}` },
-        el("strong", {}, formatCost(c.total_cost)), ` of ${formatCost(c.max_total_cost)} allowed`,
-        el("span", { class: "hint" }, ` · about ${c.est_rows.toLocaleString()} ${c.est_rows === 1 ? "row" : "rows"} · costliest step: `),
+        el("strong", {}, formatCost(c.total_cost)), ` of ${formatCost(c.max_total_cost)}${unit} allowed`,
+        el("span", { class: "hint" }, `${rows} · costliest step: `),
         el("code", {}, c.top_node)));
   }
   if (payload.budget) {

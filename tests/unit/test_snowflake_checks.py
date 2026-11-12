@@ -458,10 +458,13 @@ class TestDialects:
         with pytest.raises(ValueError, match="unknown SQL dialect 'mysql'"):
             Warden(FakeEngine(), audit=MemoryAuditSink(), dialect="mysql")
 
-    def test_the_config_takes_snowflake_once_there_is_an_engine_for_it(self) -> None:
-        # A setting is accepted when it is enforced: the engine comes in 7.2.
-        with pytest.raises(ConfigError, match=r"warehouse\.engine"):
-            parse_config("version: 1\nwarehouse:\n  engine: snowflake\n")
+    def test_the_configs_engine_is_the_dialect(self) -> None:
+        config = parse_config(
+            "version: 1\nwarehouse:\n  engine: snowflake\n"
+            "  dsn: snowflake://reader:pw@myorg-acct/warehouse/public\n"
+        )
+        assert config.warehouse.dialect == "snowflake"
+        assert parse_config("version: 1").warehouse.dialect == "postgres"
 
     def test_comments_never_reach_the_warehouse(self) -> None:
         sql = "select id from customers -- ; drop table customers\n/* identifier('x') */"

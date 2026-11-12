@@ -49,6 +49,22 @@ jobs:
       - run: uv sync --locked
       - run: uv run pytest -ra -m "not integration and not snowflake"
 
+  fakesnow:
+    name: Snowflake engine on fakesnow
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      # fakesnow pins an older sqlglot and needs a connector before 5, so it is laid over
+      # the project's environment for this run only: see tests/fakesnow/conftest.py.
+      - run: >-
+          uv run --with 'fakesnow==0.12.1' --with 'snowflake-connector-python<5'
+          pytest -ra tests/fakesnow
+
   integration:
     name: Integration tests (Postgres via Testcontainers)
     runs-on: ubuntu-latest

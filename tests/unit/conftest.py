@@ -48,9 +48,12 @@ class FakeEngine:
     """Raised by explain(); error is for execute() and tables()."""
     executed: list[str] = field(default_factory=list)
     explained: list[str] = field(default_factory=list)
+    tags: list[str | None] = field(default_factory=list)
+    """The tag of each explain() and execute(), in order."""
 
-    def execute(self, sql: str) -> Result:
+    def execute(self, sql: str, *, tag: str | None = None) -> Result:
         self.executed.append(sql)
+        self.tags.append(tag)
         if self.error is not None:
             raise self.error
         return self.result
@@ -60,8 +63,9 @@ class FakeEngine:
             raise self.error
         return self.catalog
 
-    def explain(self, sql: str) -> CostEstimate:
+    def explain(self, sql: str, *, tag: str | None = None) -> CostEstimate:
         self.explained.append(sql)
+        self.tags.append(tag)
         if self.explain_error is not None:
             raise self.explain_error
         return self.estimate

@@ -165,7 +165,7 @@ class TestWhereTheEstimateGoes:
     def test_the_response_has_it(self) -> None:
         response = describe(_warden(_estimate(5000.0)).check("select 1"))
         assert response.cost is not None
-        assert response.cost.model_dump() == {
+        assert response.cost.model_dump(exclude_none=True) == {  # as the tools return it
             "total_cost": 5000.0,
             "max_total_cost": 1000.0,
             "est_rows": 3,
@@ -305,7 +305,7 @@ class TestCli:
         self, engines: list[FakeEngine], policy: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         estimate = CostEstimate(1000.0, 1, "Seq Scan on products")
-        monkeypatch.setattr(FakeEngine, "explain", lambda self, sql: estimate)
+        monkeypatch.setattr(FakeEngine, "explain", lambda self, sql, tag=None: estimate)
         public = CliRunner().invoke(cli, ["check", "select id from products"])
         admin = CliRunner().invoke(cli, ["check", "select id from products", "--profile", "admin"])
         assert public.exit_code == EXIT_REFUSED

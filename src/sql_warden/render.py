@@ -7,7 +7,7 @@ from typing import Any
 from sql_warden.audit import AuditEvent
 from sql_warden.engines import Result
 from sql_warden.models import Decision
-from sql_warden.pipeline.cost import format_cost
+from sql_warden.pipeline.cost import format_amount, format_cost
 from sql_warden.server import TableResponse, TablesResponse
 from sql_warden.sessions import BudgetStatus
 
@@ -47,10 +47,8 @@ def format_cost_line(decision: Decision) -> list[str]:
     cost, limit = decision.cost, decision.cost_limit
     if cost is None or limit is None:
         return []
-    return [
-        f"  cost: {format_cost(cost.total_cost)} of {format_cost(limit)} allowed "
-        f"(most of it: {cost.top_node})"
-    ]
+    used, most = format_amount(cost.total_cost, cost.unit), format_amount(limit, cost.unit)
+    return [f"  cost: {used} of {most} allowed (most of it: {cost.top_node})"]
 
 
 def format_masked(decision: Decision) -> list[str]:

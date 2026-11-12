@@ -24,8 +24,10 @@ from sql_warden.config import (
     describe_dsn,
     load_config,
 )
+from sql_warden.engines import Engine
 from sql_warden.engines.postgres import PostgresEngine
-from sql_warden.pipeline.cost import format_cost
+from sql_warden.engines.snowflake import BYTES, SnowflakeEngine
+from sql_warden.pipeline.cost import format_amount, format_cost
 from sql_warden.profiles import ProfileError, profile_budget, profile_cost, select_profile
 from sql_warden.render import (
     AUDIT_HEADER,
@@ -102,8 +104,9 @@ def engine_options[F: Callable[..., Any]](command: F) -> F:
     command = click.option(
         "--dsn",
         envvar="SQL_WARDEN_DSN",
-        help="Warehouse connection string; overrides warehouse.dsn, which profiles without "
-        "their own dsn use (env: SQL_WARDEN_DSN).",
+        help="Warehouse connection string, as in warden.yaml (snowflake://... for the "
+        "snowflake engine); overrides warehouse.dsn, which profiles without their own dsn "
+        "use (env: SQL_WARDEN_DSN).",
     )(command)
     return command
 
@@ -182,17 +185,34 @@ def build_warden(
     if audit is None:
         audit = open_audit(config)
     warehouse = config.warehouse
-    engine = PostgresEngine(
-        active.dsn,
-        statement_timeout_ms=warehouse.statement_timeout_ms,
-        # Like its dsn, a profile's own row cap is policy: --max-rows doesn't change it.
-        max_rows=active.max_rows or warehouse.max_rows,
-        connect_timeout_s=warehouse.connect_timeout_s,
-    )
+    # Like its dsn, a profile's own row cap is policy: --max-rows doesn't change it.
+    max_rows = active.max_rows or warehouse.max_rows
+    engine: Engine
+    default_schema: str | None = None
+    if warehouse.engine == "snowflake":
+        try:
+            snow = SnowflakeEngine(
+                active.dsn,
+                statement_timeout_ms=warehouse.statement_timeout_ms,
+                max_rows=max_rows,
+                connect_timeout_s=warehouse.connect_timeout_s,
+            )
+        except ValueError as exc:  # a dsn given on the command line: the file's was checked
+            raise click.ClickException(f"warehouse dsn: {exc}") from exc
+        # A table named without a schema is looked up in the session's, as Snowflake does.
+        engine, default_schema = snow, snow.default_schema
+    else:
+        engine = PostgresEngine(
+            active.dsn,
+            statement_timeout_ms=warehouse.statement_timeout_ms,
+            max_rows=max_rows,
+            connect_timeout_s=warehouse.connect_timeout_s,
+        )
     return Warden(
         engine,
         audit=audit,
         dialect=warehouse.dialect,
+        default_schema=default_schema,
         shape=config.shape,
         profile=active.name,
         access=active.access,
@@ -572,7 +592,10 @@ def validate(state: CliState, path: Path | None) -> None:
             f"             {len(shape.allowed_functions)} extra functions allowed, "
             f"{len(shape.denied_functions)} extra denied"
         )
-    click.echo(f"  cost:      refused above an estimated {format_cost(loaded.cost.max_total_cost)}")
+    unit = BYTES if warehouse.engine == "snowflake" else None
+    scanned = " scanned" if unit else ""
+    limit = format_amount(loaded.cost.max_total_cost, unit)
+    click.echo(f"  cost:      refused above an estimated {limit}{scanned}")
     click.echo(f"  budgets:   {describe_budget(loaded.budgets)}")
     if loaded.masking.key is not None:
         click.echo("  masking:   hmac key set")
@@ -604,6 +627,22 @@ def describe_profile_tables(profile: ProfileConfig) -> list[str]:
     ]
 
 
+def lower_case_names(profile: ProfileConfig) -> list[str]:
+    """Names in a profile that Snowflake most likely stores otherwise: it keeps an unquoted
+    name in upper case, and the profile must name tables and columns as they are stored."""
+    names = [*profile.masks]
+    if isinstance(profile.tables, dict):
+        for table, columns in profile.tables.items():
+            names.append(table)
+            names += [] if columns == EVERYTHING else list(columns)
+    lower = [name for name in names if name != name.upper()]
+    return [
+        f"{name} is not upper case: Snowflake stores a name as {name.upper()} unless it was "
+        "created in quotes"
+        for name in dict.fromkeys(lower)
+    ]
+
+
 def describe_profiles(config: WardenConfig) -> list[str]:
     if config.profiles is None:
         return [
@@ -622,15 +661,18 @@ def describe_profiles(config: WardenConfig) -> list[str]:
         )
         lines.append(f"{label}{name}{default}: {where}")
         lines += [f"               {line}" for line in describe_profile_tables(profile)]
+        if config.warehouse.engine == "snowflake":
+            lines += [f"               ! {line}" for line in lower_case_names(profile)]
         if profile.max_rows is not None:
             lines.append(f"               max {profile.max_rows} rows")
         for name, rule in profile.masks.items():
             opened = ", may be filtered and joined on" if rule.allow_in_predicates else ""
             lines.append(f"               masks {name} ({rule.strategy}{opened})")
         if profile.cost is not None:
-            cost = profile_cost(config, profile)
+            unit = BYTES if config.warehouse.engine == "snowflake" else None
+            limit = format_amount(profile_cost(config, profile).max_total_cost, unit)
             lines.append(
-                f"               refused above an estimated {format_cost(cost.max_total_cost)}"
+                f"               refused above an estimated {limit}{' scanned' if unit else ''}"
             )
         if profile.budgets is not None:
             budget = describe_budget(profile_budget(config, profile))

@@ -18,11 +18,17 @@ dependencies = [
 [project.scripts]
 sql-warden = "sql_warden.cli:cli"
 
+[project.optional-dependencies]
+snowflake = [
+    "snowflake-connector-python>=4.8",
+]
+
 [dependency-groups]
 dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "ruff>=0.8",
+    "snowflake-connector-python>=4.8",
     "testcontainers[postgres]>=4.15",
     "types-pyyaml>=6",
 ]
@@ -60,6 +66,6 @@ testpaths = ["tests"]
 addopts = ["--strict-markers", "--import-mode=importlib"]
 markers = [
     "integration: needs Docker (Postgres via Testcontainers)",
-    "snowflake: needs a live Snowflake account (SNOWFLAKE_* env vars)",
+    "snowflake: needs a live Snowflake account (SNOWFLAKE_DSN)",
     "postgres_only: syntax or behaviour only Postgres has; not run under the snowflake dialect",
 ]
