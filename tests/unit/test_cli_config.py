@@ -130,14 +130,16 @@ class TestValidate:
         path = _write(
             isolated_cli / "policy.yaml",
             "version: 1\nshape:\n  max_joins: 2\n  max_subquery_depth: 1\n  limit: require\n"
-            "  allowed_functions: [age, pg_typeof]\n  denied_functions: [md5]\n",
+            "  allowed_functions: [age, pg_typeof]\n  denied_functions: [md5]\n"
+            "  allowed_types: [Order_Status, public.citext]\n",
         )
         outcome = CliRunner().invoke(cli, ["config", "validate", str(path)])
         assert outcome.exit_code == 0, outcome.output
-        assert outcome.output.splitlines()[4:7] == [
+        assert outcome.output.splitlines()[4:8] == [
             "  shape:     up to 2 joins, subqueries up to 1 deep",
             "             LIMIT required, up to the row cap",
             "             2 extra functions allowed, 1 extra denied",
+            "             casts to order_status, public.citext allowed",
         ]
 
     def test_defaults_to_warden_yaml(self, isolated_cli: Path) -> None:

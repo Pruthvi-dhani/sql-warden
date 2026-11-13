@@ -57,6 +57,12 @@ class Pipeline:
             started = time.perf_counter()
             try:
                 refusal = check.run(ctx)
+            except RecursionError:
+                # The parse check turns away what it can see is too deep; this is the rest.
+                refusal = Refusal(
+                    RefusalCode.QUERY_TOO_COMPLEX,
+                    "the query nests too deeply to be checked; simplify it",
+                )
             except Exception as exc:
                 # Fail closed: a check that cannot decide must not wave the query through.
                 refusal = Refusal(

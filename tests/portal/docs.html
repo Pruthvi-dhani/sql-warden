@@ -177,10 +177,12 @@
       <thead><tr><th>Code</th><th>Check</th><th>Refused when</th></tr></thead>
       <tbody>
         <tr data-code="PARSE_ERROR"><td><code>PARSE_ERROR</code></td><td>parse</td><td>The SQL is empty or doesn't parse.</td></tr>
+        <tr data-code="QUERY_TOO_COMPLEX"><td><code>QUERY_TOO_COMPLEX</code></td><td>parse</td><td>Too long (over 20,000 characters) or nested too deeply to be read safely: more than 32 levels of brackets, or more than 4 of type names with brackets, like <code>date(date(…))</code> or <code>array[array[…]]</code>.</td></tr>
         <tr data-code="MULTIPLE_STATEMENTS"><td><code>MULTIPLE_STATEMENTS</code></td><td>shape</td><td>More than one statement.</td></tr>
         <tr data-code="NOT_A_SELECT"><td><code>NOT_A_SELECT</code></td><td>shape</td><td>Anything but a SELECT, UNION or CTE query.</td></tr>
         <tr data-code="NOT_READ_ONLY"><td><code>NOT_READ_ONLY</code></td><td>shape</td><td>A SELECT that writes or locks: a data-modifying CTE, <code>SELECT … INTO</code>, <code>FOR UPDATE</code>/<code>SHARE</code>.</td></tr>
         <tr data-code="FUNCTION_NOT_ALLOWED"><td><code>FUNCTION_NOT_ALLOWED</code></td><td>shape</td><td>A dangerous built-in (<code>pg_sleep</code>, <code>pg_read_file</code>, <code>dblink</code>, <code>query_to_xml</code>, …), a function in <code>shape.denied_functions</code>, or one that isn't standard SQL and isn't in <code>shape.allowed_functions</code>.</td></tr>
+        <tr data-code="TYPE_NOT_ALLOWED"><td><code>TYPE_NOT_ALLOWED</code></td><td>shape</td><td>A cast to a type that looks a name up in the catalog (<code>regclass</code>, <code>regrole</code>, …), or to one that isn't standard SQL and isn't in <code>shape.allowed_types</code>: a table's row type, an enum.</td></tr>
         <tr data-code="TOO_MANY_JOINS"><td><code>TOO_MANY_JOINS</code></td><td>shape</td><td>More joins than <code>shape.max_joins</code>.</td></tr>
         <tr data-code="SUBQUERY_TOO_DEEP"><td><code>SUBQUERY_TOO_DEEP</code></td><td>shape</td><td>Subqueries or CTEs nested deeper than <code>shape.max_subquery_depth</code>.</td></tr>
         <tr data-code="LIMIT_REQUIRED"><td><code>LIMIT_REQUIRED</code></td><td>shape</td><td>No LIMIT, with <code>shape.limit: require</code>. (With <code>inject</code>, the default, one is added.)</td></tr>

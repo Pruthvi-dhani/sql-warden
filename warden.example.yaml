@@ -62,6 +62,11 @@ shape:
   # query_to_xml, ...) are always refused and can't be listed.
   allowed_functions: []
   denied_functions: []         # more names or glob patterns to refuse, e.g. [md5, "regexp_*"]
+  # A cast to a type sqlglot doesn't know as standard SQL is refused unless the type is
+  # listed here as queries write it, e.g. [order_status, public.citext]: every table is also
+  # a type, so such a cast can tell which tables exist and what their columns are called.
+  # Casts that look a name up in the catalog (regclass, regrole, ...) can't be listed.
+  allowed_types: []
 
 # Who a server serves. A server is tied to one profile when it starts: --profile, else
 # SQL_WARDEN_PROFILE, else default_profile. Agents can't change it; the tools take only SQL.

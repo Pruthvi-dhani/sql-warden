@@ -3,7 +3,7 @@
 from sqlglot import exp
 from sqlglot.optimizer.scope import ScopeType, traverse_scope
 
-from sql_warden.config import BUILTIN_DENIED_FUNCTIONS, ShapeConfig
+from sql_warden.config import BUILTIN_DENIED_FUNCTIONS, BUILTIN_DENIED_TYPES, ShapeConfig
 from sql_warden.models import Refusal, RefusalCode
 from sql_warden.pipeline.base import CheckContext
 
@@ -28,6 +28,25 @@ def _statement_name(statement: exp.Expr) -> str | None:
 def _function_name(func: exp.Func) -> str:
     # sqlglot keeps the name only for functions it doesn't know; known ones use its own name.
     return func.name.lower() if isinstance(func, exp.Anonymous) else func.sql_name().lower()
+
+
+def _type_name(data_type: exp.DataType) -> str | None:
+    """The name of a type sqlglot doesn't know as standard SQL, lower case and without
+    quotes, or None for one it does. It keeps the ones that name catalog objects (regclass)
+    as bare strings, and files the rest under USERDEFINED."""
+    kind = data_type.this
+    if isinstance(kind, str):
+        return kind.lower()
+    if kind == exp.DataType.Type.USERDEFINED:
+        return ".".join(_dotted(data_type.args.get("kind"))).lower()
+    return None
+
+
+def _dotted(name: object) -> list[str]:
+    """The parts of a name written with dots: schema.type."""
+    if isinstance(name, exp.Dot):
+        return [*_dotted(name.this), *_dotted(name.expression)]
+    return [getattr(name, "name", str(name))]
 
 
 def subquery_depth(query: exp.Query) -> int:
@@ -73,6 +92,7 @@ class ShapeCheck:
             self._read_only(statement, ctx.dialect)
             or self._named_outright(statement, ctx.dialect)
             or self._functions(statement, ctx.dialect)
+            or self._types(statement)
             or self._joins(statement)
             or self._nesting(statement)
             or self._limit(statement, ctx)
@@ -167,6 +187,28 @@ class ShapeCheck:
                     RefusalCode.FUNCTION_NOT_ALLOWED,
                     f"{name}() is not a standard SQL function sql-warden knows; "
                     "it must be listed in shape.allowed_functions",
+                )
+        return None
+
+    def _types(self, query: exp.Query) -> Refusal | None:
+        """A cast can ask the catalog a question the access check never sees: every table
+        is also a type, so `null::salaries` works only if there is a table salaries, and
+        `(null::salaries).*` names its columns."""
+        for data_type in query.find_all(exp.DataType):
+            name = _type_name(data_type)
+            if name is None:
+                continue
+            if name.rpartition(".")[2] in BUILTIN_DENIED_TYPES:
+                return Refusal(
+                    RefusalCode.TYPE_NOT_ALLOWED,
+                    f"a cast to {name} is never allowed: it looks a name up in the "
+                    "database's catalog, where the checks can't follow",
+                )
+            if name not in self.rules.allowed_types:
+                return Refusal(
+                    RefusalCode.TYPE_NOT_ALLOWED,
+                    f"{name} is not a standard SQL type sql-warden knows; a cast to it "
+                    "must be listed in shape.allowed_types",
                 )
         return None
 

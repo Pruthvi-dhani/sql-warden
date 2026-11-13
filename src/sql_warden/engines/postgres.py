@@ -308,8 +308,12 @@ class PostgresEngine:
         with conn:
             conn.read_only = True
             try:
+                # standard_conforming_strings is how the checks read a string: a backslash
+                # in '...' is just a backslash. A server set otherwise would end the string
+                # somewhere else than they did.
                 conn.execute(
-                    "SELECT set_config('statement_timeout', %s, true)",
+                    "SELECT set_config('statement_timeout', %s, true), "
+                    "set_config('standard_conforming_strings', 'on', true)",
                     (str(self.statement_timeout_ms),),
                 )
                 yield conn

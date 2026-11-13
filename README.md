@@ -127,7 +127,9 @@ if ! uv run sql-warden check "$SQL" --json > decision.json; then jq -r .reason d
 
 Every `check` and `query`, from the CLI or an agent, is recorded in the audit database before
 anything comes back: allowed, refused, failed or timed out, with the SQL as sent and as run,
-the profile, the client, the full trace, and how many rows came back. The result's `audit_id`
+the profile, the client, the full trace, and how many rows came back. (Two things are not
+kept exactly as sent: a query too long to be read is recorded as its first 2,000 characters
+and its length, and characters Postgres can't store as text are written as escapes.) The result's `audit_id`
 (in `--json` and the MCP results) is the record's id.
 
 It fails closed. sql-warden won't start without its audit database. If the audit database
@@ -187,7 +189,12 @@ Sessions are what [budgets](#session-budgets) count against.
 
 #### The checks so far
 
-- **parse**: the SQL must parse (`PARSE_ERROR` otherwise, with line and column).
+- **parse**: the SQL must parse (`PARSE_ERROR` otherwise, with line and column). Before
+  that it must be safe to read at all. The parser goes back and tries again when it guessed
+  wrong, and a query built for that (`date(date(date(...` thirty levels deep) would keep it
+  busy for hours, so a query over 20,000 characters, with brackets nested more than 32 deep,
+  or with more than 4 nested type names followed by a bracket (`date(`, `array[`) is turned
+  away unread, as `QUERY_TOO_COMPLEX`.
 - **shape**: one read-only `SELECT` within the structural rules in `warden.yaml`:
 
   | Try                                                           | Refused with           |
@@ -198,12 +205,20 @@ Sessions are what [budgets](#session-budgets) count against.
   | `select * into copy from customers`, `... for update`         | `NOT_READ_ONLY`        |
   | `select pg_sleep(60)`, `pg_read_file(...)`, `dblink(...)`     | `FUNCTION_NOT_ALLOWED` |
   | `select age(created_at) from customers` (unknown function)    | `FUNCTION_NOT_ALLOWED` |
+  | `select 'secrets'::regclass`, `select (null::secrets).*`      | `TYPE_NOT_ALLOWED`     |
   | more than `max_joins` joins, or `max_subquery_depth` nesting  | `TOO_MANY_JOINS`, `SUBQUERY_TOO_DEEP` |
   | `select 1 limit all`                                          | `INVALID_LIMIT`        |
 
   Functions sqlglot doesn't recognise as standard SQL are refused unless they are listed in
   `shape.allowed_functions`. Built-in dangerous ones (`pg_sleep*`, `pg_read_file`, `lo_*`,
   `dblink*`, `set_config`, `query_to_xml`, ...) are refused even if listed.
+
+  Casts work the same way. In Postgres every table is also a type, and some types look a
+  name up in the catalog, so `'secrets'::regclass` or `(null::secrets).*` would tell which
+  tables exist and what their columns are called, whatever the profile may read. A cast to a
+  type that isn't standard SQL is refused unless the type is listed in `shape.allowed_types`
+  (an enum, a domain, an extension's type); `regclass`, `regrole` and the rest of that
+  family are refused even if listed.
 
   The checks read a query in its warehouse's dialect, Postgres or Snowflake, and each has its
   own list of those functions (Snowflake's: `system$*`, `result_scan`, `get_ddl`,
@@ -411,7 +426,7 @@ Which config is used, highest priority first:
 Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
 enforces it. Today that is `warehouse` (connection, timeout, row cap), `audit` (the audit
-database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists), `cost`
+database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists, allowed types), `cost`
 (`max_total_cost`), `budgets` (what one session may use), `masking` (the hmac key) and
 `profiles`;
 [warden.example.yaml](warden.example.yaml) documents every key.
@@ -467,6 +482,7 @@ by itself, so one wrong check is not enough to change or leak data:
 | the access check lets a table pass | a profile with its own `dsn` connects as a role that can't read it                                                |
 | the LIMIT it adds is lost          | the engine stops fetching at the row cap                                                                          |
 | the cost estimate is far too low   | the statement timeout cancels the query                                                                           |
+| a string is read where it doesn't end | the query sent is written out again from what was read, and Postgres is set to read strings the standard way  |
 
 The first of these depends on the role, so a server looks before it serves. It asks the
 warehouse what its role can do, and doesn't start as one that can write:

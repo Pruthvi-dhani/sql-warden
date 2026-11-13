@@ -673,6 +673,8 @@ def validate(state: CliState, path: Path | None, live: bool) -> None:
             f"             {len(shape.allowed_functions)} extra functions allowed, "
             f"{len(shape.denied_functions)} extra denied"
         )
+    if shape.allowed_types:
+        click.echo(f"             casts to {', '.join(shape.allowed_types)} allowed")
     unit = BYTES if warehouse.engine == "snowflake" else None
     scanned = " scanned" if unit else ""
     limit = format_amount(loaded.cost.max_total_cost, unit)

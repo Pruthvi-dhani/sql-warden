@@ -100,6 +100,21 @@ BUILTIN_DENIED_FUNCTIONS = {
 }
 """Per SQL dialect: the checks read a query as its warehouse will."""
 DIALECTS = tuple(BUILTIN_DENIED_FUNCTIONS)
+BUILTIN_DENIED_TYPES = (
+    "regclass",
+    "regcollation",
+    "regconfig",
+    "regdictionary",
+    "regnamespace",
+    "regoper",
+    "regoperator",
+    "regproc",
+    "regprocedure",
+    "regrole",
+    "regtype",
+)
+"""Postgres types a cast to which looks a name up in the catalog: `'t'::regclass` succeeds
+only if there is a table t, whoever may read it. Never allowed, whatever the config says."""
 
 # ${VAR} or ${VAR:-default}, in any string value.
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -168,11 +183,26 @@ class ShapeConfig(_Section):
     """Functions sqlglot does not know as standard SQL, allowed anyway."""
     denied_functions: tuple[str, ...] = ()
     """Glob patterns refused on top of BUILTIN_DENIED_FUNCTIONS."""
+    allowed_types: tuple[str, ...] = ()
+    """Types sqlglot does not know as standard SQL, which a query may cast to anyway: an
+    enum, a domain, an extension's type, written as queries write them."""
 
-    @field_validator("allowed_functions", "denied_functions")
+    @field_validator("allowed_functions", "denied_functions", "allowed_types")
     @classmethod
     def _lowercase(cls, names: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(name.lower() for name in names)
+
+    @field_validator("allowed_types")
+    @classmethod
+    def _no_type_is_always_denied(cls, names: tuple[str, ...]) -> tuple[str, ...]:
+        for name in names:
+            if name.rpartition(".")[2] in BUILTIN_DENIED_TYPES:
+                raise PydanticCustomError(
+                    "type_denied",
+                    "allowed_types lists {name}, but a cast to it is never allowed",
+                    {"name": name},
+                )
+        return names
 
     @model_validator(mode="after")
     def _nothing_allowed_is_denied(self) -> Self:

@@ -749,7 +749,7 @@ account.
     documented example, and the three session parameters are from Snowflake's documentation.
 
 ## Phase 8 — Hardening & CI
-**8.1 Startup safety checks** ✅ done
+**8.1 Startup safety checks** ✅ done (`75705fa`)
 - On startup the server refuses to run if the configured DB role can write (Postgres: checks
   `has_table_privilege` for INSERT/UPDATE/DELETE), checking every profile's DSN. It also warns
   when a profile's role can read tables the profile doesn't allow, i.e. when the database isn't
@@ -793,10 +793,57 @@ account.
   looks again), `SECURITY DEFINER` functions, and Snowflake databases other than the
   connection's.
 
-**8.2 Adversarial corpus**
+**8.2 Adversarial corpus** ✅ done
 - `tests/unit/test_adversarial.py` covers comment and Unicode tricks, nested forbidden
   functions, `COPY`, `DO $$`, `EXPLAIN ANALYZE` smuggling, stacked statements, `set_config` in a
   subquery, and casting tricks.
+- As built: the corpus was written by attacking the checks first, with about 400 hostile
+  queries over both dialects, and every function Postgres ships (2,729, of which sqlglot
+  knows 175 by name: none of those is dangerous). It is 406 unit tests, each query pinned
+  to the refusal it must get, checked both as a dry run and as a real one, with the engine
+  asserted untouched: a refused query never reaches the database, not even its planner. The
+  few that are allowed are pinned to the SQL they are rewritten to. Most of it held as it
+  was; four things did not, and are fixed in this point:
+  - **A cast could ask the catalog.** In Postgres every table is a type and `reg*` types
+    look names up, so `'salaries'::regclass` and `(null::salaries).*` told which tables
+    exist and what their columns are called, to a profile that may read neither. New
+    refusal `TYPE_NOT_ALLOWED` (shape check): the `reg*` family is always refused, and a
+    cast to any type sqlglot doesn't know as standard SQL needs `shape.allowed_types`, as
+    unknown functions need `allowed_functions`. That includes built-in ones it doesn't
+    know (`oid`, `tsvector`, `cidr`): they are listed where they are wanted.
+  - **The parser could be made to work for hours.** sqlglot reads what follows a type's
+    name twice (as a type, then as an expression), so `date(date(...` or `array[array[...`
+    doubles its work per level; 30 levels in a 200-character query never returns. True of
+    every type keyword in both dialects. The parse check now tokenizes first (linear) and
+    refuses with the new `QUERY_TOO_COMPLEX` before parsing: over 20,000 characters, over
+    32 levels of brackets, or over 4 nested brackets that follow a type's name. Stack
+    overflows in the parser or in writing the query back out get the same code instead of
+    `INTERNAL_ERROR`. At the limits the worst query takes about a second.
+  - **Unterminated strings and comments** were `INTERNAL_ERROR` (sqlglot's `TokenError`
+    wasn't caught); they are `PARSE_ERROR` with a reason.
+  - **Text Postgres can't store** (a NUL, half a surrogate pair) made the audit write fail,
+    so the request came back `AUDIT_UNAVAILABLE` and unrecorded. It is `PARSE_ERROR` now,
+    and the audit log keeps the SQL with those written as escapes. A query too long to be
+    read is recorded as its first 2,000 characters and its length. These are the two
+    exceptions to "the SQL as sent".
+- As built, one assumption made explicit: the checks read `'a\'` as Postgres does by
+  default (a backslash is a backslash). A server or role set to the old way would end the
+  string elsewhere, so the engine sets `standard_conforming_strings = on` for every
+  transaction, in the statement that already sets the timeout.
+- As built, a guard against the next one: a test nests every keyword of each dialect 14
+  deep with `(` and `[` and fails if reading any query takes more than 250,000 Python
+  calls without being turned away. It counts calls rather than seconds, so it is the same
+  on a slow machine, and it fails within a second when the type-nesting limit is switched
+  off. A sqlglot upgrade that adds another such keyword shows up there.
+- Tests: 72 more on Postgres as the superuser (`test_adversarial_on_postgres.py`): 21 writes
+  handed straight to the engine, to run and to plan, with the warehouse compared before and
+  after; the rewritten queries returning the string that was sent; a role set to the old
+  string syntax; placeholders (`$1`, `:x`, `%s`) ending as `PLAN_FAILED`; and that Postgres
+  really does answer the cast questions the checks now refuse.
+- Left as it is, on purpose: `version()`, `current_user` and `current_database()` are
+  allowed (what they tell is little, and queries use them); a user-defined operator can
+  still be called with `OPERATOR(schema.op)`, which needs someone to have created a
+  harmful one; the limits on length and nesting are constants, not settings.
 
 **8.3 CI** ✅ done early
 - A GitHub Actions workflow runs ruff, mypy, the unit tests and the integration tests (Docker

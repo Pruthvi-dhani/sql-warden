@@ -43,6 +43,7 @@ from sql_warden.pipeline import (
 from sql_warden.pipeline.access import DEFAULT_SCHEMAS
 from sql_warden.pipeline.lineage import Lineage, MaskedColumn
 from sql_warden.pipeline.masking import Mask, Null, Redact, build_mask
+from sql_warden.pipeline.parse import MAX_LENGTH
 from sql_warden.profiles import Access
 from sql_warden.sessions import (
     BudgetStatus,
@@ -407,7 +408,7 @@ class Warden:
         return AuditEvent(
             id=request,
             profile=self.profile,
-            sql=sql,
+            sql=_as_recorded(sql),
             decision="refused" if refusal else "failed" if error else "allowed",
             duration_ms=(time.perf_counter() - started) * 1000,
             dry_run=dry_run,
@@ -461,6 +462,21 @@ class Warden:
         if self.access is None:
             return EVERYTHING
         return self.access.columns(table.schema, table.name)
+
+
+RECORDED_OF_TOO_LONG = 2_000
+"""How much of a query too long to be read the audit log keeps."""
+
+
+def _as_recorded(sql: str) -> str:
+    """The SQL as the audit log keeps it: as sent, with two exceptions. A query too long to
+    be read is cut to its start and its length, since the log is not somewhere to pour
+    megabytes. And what Postgres can't store as text is written out as an escape, so that
+    such a request is recorded like any other instead of failing its record."""
+    if len(sql) > MAX_LENGTH:
+        kept = RECORDED_OF_TOO_LONG
+        sql = f"{sql[:kept]}... ({len(sql):,} characters; the first {kept:,} are recorded)"
+    return sql.replace("\x00", "\\x00").encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def _tag(request: uuid.UUID) -> str:

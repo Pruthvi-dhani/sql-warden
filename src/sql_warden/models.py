@@ -10,11 +10,17 @@ from sql_warden.sessions import BudgetStatus
 
 class RefusalCode(StrEnum):
     PARSE_ERROR = "PARSE_ERROR"
+    QUERY_TOO_COMPLEX = "QUERY_TOO_COMPLEX"
+    """Too long, or nested too deeply, to be read safely: reading it could take the checks
+    longer than any query is worth."""
     MULTIPLE_STATEMENTS = "MULTIPLE_STATEMENTS"
     NOT_A_SELECT = "NOT_A_SELECT"
     NOT_READ_ONLY = "NOT_READ_ONLY"
     """A SELECT that writes or locks: a data-modifying CTE, SELECT INTO, FOR UPDATE."""
     FUNCTION_NOT_ALLOWED = "FUNCTION_NOT_ALLOWED"
+    TYPE_NOT_ALLOWED = "TYPE_NOT_ALLOWED"
+    """A cast to a type that isn't standard SQL: a table's row type, or one that looks a
+    name up in the database's catalog. Either tells what the profile can't see is there."""
     TOO_MANY_JOINS = "TOO_MANY_JOINS"
     SUBQUERY_TOO_DEEP = "SUBQUERY_TOO_DEEP"
     LIMIT_REQUIRED = "LIMIT_REQUIRED"
