@@ -78,24 +78,25 @@ async def test_database_errors_reach_the_agent(warehouse: Warehouse) -> None:
     assert _structured(ran)["error"] == "division by zero"
 
 
-async def test_the_cli_serves_over_stdio(audit_dsn: str) -> None:
-    # No warehouse: listing tools works; a query can't have its cost estimated, so the dry run
-    # and the real one are both refused, and both are recorded, under the name the client gave.
+async def test_the_cli_serves_over_stdio(warehouse: Warehouse, audit_dsn: str) -> None:
+    # The real server, started as an agent's client starts it: it looks at its role, serves,
+    # and records what it refuses under the name the client gave.
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "sql_warden", "serve", "--dsn", "postgresql://nobody:x@127.0.0.1:1/none"],
+        args=["-m", "sql_warden", "serve", "--dsn", warehouse.reader_dsn],
         env={"SQL_WARDEN_AUDIT_DSN": audit_dsn},
     )
     async with Client(params) as client:
         names = {tool.name for tool in (await client.list_tools()).tools}
-        checked = await client.call_tool("check_query", {"sql": "select 1"})
-        ran = await client.call_tool("run_query", {"sql": "select 1"})
+        counted = await client.call_tool("run_query", {"sql": "select count(*) from products"})
+        checked = await client.call_tool("check_query", {"sql": "select pg_sleep(1)"})
+        ran = await client.call_tool("run_query", {"sql": "select pg_sleep(1)"})
     assert names == TOOLS
+    assert counted.is_error is False
     # A refused dry run is check_query's answer, not an error; a refused run_query is.
     assert (checked.is_error, ran.is_error) == (False, True)
     for result in (checked, ran):
-        assert _structured(result)["code"] == "COST_UNAVAILABLE"
-        assert "could not connect to the database" in _structured(result)["reason"]
+        assert _structured(result)["code"] == "FUNCTION_NOT_ALLOWED"
     with psycopg.connect(audit_dsn) as conn:
         recorded = conn.execute(
             "SELECT dry_run, decision, client FROM audit_events WHERE id = ANY(%s) ORDER BY ts",

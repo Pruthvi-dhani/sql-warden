@@ -49,15 +49,16 @@ src/sql_warden/
   catalog.py         # Catalog: the role's tables and columns, cached, as a sqlglot schema
   profiles.py        # select_profile: the profile a server serves, and where it connects
   engines/
-    base.py          # Engine protocol (max_rows, execute(sql) -> Result, tables()), engine errors
+    base.py          # Engine protocol (max_rows, execute(sql) -> Result, tables(), role()), engine errors
     postgres.py      # read-only transaction, statement timeout, row cap via server-side cursor
     snowflake.py     # SnowflakeDsn, SnowflakeEngine: one session, EXPLAIN USING JSON as bytes
   warden.py          # Warden facade: parse -> checks -> regenerate SQL -> execute
   audit/             # schema.sql, sink.py: AuditEvent, AuditSink, Memory/PostgresAuditSink
   sessions.py        # Usage, SessionStore, MemorySessionStore: what each session has used
+  startup.py         # check_role: what a server finds out about its database role before it serves
   server.py          # MCP tools (run_query, check_query, list_tables); stdio + loopback HTTP
   render.py          # CLI text output
-  cli.py             # click: query / check / serve / config validate
+  cli.py             # click: query / check / serve / config validate [--live]
 dev/  docker-compose.yml (project sql-warden-demo), warehouse_seed.sql
 warden.example.yaml
 tests/unit/  tests/integration/ (marker: integration)
@@ -693,7 +694,7 @@ account.
 - Left for 7.2: nothing here has met a real Snowflake. The checks only read the SQL; whether
   what they regenerate runs as written is for the engine's tests.
 
-**7.2 `SnowflakeEngine`** (optional `[snowflake]` extra) ✅ done
+**7.2 `SnowflakeEngine`** (optional `[snowflake]` extra) ✅ done (`3fb4e39`)
 - Execution uses a read-only role, `STATEMENT_TIMEOUT_IN_SECONDS`, and a `QUERY_TAG` set to the
   audit id. `explain()` runs `EXPLAIN USING JSON` and turns
   `bytesAssigned`/`partitionsAssigned` into a CostEstimate. The catalog comes from
@@ -748,12 +749,49 @@ account.
     documented example, and the three session parameters are from Snowflake's documentation.
 
 ## Phase 8 — Hardening & CI
-**8.1 Startup safety checks**
+**8.1 Startup safety checks** ✅ done
 - On startup the server refuses to run if the configured DB role can write (Postgres: checks
   `has_table_privilege` for INSERT/UPDATE/DELETE), checking every profile's DSN. It also warns
   when a profile's role can read tables the profile doesn't allow, i.e. when the database isn't
   backing up the access check. The README gets a "defence in depth" section.
 - Tests: integration with the superuser (refused) and with `warden_reader` (starts).
+- As built: `Engine.role()` returns a `RoleReport(role, writes)`, where `writes` lists every
+  way the role can change the database, in words. `startup.check_role(engine, access)` adds
+  what the role can read beyond its profile (`beyond_profile`, from the catalog the role
+  sees). `serve` and the test portal call it through `build_warden(..., serving=True)`, after
+  the audit database is open and before anything is served.
+- As built, who is checked where: a server serves one profile, so it checks that profile's
+  role, not the others': one profile's broken role shouldn't keep another's server down.
+  "Every profile's DSN" is `sql-warden config validate --live`, which checks them all and
+  exits 1 if a server would not start for one. 9.5 adds catalog drift to the same flag.
+  `query`, `check` and `tables` are not held to it: whoever runs them holds the connection
+  string, so the server is the boundary.
+- As built, a role that can't be looked at is not served: `serve` no longer starts while the
+  warehouse is unreachable (it did before, and refused each query with `COST_UNAVAILABLE`).
+- As built, what counts as writing in Postgres, wider than the three privileges planned: a
+  superuser; `INSERT`/`UPDATE` (a grant on one column is enough), `DELETE` or `TRUNCATE` on a
+  table, view, materialized view or foreign table in a schema the role can use; `UPDATE` on a
+  sequence; `CREATE` on a schema or on the database; membership of `pg_write_server_files` or
+  `pg_execute_server_program`. All of it is asked for every role the connecting one is a
+  member of, inherited or not, since `SET ROLE` would give it theirs. A long list is cut to
+  five lines and a count.
+- As built, Snowflake: `role()` reads `CURRENT_ROLE()`, `INFORMATION_SCHEMA.ENABLED_ROLES`
+  (the role, those granted to it, `PUBLIC`) and `INFORMATION_SCHEMA.OBJECT_PRIVILEGES` for
+  `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `OWNERSHIP` and any `CREATE` those roles hold in
+  the connection's database, and refuses the account's administrator roles by name. Each new
+  session now starts with `USE SECONDARY ROLES NONE`, so a user's default secondary roles
+  can't lend the session privileges the check doesn't see. The views' columns are from
+  Snowflake's documentation; like the rest of the engine this has not met a real account,
+  and one live test (9 now) runs it. fakesnow has neither the statement nor the views, so
+  its fixture skips the session setup.
+- Tests: 34 unit (`test_startup.py`: what is beyond a profile, Postgres's rows turned into
+  findings, `serve` and `config validate --live` through the CLI), 12 more for the Snowflake
+  stand-in (session setup, `role()`), and 14 on Postgres (`test_startup_on_postgres.py`)
+  with real roles: the superuser, both readers, a role with each kind of grant, one that
+  could only write after `SET ROLE`, and one whose grant sits in a schema it can't use.
+- Not covered, and in the README: grants made after the server started (9.4's `/readyz`
+  looks again), `SECURITY DEFINER` functions, and Snowflake databases other than the
+  connection's.
 
 **8.2 Adversarial corpus**
 - `tests/unit/test_adversarial.py` covers comment and Unicode tricks, nested forbidden

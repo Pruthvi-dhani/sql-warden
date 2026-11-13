@@ -47,6 +47,20 @@ class CostEstimate:
     """The plan, as the database gave it."""
 
 
+@dataclass(frozen=True)
+class RoleReport:
+    """What the role an engine connects as could do to the database, beyond reading it."""
+
+    role: str
+    writes: tuple[str, ...] = ()
+    """Every way the role can change the database, each in words that follow "it": "is a
+    superuser", "can INSERT, UPDATE on public.orders". Empty for a role that can only read."""
+
+    @property
+    def read_only(self) -> bool:
+        return not self.writes
+
+
 class EngineError(Exception):
     """A query could not be run. The message is safe to show to the caller."""
 
@@ -84,4 +98,9 @@ class Engine(Protocol):
 
     def explain(self, sql: str, *, tag: str | None = None) -> CostEstimate:
         """The planner's estimate for one read-only query, without running it."""
+        ...
+
+    def role(self) -> RoleReport:
+        """The role the engine connects as, and every way it could change the database. A
+        server asks before it serves anything: it only connects as a role that can't."""
         ...

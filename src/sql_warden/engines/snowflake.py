@@ -28,6 +28,7 @@ from sql_warden.engines.base import (
     QueryFailed,
     QueryTimeout,
     Result,
+    RoleReport,
     Table,
 )
 
@@ -46,6 +47,22 @@ _TABLES_SQL = """
 """
 # Compiles the statement without running it, and needs no running warehouse.
 _EXPLAIN = "EXPLAIN USING JSON "
+# A user's secondary roles lend a session their privileges on top of its own role's, and a
+# user may have them on by default. Off, the session can do only what its role can.
+_PRIMARY_ROLE_ONLY = "USE SECONDARY ROLES NONE"
+_ROLE_SQL = "SELECT CURRENT_ROLE()"
+# The session's role, the roles granted to it (and to those), and PUBLIC.
+_ENABLED_ROLES_SQL = "SELECT role_name FROM information_schema.enabled_roles ORDER BY role_name"
+# What those roles hold, in the connection's database, that changes it.
+_WRITES_SQL = """
+    SELECT grantee, object_type, object_schema, object_name, privilege_type
+    FROM information_schema.object_privileges
+    WHERE grantee IN (SELECT role_name FROM information_schema.enabled_roles)
+      AND (privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'OWNERSHIP')
+           OR privilege_type LIKE 'CREATE%')
+    ORDER BY object_type, object_schema, object_name, grantee, privilege_type
+"""
+_ADMIN_ROLES = ("ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "ORGADMIN")
 _CANCELLED = "57014"
 """The SQLSTATE of a statement Snowflake cancelled: its timeout, most often."""
 
@@ -217,6 +234,32 @@ def _connector() -> ModuleType:
     return module
 
 
+def role_writes(
+    current: str,
+    enabled: Sequence[str],
+    grants: Sequence[tuple[str, str, str | None, str, str]] = (),
+) -> tuple[str, ...]:
+    """Every way a role can change the database, for RoleReport.writes.
+
+    enabled is the roles the session acts with; grants is _WRITES_SQL's rows: (role, kind of
+    object, its schema, its name, privilege)."""
+    writes = [
+        f"holds {name}, which administers the account" for name in _ADMIN_ROLES if name in enabled
+    ]
+    held: dict[tuple[str, str, str], list[str]] = {}
+    for grantee, kind, schema, name, privilege in grants:
+        target = f"{kind.lower()} {'.'.join(part for part in (schema, name) if part)}"
+        through = "" if grantee == current else f", through role {grantee}"
+        privileges = held.setdefault((target, through, grantee), [])
+        if privilege not in privileges:
+            privileges.append(privilege)
+    writes += [
+        f"has {', '.join(privileges)} on {target}{through}"
+        for (target, through, _), privileges in held.items()
+    ]
+    return tuple(writes)
+
+
 def _message(exc: BaseException) -> str:
     """Snowflake's own words for an error, without the ids the connector adds."""
     raw = getattr(exc, "raw_msg", None)
@@ -313,6 +356,26 @@ class SnowflakeEngine:
             columns.setdefault((schema, table), []).append(Column(column, data_type))
         return tuple(Table(schema, name, tuple(cols)) for (schema, name), cols in columns.items())
 
+    def role(self) -> RoleReport:
+        def run(conn: _Connection) -> tuple[Any, Sequence[Sequence[Any]], Sequence[Sequence[Any]]]:
+            with closing(conn.cursor()) as cur:
+                cur.execute(_ROLE_SQL)
+                current = cur.fetchone()
+                cur.execute(_ENABLED_ROLES_SQL)
+                enabled = cur.fetchall()
+                cur.execute(_WRITES_SQL)
+                return current, enabled, cur.fetchall()
+
+        current, enabled, grants = self._attempt(run)
+        if not current or not current[0]:
+            raise EngineError("Snowflake did not say which role the session has")
+        name = str(current[0])
+        rows = [
+            (str(g), str(k), None if s is None else str(s), str(n), str(p))
+            for g, k, s, n, p in grants
+        ]
+        return RoleReport(name, role_writes(name, [str(row[0]) for row in enabled], rows))
+
     def close(self) -> None:
         with self._lock:
             self._drop()
@@ -353,7 +416,7 @@ class SnowflakeEngine:
     def _open(self) -> _Connection:
         connect = self._connect or _connector().connect
         try:
-            return connect(
+            conn = connect(
                 **self._target.connect_args(),
                 application="sql-warden",
                 login_timeout=self._connect_timeout_s,
@@ -368,8 +431,25 @@ class SnowflakeEngine:
         except Exception as exc:
             # The connector's own errors say why; anything else is named, not quoted, since
             # it was raised with the connection's settings in hand.
-            reason = _message(exc) if self._is_connector_error(exc) else type(exc).__name__
-            raise EngineUnavailable(f"could not connect to Snowflake: {reason}") from exc
+            raise EngineUnavailable(f"could not connect to Snowflake: {self._reason(exc)}") from exc
+        try:
+            self._prepare(conn)
+        except Exception as exc:
+            with suppress(Exception):
+                conn.close()
+            # Not used half set up: it could hold more than its role.
+            raise EngineUnavailable(
+                f"could not set up the Snowflake session: {self._reason(exc)}"
+            ) from exc
+        return conn
+
+    def _prepare(self, conn: _Connection) -> None:
+        """What a new session needs before its first query."""
+        with closing(conn.cursor()) as cur:
+            cur.execute(_PRIMARY_ROLE_ONLY)
+
+    def _reason(self, exc: BaseException) -> str:
+        return _message(exc) if self._is_connector_error(exc) else type(exc).__name__
 
     def _drop(self) -> None:
         conn, self._conn = self._conn, None

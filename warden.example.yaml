@@ -66,7 +66,9 @@ shape:
 # Who a server serves. A server is tied to one profile when it starts: --profile, else
 # SQL_WARDEN_PROFILE, else default_profile. Agents can't change it; the tools take only SQL.
 # A profile's own dsn, usually a role that can read less, is used even when --dsn or
-# SQL_WARDEN_DSN is set; profiles without one connect with warehouse.dsn. Leave the section
+# SQL_WARDEN_DSN is set; profiles without one connect with warehouse.dsn. A server doesn't
+# start as a role that can write, and warns when its role can read more than its profile
+# allows (as `support` below does); `sql-warden config validate --live` checks them all. Leave the section
 # out and there is one implicit profile, `all`, that can read everything warehouse.dsn can.
 #
 # tables is what a profile may query: "*" for every table its role can read, or

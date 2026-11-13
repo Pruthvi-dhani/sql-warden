@@ -28,8 +28,9 @@ Agents connect over MCP. Humans can use the `sql-warden` CLI, or the browser
 > `sql-warden audit`; the database planner's cost estimate gates every query before it runs;
 > and sensitive columns come back masked per profile. Every request belongs to a session,
 > and a session can have a budget: queries, total cost, rows and refusals. A session's usage
-> is read back from the audit log, so its budget outlives the server that counted it. The
-> warehouse can be Postgres or [Snowflake](#snowflake); the Snowflake engine is tested on an
+> is read back from the audit log, so its budget outlives the server that counted it. A
+> server looks at its database role before it starts, and
+> [doesn't serve as one that can write](#defence-in-depth). The warehouse can be Postgres or [Snowflake](#snowflake); the Snowflake engine is tested on an
 > emulator and has not yet run against a real account. See the [plan](docs/plan.md) for the
 > roadmap.
 
@@ -313,6 +314,10 @@ An allowed query comes back with `sql` (what ran), `rewrites`, the `trace` and a
 ISO 8601. `run_query` flags refusals and database errors as tool errors; `check_query` treats a
 refusal as an answer.
 
+Before it serves anything, `serve` asks the warehouse what its role can do, and doesn't start
+as one that can write, or while the warehouse can't be asked: see
+[Defence in depth](#defence-in-depth).
+
 The HTTP transport has no authentication yet, so it only listens on loopback (`127.0.0.1`,
 `::1`, `localhost`) and rejects requests whose `Host` or `Origin` isn't local, which stops web
 pages from reaching it through your browser.
@@ -392,6 +397,7 @@ sql-warden reads its policy from `warden.yaml`. Start from the example:
 ```bash
 cp warden.example.yaml warden.yaml
 uv run sql-warden config validate          # checks the file without connecting
+uv run sql-warden config validate --live   # then connects as each profile's role and checks it
 ```
 
 Which config is used, highest priority first:
@@ -449,6 +455,82 @@ unknown name is an error, never a fallback. A profile's own `dsn` wins over `--d
 `--max-rows` in the same way. Its `cost` limits replace the top-level ones it names, and the
 rest come from the `cost` section. Every decision names its profile: the CLI prints it, and
 `--json` and the MCP results carry `profile`.
+
+### Defence in depth
+
+The checks decide what an agent may run. Under each of them the database holds the same line
+by itself, so one wrong check is not enough to change or leak data:
+
+| If this were wrong                 | this still holds                                                                                                  |
+|------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| the shape check lets a write pass  | the role has no privilege to write; Postgres also runs every query in a `READ ONLY` transaction, through a cursor |
+| the access check lets a table pass | a profile with its own `dsn` connects as a role that can't read it                                                |
+| the LIMIT it adds is lost          | the engine stops fetching at the row cap                                                                          |
+| the cost estimate is far too low   | the statement timeout cancels the query                                                                           |
+
+The first of these depends on the role, so a server looks before it serves. It asks the
+warehouse what its role can do, and doesn't start as one that can write:
+
+```console
+$ sql-warden serve --dsn postgresql://app:...@db.internal/warehouse
+Error: profile all: role app can change the warehouse (db.internal/warehouse as app):
+  it can INSERT, UPDATE, DELETE on public.orders
+  it can create tables in schema public
+sql-warden only serves as a role that can read and nothing more: then the database refuses a write even if every check here is wrong.
+```
+
+In Postgres, a role can write if it is a superuser, can `INSERT`, `UPDATE`, `DELETE` or
+`TRUNCATE` on any table or view (one column is enough), can reset a sequence, can create
+tables in a schema or schemas in the database, or can write files or run programs on the
+server (`pg_write_server_files`, `pg_execute_server_program`). The roles it is a member of
+count too, including ones it doesn't inherit from: `SET ROLE` would give it theirs. On
+Postgres 14 and older every role can create tables in `public` until you
+`REVOKE CREATE ON SCHEMA public FROM PUBLIC`. A role that passes:
+
+```sql
+CREATE ROLE warden_reader LOGIN PASSWORD '...';
+GRANT USAGE ON SCHEMA public TO warden_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO warden_reader;
+```
+
+A server also doesn't start while the warehouse can't be reached: a role nobody could look
+at is not one to serve as.
+
+It warns, on stderr, when the role can read more than its profile allows. Then the database
+is not backing the access check up, and only that check keeps the profile from the rest:
+
+```console
+$ sql-warden serve --profile support
+warning: profile support allows less than its role can read. warden_reader can also read:
+  table public.employee_salaries
+Only the access check keeps the profile from these. Give the profile a dsn of its own, for a role granted just what the profile allows.
+```
+
+`sql-warden config validate --live` does the same for every profile at once, and exits 1 if a
+server would not start for one of them, so a deploy can check the policy against the real
+roles first:
+
+```console
+$ sql-warden config validate --live
+  ...
+  live:      public: role warden_public can only read
+             support: role warden_reader can only read
+               ! but more than the profile allows:
+                 table public.employee_salaries
+             admin: role warden_reader can only read
+```
+
+What it does not cover:
+
+- **Later grants.** The role is looked at when the server starts, not again while it runs.
+- **`query`, `check` and `tables` run by hand.** Whoever runs them holds the connection
+  string and could use it without sql-warden; the server is the boundary, so the server is
+  what is held to this.
+- **Functions that write for their caller.** A `SECURITY DEFINER` function runs with its
+  owner's privileges. The shape check refuses functions it doesn't know, and the read-only
+  transaction stops a write inside one.
+- **Snowflake outside the connection's database.** [Snowflake](#snowflake) says how the role
+  is read there.
 
 ### Session budgets
 
@@ -580,7 +662,12 @@ What is different from Postgres:
   statement timeout is what stops that one.
 - **Read-only is the role's job.** Snowflake has no read-only session to ask for, so connect
   as a role granted only `USAGE` and `SELECT`. The checks refuse everything but a `SELECT`
-  either way; the role is what holds if a check is wrong:
+  either way; the role is what holds if a check is wrong. A server
+  [looks at it before it starts](#defence-in-depth): it doesn't serve as a role that holds
+  `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `OWNERSHIP` or any `CREATE` in the connection's
+  database, itself or through a role granted to it (or `PUBLIC`), or that holds
+  `ACCOUNTADMIN`, `SECURITYADMIN`, `SYSADMIN`, `USERADMIN` or `ORGADMIN`. Each session also
+  starts with `USE SECONDARY ROLES NONE`, so a user's other roles lend it nothing:
 
   ```sql
   CREATE ROLE WARDEN_READER;

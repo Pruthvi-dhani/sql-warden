@@ -68,6 +68,9 @@ def warehouse(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         return cost_estimate(PLAN)
 
     monkeypatch.setattr(SnowflakeEngine, "explain", explain)
+    # Nor roles: it can't parse USE SECONDARY ROLES, which a new session starts with, and has
+    # no grants for role() to read. tests/unit covers both against a stand-in.
+    monkeypatch.setattr(SnowflakeEngine, "_prepare", lambda self, conn: None)
     with fakesnow.patch():
         admin = snowflake.connector.connect(database="WAREHOUSE", schema="PUBLIC")
         cursor = admin.cursor()

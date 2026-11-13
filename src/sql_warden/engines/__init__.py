@@ -7,6 +7,7 @@ from sql_warden.engines.base import (
     QueryFailed,
     QueryTimeout,
     Result,
+    RoleReport,
     Table,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "QueryFailed",
     "QueryTimeout",
     "Result",
+    "RoleReport",
     "Table",
 ]

@@ -1,5 +1,5 @@
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -13,6 +13,7 @@ from sql_warden.engines.base import (
     QueryFailed,
     QueryTimeout,
     Result,
+    RoleReport,
     Table,
 )
 
@@ -25,6 +26,70 @@ _TABLES_SQL = """
       AND t.table_type IN ('BASE TABLE', 'VIEW')
     ORDER BY c.table_schema, c.table_name, c.ordinal_position
 """
+
+# Every role the connecting one is a member of, itself included (first): what it holds by
+# inheritance, and what it could take up with SET ROLE.
+_MEMBER_OF_SQL = """
+    SELECT r.rolname, r.rolsuper, r.rolname = current_user AS self
+    FROM pg_roles r
+    WHERE pg_has_role(current_user, r.oid, 'MEMBER')
+    ORDER BY self DESC, r.rolname
+"""
+# What those roles could change, outside the system schemas: tables, views and sequences in
+# the schemas they can use, and where they could create new ones. has_*_privilege counts
+# what a role inherits, pg_write_all_data included.
+_WRITES_SQL = """
+    WITH member AS (
+        SELECT r.oid, r.rolname, r.rolname = current_user AS self
+        FROM pg_roles r
+        WHERE pg_has_role(current_user, r.oid, 'MEMBER')
+    ), namespace AS (
+        SELECT n.oid, n.nspname
+        FROM pg_namespace n
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname !~ '^pg_(toast|temp)'
+    ), found AS (
+        SELECT m.rolname, m.self, 1 AS rank, 'database' AS kind, d.datname::text AS name,
+               ARRAY['CREATE'] AS privileges
+        FROM member m, pg_database d
+        WHERE d.datname = current_database() AND has_database_privilege(m.oid, d.oid, 'CREATE')
+      UNION ALL
+        SELECT m.rolname, m.self, 2, 'schema', n.nspname::text, ARRAY['CREATE']
+        FROM member m, namespace n
+        WHERE has_schema_privilege(m.oid, n.oid, 'CREATE')
+      UNION ALL
+        SELECT m.rolname, m.self, 3, 'table', n.nspname || '.' || c.relname,
+               array_remove(ARRAY[
+                   CASE WHEN has_any_column_privilege(m.oid, c.oid, 'INSERT') THEN 'INSERT' END,
+                   CASE WHEN has_any_column_privilege(m.oid, c.oid, 'UPDATE') THEN 'UPDATE' END,
+                   CASE WHEN has_table_privilege(m.oid, c.oid, 'DELETE') THEN 'DELETE' END,
+                   CASE WHEN has_table_privilege(m.oid, c.oid, 'TRUNCATE') THEN 'TRUNCATE' END
+               ], NULL)
+        FROM member m, pg_class c JOIN namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+          AND has_schema_privilege(m.oid, n.oid, 'USAGE')
+      UNION ALL
+        SELECT m.rolname, m.self, 4, 'sequence', n.nspname || '.' || c.relname, ARRAY['UPDATE']
+        FROM member m, pg_class c JOIN namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'S'
+          AND has_schema_privilege(m.oid, n.oid, 'USAGE')
+          AND has_sequence_privilege(m.oid, c.oid, 'UPDATE')
+    )
+    SELECT rolname, self, kind, name, privileges
+    FROM found
+    WHERE privileges <> '{}'
+    ORDER BY rank, name, self DESC, rolname
+"""
+_SERVER_ROLES = {
+    "pg_write_server_files": "can write files on the database server",
+    "pg_execute_server_program": "can run programs on the database server",
+}
+_WRITE = {
+    "database": "can create schemas in database {name}",
+    "schema": "can create tables in schema {name}",
+    "table": "can {privileges} on {name}",
+    "sequence": "can reset sequence {name}",
+}
 
 _CURSOR = "sql_warden"
 # psycopg runs a named cursor's query as this prefix plus the SQL, and Postgres reports error
@@ -123,6 +188,37 @@ def cost_estimate(explained: Mapping[str, Any]) -> CostEstimate:
     )
 
 
+def role_writes(
+    members: Iterable[tuple[str, bool, bool]],
+    grants: Iterable[tuple[str, bool, str, str, Sequence[str]]] = (),
+) -> tuple[str, ...]:
+    """Every way a role can change the database, for RoleReport.writes.
+
+    members is _MEMBER_OF_SQL's rows: (role, is a superuser, is the connecting role). grants
+    is _WRITES_SQL's: (role, is the connecting role, kind, name, privileges), the connecting
+    role's rows first for each name. A privilege it holds itself is reported once, and not
+    again for each role it got it from."""
+    members = list(members)
+    for name, superuser, is_self in members:
+        if superuser:  # nothing else needs saying
+            return ("is a superuser",) if is_self else (f"is a member of {name}, a superuser",)
+    writes = [
+        f"{_SERVER_ROLES[name]}, as a member of {name}"
+        for name, _, _ in members
+        if name in _SERVER_ROLES
+    ]
+    held: dict[tuple[str, str], set[str]] = {}
+    for role, is_self, kind, name, privileges in grants:
+        seen = held.setdefault((kind, name), set())
+        new = [privilege for privilege in privileges if privilege not in seen]
+        if not new:
+            continue
+        seen.update(new)
+        through = "" if is_self else f", as a member of {role}"
+        writes.append(_WRITE[kind].format(name=name, privileges=", ".join(new)) + through)
+    return tuple(writes)
+
+
 class PostgresEngine:
     """Runs queries in a read-only transaction with a statement timeout and a row cap.
 
@@ -185,6 +281,15 @@ class PostgresEngine:
         for schema, table, column, data_type in rows:
             columns.setdefault((schema, table), []).append(Column(column, data_type))
         return tuple(Table(schema, name, tuple(cols)) for (schema, name), cols in columns.items())
+
+    def role(self) -> RoleReport:
+        with self._read_only() as conn:
+            members = conn.execute(_MEMBER_OF_SQL).fetchall()
+            name = next(role for role, _, is_self in members if is_self)
+            # A superuser can do anything: there is no list to make, and it would be long.
+            superuser = any(superuser for _, superuser, _ in members)
+            grants = [] if superuser else conn.execute(_WRITES_SQL).fetchall()
+        return RoleReport(name, role_writes(members, grants))
 
     @contextmanager
     def _read_only(

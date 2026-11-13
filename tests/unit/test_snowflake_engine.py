@@ -28,6 +28,7 @@ from sql_warden.engines import (
     EngineUnavailable,
     QueryFailed,
     QueryTimeout,
+    RoleReport,
 )
 from sql_warden.engines.snowflake import (
     SnowflakeDsn,
@@ -41,6 +42,7 @@ from sql_warden.profiles import Access
 from sql_warden.warden import Warden
 from tests.unit.conftest import AuditSinks
 
+SESSION_SETUP = "USE SECONDARY ROLES NONE"
 DSN = "snowflake://WARDEN_READER:s3cret@myorg-acct/warehouse/public?warehouse=XS&role=READER"
 PLANS = Path(__file__).parent / "fixtures" / "snowflake_explain"
 COMPILE_ERROR = errors.ProgrammingError(
@@ -92,6 +94,11 @@ class FakeCursor:
 
     def execute(self, operation: str, **options: Any) -> "FakeCursor":
         snow = self.connection.snow
+        if operation == SESSION_SETUP:  # kept apart: it is no answer to any request
+            self.connection.setup.append(operation)
+            if snow.refuse_setup is not None:
+                raise snow.refuse_setup
+            return self
         snow.statements.append((operation, options))
         answer = snow.answers.pop(0) if snow.answers else snow.default
         if isinstance(answer, BaseException):
@@ -117,6 +124,8 @@ class FakeCursor:
 class FakeConnection:
     snow: "FakeSnowflake"
     cursors: list[FakeCursor] = field(default_factory=list)
+    setup: list[str] = field(default_factory=list)
+    """What the engine ran to set the session up, before anything in `statements`."""
     closed: bool = False
 
     def cursor(self) -> FakeCursor:
@@ -137,6 +146,8 @@ class FakeSnowflake:
     default: Rows = field(default_factory=lambda: Rows(("ID",), [(1,), (2,), (3,)]))
     refuse: BaseException | None = None
     """Raised by every connect()."""
+    refuse_setup: BaseException | None = None
+    """Raised when a new session is set up."""
     connected: list[dict[str, Any]] = field(default_factory=list)
     connections: list[FakeConnection] = field(default_factory=list)
     statements: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
@@ -327,7 +338,7 @@ class TestExecute:
         snow = FakeSnowflake(default=Rows(("N",), [(n,) for n in range(10)]))
         result = _engine(snow, max_rows=3).execute("SELECT N FROM T")
         assert (result.rows, result.truncated) == (((0,), (1,), (2,)), True)
-        (cursor,) = snow.connections[0].cursors
+        cursor = snow.connections[0].cursors[-1]  # the first set the session up
         assert cursor.fetch_sizes == [4]  # one past the cap: enough to know there were more
         assert cursor.closed
 
@@ -374,6 +385,123 @@ class TestTables:
         assert "FROM information_schema.columns" in statement
         assert "table_schema <> 'INFORMATION_SCHEMA'" in statement
         assert options == {}
+
+
+class TestSessionSetup:
+    def test_a_new_session_drops_the_users_secondary_roles(self) -> None:
+        # A user can have them on by default: they would lend the session other roles'
+        # privileges, and the role check sees only the session's own.
+        snow = FakeSnowflake()
+        engine = _engine(snow)
+        engine.execute("SELECT 1")
+        engine.execute("SELECT 2")
+        assert snow.connections[0].setup == [SESSION_SETUP]  # once a session, before the rest
+        assert snow.sql == ["SELECT 1", "SELECT 2"]
+
+    def test_so_does_the_session_that_replaces_a_lost_one(self) -> None:
+        snow = FakeSnowflake(answers=[LOST])
+        _engine(snow).execute("SELECT 1")
+        assert [connection.setup for connection in snow.connections] == [[SESSION_SETUP]] * 2
+
+    def test_a_session_that_cant_be_set_up_is_not_used(self) -> None:
+        refused = errors.ProgrammingError(
+            msg="SQL compilation error: role is restricted.", errno=1003, sqlstate="42000"
+        )
+        snow = FakeSnowflake(refuse_setup=refused)
+        with pytest.raises(EngineUnavailable) as excinfo:
+            _engine(snow).execute("SELECT 1")
+        assert str(excinfo.value) == (
+            "could not set up the Snowflake session: SQL compilation error: role is restricted."
+        )
+        assert snow.sql == []
+        assert all(connection.closed for connection in snow.connections)
+
+
+def _role(
+    enabled: list[str], grants: list[tuple[str, str, str | None, str, str]], role: str = "READER"
+) -> FakeSnowflake:
+    """A stand-in that answers role()'s three statements."""
+    return FakeSnowflake(
+        answers=[
+            Rows(("CURRENT_ROLE()",), [(role,)]),
+            Rows(("ROLE_NAME",), [(name,) for name in enabled]),
+            Rows(
+                ("GRANTEE", "OBJECT_TYPE", "OBJECT_SCHEMA", "OBJECT_NAME", "PRIVILEGE_TYPE"), grants
+            ),
+        ]
+    )
+
+
+class TestRole:
+    def test_a_role_that_holds_nothing_that_writes(self) -> None:
+        snow = _role(["PUBLIC", "READER"], [])
+        assert _engine(snow).role() == RoleReport("READER")
+        current, enabled, writes = snow.sql
+        assert current == "SELECT CURRENT_ROLE()"
+        assert "information_schema.enabled_roles" in enabled
+        # Only what the session's roles hold, and only what changes the database.
+        assert "FROM information_schema.object_privileges" in writes
+        assert "grantee IN (SELECT role_name FROM information_schema.enabled_roles)" in writes
+        for privilege in ("'INSERT'", "'UPDATE'", "'DELETE'", "'TRUNCATE'", "'OWNERSHIP'"):
+            assert privilege in writes
+        assert "privilege_type LIKE 'CREATE%'" in writes
+        assert all(options == {} for _, options in snow.statements)
+
+    def test_privileges_that_write(self) -> None:
+        snow = _role(
+            ["PUBLIC", "READER"],
+            [
+                ("READER", "SCHEMA", None, "PUBLIC", "CREATE TABLE"),
+                ("READER", "SCHEMA", None, "PUBLIC", "CREATE VIEW"),
+                ("READER", "TABLE", "PUBLIC", "ORDERS", "INSERT"),
+                ("READER", "TABLE", "PUBLIC", "ORDERS", "UPDATE"),
+                ("READER", "TABLE", "PUBLIC", "SCRATCH", "OWNERSHIP"),
+            ],
+        )
+        report = _engine(snow).role()
+        assert not report.read_only
+        assert report.writes == (
+            "has CREATE TABLE, CREATE VIEW on schema PUBLIC",
+            "has INSERT, UPDATE on table PUBLIC.ORDERS",
+            "has OWNERSHIP on table PUBLIC.SCRATCH",
+        )
+
+    def test_what_it_holds_through_another_role_says_which(self) -> None:
+        snow = _role(
+            ["ETL", "PUBLIC", "READER"],
+            [
+                ("ETL", "TABLE", "PUBLIC", "ORDERS", "DELETE"),
+                ("PUBLIC", "TABLE", "PUBLIC", "ORDERS", "INSERT"),
+                ("READER", "TABLE", "PUBLIC", "ORDERS", "INSERT"),
+            ],
+        )
+        assert _engine(snow).role().writes == (
+            "has DELETE on table PUBLIC.ORDERS, through role ETL",
+            "has INSERT on table PUBLIC.ORDERS, through role PUBLIC",
+            "has INSERT on table PUBLIC.ORDERS",
+        )
+
+    @pytest.mark.parametrize("admin", ["ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN"])
+    def test_a_role_that_administers_the_account(self, admin: str) -> None:
+        snow = _role(["PUBLIC", admin], [], role=admin)
+        assert _engine(snow).role() == RoleReport(
+            admin, (f"holds {admin}, which administers the account",)
+        )
+
+    def test_a_session_with_no_role_is_an_error(self) -> None:
+        snow = _role([], [], role="")
+        with pytest.raises(EngineError, match="did not say which role"):
+            _engine(snow).role()
+
+    def test_a_failure_is_snowflakes_own(self) -> None:
+        with pytest.raises(QueryFailed, match="does not exist or not authorized"):
+            _engine(FakeSnowflake(answers=[COMPILE_ERROR])).role()
+
+    def test_a_lost_session_is_replaced_and_asked_again(self) -> None:
+        snow = _role(["READER"], [])
+        snow.answers.insert(0, LOST)
+        assert _engine(snow).role() == RoleReport("READER")
+        assert len(snow.connections) == 2
 
 
 class TestExplain:

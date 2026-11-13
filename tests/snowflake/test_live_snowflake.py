@@ -76,6 +76,15 @@ def test_the_statement_timeout_cancels_a_slow_query() -> None:
         quick.execute("SELECT SYSTEM$WAIT(30)")  # straight to the engine: the checks refuse it
 
 
+def test_the_role_can_be_looked_at(engine: SnowflakeEngine) -> None:
+    # Whatever the account's role holds: the three statements run, and say something a
+    # server can act on. Run it as a role granted only USAGE and SELECT to see it pass
+    # read_only; nothing here asserts that, since the account is yours.
+    report = engine.role()
+    assert report.role
+    assert all(isinstance(line, str) and line for line in report.writes)
+
+
 def test_through_the_warden(engine: SnowflakeEngine) -> None:
     warden = Warden(
         engine,

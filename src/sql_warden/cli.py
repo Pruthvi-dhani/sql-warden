@@ -24,11 +24,17 @@ from sql_warden.config import (
     describe_dsn,
     load_config,
 )
-from sql_warden.engines import Engine
+from sql_warden.engines import Engine, EngineError
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.engines.snowflake import BYTES, SnowflakeEngine
 from sql_warden.pipeline.cost import format_amount, format_cost
-from sql_warden.profiles import ProfileError, profile_budget, profile_cost, select_profile
+from sql_warden.profiles import (
+    Profile,
+    ProfileError,
+    profile_budget,
+    profile_cost,
+    select_profile,
+)
 from sql_warden.render import (
     AUDIT_HEADER,
     audit_json,
@@ -50,6 +56,7 @@ from sql_warden.server import (
     describe_tables,
 )
 from sql_warden.sessions import Usage, valid_session_id
+from sql_warden.startup import RoleCheck, check_role, listed
 from sql_warden.warden import Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
@@ -171,24 +178,12 @@ def json_option[F: Callable[..., Any]](command: F) -> F:
     )(command)
 
 
-def build_warden(
-    config: WardenConfig, profile: str | None = None, *, audit: AuditSink | None = None
-) -> Warden:
-    """A Warden for one profile, recording to audit (by default, the configured audit database).
-
-    A profile's own dsn wins over --dsn and SQL_WARDEN_DSN: it is part of the policy, often a
-    role that can read less, and a flag must not widen it."""
-    try:
-        active = select_profile(config, profile)
-    except ProfileError as exc:
-        raise click.ClickException(str(exc)) from exc
-    if audit is None:
-        audit = open_audit(config)
+def build_engine(config: WardenConfig, active: Profile) -> tuple[Engine, str | None]:
+    """The engine a profile connects with, and the schema its unqualified table names are
+    looked up in, where that isn't the dialect's usual one."""
     warehouse = config.warehouse
     # Like its dsn, a profile's own row cap is policy: --max-rows doesn't change it.
     max_rows = active.max_rows or warehouse.max_rows
-    engine: Engine
-    default_schema: str | None = None
     if warehouse.engine == "snowflake":
         try:
             snow = SnowflakeEngine(
@@ -200,18 +195,41 @@ def build_warden(
         except ValueError as exc:  # a dsn given on the command line: the file's was checked
             raise click.ClickException(f"warehouse dsn: {exc}") from exc
         # A table named without a schema is looked up in the session's, as Snowflake does.
-        engine, default_schema = snow, snow.default_schema
-    else:
-        engine = PostgresEngine(
-            active.dsn,
-            statement_timeout_ms=warehouse.statement_timeout_ms,
-            max_rows=max_rows,
-            connect_timeout_s=warehouse.connect_timeout_s,
-        )
-    return Warden(
+        return snow, snow.default_schema
+    postgres = PostgresEngine(
+        active.dsn,
+        statement_timeout_ms=warehouse.statement_timeout_ms,
+        max_rows=max_rows,
+        connect_timeout_s=warehouse.connect_timeout_s,
+    )
+    return postgres, None
+
+
+def build_warden(
+    config: WardenConfig,
+    profile: str | None = None,
+    *,
+    audit: AuditSink | None = None,
+    serving: bool = False,
+) -> Warden:
+    """A Warden for one profile, recording to audit (by default, the configured audit database).
+
+    A profile's own dsn wins over --dsn and SQL_WARDEN_DSN: it is part of the policy, often a
+    role that can read less, and a flag must not widen it.
+
+    serving is for a Warden that will answer agents: its database role is looked at first,
+    and one that can write is refused (see vet_role)."""
+    try:
+        active = select_profile(config, profile)
+    except ProfileError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if audit is None:
+        audit = open_audit(config)
+    engine, default_schema = build_engine(config, active)
+    warden = Warden(
         engine,
         audit=audit,
-        dialect=warehouse.dialect,
+        dialect=config.warehouse.dialect,
         default_schema=default_schema,
         shape=config.shape,
         profile=active.name,
@@ -223,6 +241,54 @@ def build_warden(
         else config.masking.key.get_secret_value().encode(),
         budget=active.budget,
     )
+    if serving:
+        vet_role(warden, active.dsn)
+    return warden
+
+
+ONLY_READERS = (
+    "sql-warden only serves as a role that can read and nothing more: then the database "
+    "refuses a write even if every check here is wrong."
+)
+
+
+def vet_role(warden: Warden, dsn: str) -> RoleCheck:
+    """Look at the database role a server is about to serve with. One that can write, or
+    that can't be looked at, ends the command; one that can read more than its profile
+    allows gets a warning on stderr."""
+    where = describe_dsn(dsn)
+    try:
+        check = check_role(warden.engine, warden.access)
+    except EngineError as exc:
+        raise click.ClickException(
+            f"profile {warden.profile}: could not check what its role can do in the "
+            f"warehouse ({where}): {exc}\n{ONLY_READERS}"
+        ) from exc
+    role = check.report.role
+    if check.can_write:
+        raise click.ClickException(
+            "\n".join(
+                [
+                    f"profile {warden.profile}: role {role} can change the warehouse ({where}):",
+                    *(f"  {line}" for line in listed(check.report.writes, prefix="it ")),
+                    ONLY_READERS,
+                ]
+            )
+        )
+    if check.beyond:
+        click.echo(
+            "\n".join(
+                [
+                    f"warning: profile {warden.profile} allows less than its role can read. "
+                    f"{role} can also read:",
+                    *(f"  {line}" for line in listed(check.beyond)),
+                    "Only the access check keeps the profile from these. Give the profile a "
+                    "dsn of its own, for a role granted just what the profile allows.",
+                ]
+            ),
+            err=True,
+        )
+    return check
 
 
 class _NotRecorded:
@@ -416,8 +482,13 @@ def serve(
     profile: str | None,
     audit_dsn: str | None,
 ) -> None:
-    """Serve the MCP tools for one profile, recording every query in the audit database."""
-    warden = build_warden(settings(state, dsn, max_rows, timeout_ms, audit_dsn), profile)
+    """Serve the MCP tools for one profile, recording every query in the audit database.
+
+    It first asks the warehouse what the profile's role can do, and doesn't start as one that
+    can write. `sql-warden config validate --live` checks every profile's role that way.
+    """
+    config = settings(state, dsn, max_rows, timeout_ms, audit_dsn)
+    warden = build_warden(config, profile, serving=True)
     if transport == "stdio":
         create_server(warden).run("stdio")
         return
@@ -560,9 +631,19 @@ def config() -> None:
 
 @config.command()
 @click.argument("path", type=click.Path(path_type=Path, dir_okay=False), required=False)
+@click.option(
+    "--live",
+    is_flag=True,
+    help="Also connect to the warehouse as each profile's role, and check that it can't "
+    "write and what it can read beyond the profile.",
+)
 @click.pass_obj
-def validate(state: CliState, path: Path | None) -> None:
-    """Check a policy file (default: --config, then ./warden.yaml) without connecting."""
+def validate(state: CliState, path: Path | None, live: bool) -> None:
+    """Check a policy file (default: --config, then ./warden.yaml) without connecting.
+
+    With --live it then connects as each profile's role, as a server does before it starts,
+    and exits 1 if any of them can write or can't be checked.
+    """
     path = path or state.config_path
     if path is None and not DEFAULT_CONFIG_PATH.is_file():
         raise click.ClickException(
@@ -601,6 +682,48 @@ def validate(state: CliState, path: Path | None) -> None:
         click.echo("  masking:   hmac key set")
     for line in describe_profiles(loaded):
         click.echo(line)
+    if live:
+        lines, safe = describe_roles(loaded)
+        for line in lines:
+            click.echo(line)
+        if not safe:
+            raise click.ClickException(
+                f"a server would not start for every profile. {ONLY_READERS}"
+            )
+
+
+def describe_roles(config: WardenConfig) -> tuple[list[str], bool]:
+    """What the warehouse says about each profile's role, for `config validate --live`, and
+    whether a server would start for every one of them."""
+    lines, safe = [], True
+    for index, name in enumerate(config.profiles or [IMPLICIT_PROFILE]):
+        label = "  live:      " if index == 0 else "             "
+        active = select_profile(config, name)
+        engine, _ = build_engine(config, active)
+        try:
+            check = check_role(engine, active.access)
+        except EngineError as exc:
+            safe = False
+            reason = str(exc).splitlines()[0]
+            lines.append(f"{label}{name}: ✗ could not check its role: {reason}")
+            continue
+        finally:
+            close = getattr(engine, "close", None)
+            if close is not None:  # an engine that keeps a session open
+                close()
+        role = check.report.role
+        if check.can_write:
+            safe = False
+            lines.append(f"{label}{name}: ✗ role {role} can change the warehouse")
+            lines += [
+                f"               {line}" for line in listed(check.report.writes, prefix="it ")
+            ]
+            continue
+        lines.append(f"{label}{name}: role {role} can only read")
+        if check.beyond:
+            lines.append("               ! but more than the profile allows:")
+            lines += [f"                 {line}" for line in listed(check.beyond)]
+    return lines, safe
 
 
 def describe_budget(budget: BudgetConfig) -> str:

@@ -5,12 +5,13 @@ import pytest
 
 from sql_warden import cli as cli_module
 from sql_warden.audit import AuditError, AuditEvent, MemoryAuditSink
-from sql_warden.engines import Column, CostEstimate, EngineError, Result, Table
+from sql_warden.engines import Column, CostEstimate, EngineError, Result, RoleReport, Table
 from tests.unit import dialects
 
 ONE_ROW = Result(columns=("id",), rows=((1,),), truncated=False, duration_ms=1.0)
 PRODUCTS = Table("public", "products", (Column("id", "integer"), Column("name", "text")))
 CHEAP = CostEstimate(total_cost=1.0, est_rows=1, top_node="Result")
+READER = RoleReport("fake_reader")
 
 
 @pytest.fixture(params=dialects.DIALECTS)
@@ -50,6 +51,8 @@ class FakeEngine:
     explained: list[str] = field(default_factory=list)
     tags: list[str | None] = field(default_factory=list)
     """The tag of each explain() and execute(), in order."""
+    report: RoleReport = READER
+    """What role() answers, unless error is set."""
 
     def execute(self, sql: str, *, tag: str | None = None) -> Result:
         self.executed.append(sql)
@@ -69,6 +72,11 @@ class FakeEngine:
         if self.explain_error is not None:
             raise self.explain_error
         return self.estimate
+
+    def role(self) -> RoleReport:
+        if self.error is not None:
+            raise self.error
+        return self.report
 
 
 @pytest.fixture(autouse=True)
