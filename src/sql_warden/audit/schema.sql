@@ -37,3 +37,34 @@ ALTER TABLE audit_events ALTER COLUMN profile DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS audit_events_ts ON audit_events (ts DESC);
 CREATE INDEX IF NOT EXISTS audit_events_identity ON audit_events (identity, ts);
 CREATE INDEX IF NOT EXISTS audit_events_session ON audit_events (session_id, ts);
+
+-- Budgets, kept here so that every server recording to this log holds the same ones: a
+-- session's or a caller's limit holds however many servers serve them.
+--
+-- What each session has used. Charged in one locked transaction per request; a session is
+-- seeded from audit_events the first time it is charged, so one that began before this
+-- table existed keeps what it had used.
+CREATE TABLE IF NOT EXISTS session_usage (
+    profile        text             NOT NULL,
+    session_id     text             NOT NULL,
+    queries        bigint           NOT NULL DEFAULT 0,
+    total_cost     double precision NOT NULL DEFAULT 0,
+    rows_returned  bigint           NOT NULL DEFAULT 0,
+    refusals       bigint           NOT NULL DEFAULT 0,
+    updated_at     timestamptz      NOT NULL DEFAULT now(),
+    PRIMARY KEY (profile, session_id)
+);
+
+-- Every charge to a caller with a token, for budgets over a rolling window: their use is
+-- the sum of what is younger than the window. Older rows are deleted as the caller is
+-- charged again.
+CREATE TABLE IF NOT EXISTS caller_charges (
+    profile        text             NOT NULL,
+    caller         text             NOT NULL,
+    ts             timestamptz      NOT NULL DEFAULT now(),
+    queries        integer          NOT NULL DEFAULT 0,
+    total_cost     double precision NOT NULL DEFAULT 0,
+    rows_returned  bigint           NOT NULL DEFAULT 0,
+    refusals       integer          NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS caller_charges_by_caller ON caller_charges (profile, caller, ts);

@@ -3,15 +3,20 @@
 A session is one MCP connection, or the CLI calls made with the same `--session`. Every request
 belongs to one, and the audit log records which. The store keeps each session's usage, for the
 budget check to hold against the profile's limits.
+
+It also keeps what each caller (a token's identity) has used, charge by charge, for budgets
+over a rolling window: those hold across all of a caller's sessions, so connecting again
+doesn't start a fresh one.
 """
 
 import re
 import threading
+import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sql_warden.config import BudgetConfig
 
@@ -85,11 +90,32 @@ def reached(usage: Usage, budget: BudgetConfig) -> str | None:
 
 
 @dataclass(frozen=True)
+class CallerStatus:
+    """What a caller has used over the window, held against their budget."""
+
+    name: str
+    window_hours: float
+    usage: Usage
+    limits: BudgetConfig
+
+    @property
+    def exhausted(self) -> str | None:
+        return reached(self.usage, self.limits)
+
+    def lines(self) -> tuple[tuple[str, float, float | None], ...]:
+        return tuple(
+            (used, getattr(self.usage, used), getattr(self.limits, limit))
+            for limit, used in _LIMITS
+        )
+
+
+@dataclass(frozen=True)
 class BudgetStatus:
-    """A session's usage, held against its budget."""
+    """A session's usage, held against its budget, and its caller's if they have one."""
 
     usage: Usage
     limits: BudgetConfig
+    caller: CallerStatus | None = None
 
     @property
     def exhausted(self) -> str | None:
@@ -106,6 +132,18 @@ class BudgetStatus:
 
 
 @dataclass(frozen=True)
+class CallerCharge:
+    """The caller a charge is for, as well as the session."""
+
+    name: str
+    window_s: float
+    """How far back their use counts."""
+    within: BudgetConfig | None = None
+    """Their limits over the window: as for the session's, the charge is made only if their
+    use stays within them. None to count it without holding it to anything."""
+
+
+@dataclass(frozen=True)
 class Charge:
     """What came of charging a session."""
 
@@ -113,7 +151,11 @@ class Charge:
     """The session's usage now: with the charge if it was made, as it was if not."""
     exceeded: str | None = None
     """The limit the charge would have gone over, e.g. "max_queries". Then nothing was
-    charged."""
+    charged, to the session or the caller."""
+    by: Literal["session", "caller"] | None = None
+    """Whose limit that is: the session's, or the caller's over the window."""
+    caller_usage: Usage | None = None
+    """The caller's use over the window now, if a caller was charged."""
 
     @property
     def made(self) -> bool:
@@ -131,14 +173,26 @@ class SessionStore(Protocol):
         """What the session has used so far. Nothing, for a session never charged."""
         ...
 
-    def charge(
-        self, session_id: str, spent: Usage, *, within: BudgetConfig | None = None
-    ) -> Charge:
-        """Add spent to the session's usage and return the new total.
+    def caller_usage(self, name: str, window_s: float) -> Usage:
+        """What the caller has used in the last window_s seconds, over all their sessions."""
+        ...
 
-        With `within`, only if the total stays within every limit of that budget: otherwise
-        nothing is added, and the Charge names the limit. Checking and adding are one step, so
-        callers charging at the same time can't take a session over a limit between them."""
+    def charge(
+        self,
+        session_id: str,
+        spent: Usage,
+        *,
+        within: BudgetConfig | None = None,
+        caller: CallerCharge | None = None,
+    ) -> Charge:
+        """Add spent to the session's usage, and the caller's if given, and return the new
+        totals.
+
+        With `within`, only if the session's total stays within every limit of that budget,
+        and the caller's within theirs: otherwise nothing is added to either, and the Charge
+        names the limit and whose it is. Checking and adding are one step, so requests
+        charging at the same time can't take a session or a caller over a limit between
+        them."""
         ...
 
 
@@ -159,17 +213,37 @@ class MemorySessionStore:
         *,
         max_sessions: int = MAX_SESSIONS,
         restore: Callable[[str], Usage] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions must be at least 1")
         self._max_sessions = max_sessions
         self._restore = restore
+        self._clock = clock
         self._usage: OrderedDict[str, Usage] = OrderedDict()
+        self._callers: OrderedDict[str, deque[tuple[float, Usage]]] = OrderedDict()
+        """Each caller's charges, oldest first, while they are within the window."""
         self._lock = threading.Lock()
 
     def usage(self, session_id: str) -> Usage:
         with self._lock:
             return self._used(session_id)
+
+    def caller_usage(self, name: str, window_s: float) -> Usage:
+        with self._lock:
+            return self._caller_used(name, window_s)
+
+    def _caller_used(self, name: str, window_s: float) -> Usage:
+        charges = self._callers.get(name)
+        if charges is None:
+            return Usage()
+        since = self._clock() - window_s
+        while charges and charges[0][0] <= since:
+            charges.popleft()  # out of the window: it no longer counts, or needs keeping
+        total = Usage()
+        for _, spent in charges:
+            total += spent
+        return total
 
     def _used(self, session_id: str) -> Usage:
         """The session's usage, restored first if this store doesn't know the session. Held
@@ -190,19 +264,39 @@ class MemorySessionStore:
             self._usage.popitem(last=False)
 
     def charge(
-        self, session_id: str, spent: Usage, *, within: BudgetConfig | None = None
+        self,
+        session_id: str,
+        spent: Usage,
+        *,
+        within: BudgetConfig | None = None,
+        caller: CallerCharge | None = None,
     ) -> Charge:
         if any(getattr(spent, field.name) < 0 for field in fields(Usage)):
             raise ValueError("a charge can't be negative: usage only grows")
         with self._lock:
             used = self._used(session_id)
             total = used + spent
+            caller_used = (
+                None if caller is None else self._caller_used(caller.name, caller.window_s)
+            )
             if within is not None:
                 exceeded = over(total, within)
                 if exceeded is not None:
-                    return Charge(used, exceeded)
+                    return Charge(used, exceeded, "session", caller_used)
+            if caller is not None and caller_used is not None and caller.within is not None:
+                exceeded = over(caller_used + spent, caller.within)
+                if exceeded is not None:
+                    return Charge(used, exceeded, "caller", caller_used)
             self._keep(session_id, total)
-            return Charge(total)
+            if caller is None or caller_used is None:
+                return Charge(total)
+            if spent != Usage():
+                charges = self._callers.setdefault(caller.name, deque())
+                charges.append((self._clock(), spent))
+                self._callers.move_to_end(caller.name)
+                while len(self._callers) > self._max_sessions:
+                    self._callers.popitem(last=False)
+            return Charge(total, caller_usage=caller_used + spent)
 
     def __len__(self) -> int:
         with self._lock:

@@ -21,6 +21,7 @@ from sql_warden.config import (
     AuthConfig,
     BudgetConfig,
     ConfigError,
+    IdentityBudgetConfig,
     ProfileConfig,
     WardenConfig,
     default_config,
@@ -31,12 +32,14 @@ from sql_warden.config import (
 from sql_warden.engines import Engine, EngineError
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.engines.snowflake import BYTES, SnowflakeEngine
+from sql_warden.pipeline.budget import window
 from sql_warden.pipeline.cost import format_amount, format_cost
 from sql_warden.profiles import (
     Profile,
     ProfileError,
     profile_budget,
     profile_cost,
+    profile_identity_budget,
     select_profile,
 )
 from sql_warden.render import (
@@ -61,7 +64,7 @@ from sql_warden.server import (
 )
 from sql_warden.sessions import Usage, valid_session_id
 from sql_warden.startup import RoleCheck, check_role, listed
-from sql_warden.warden import Warden
+from sql_warden.warden import NOT_COUNTED, Warden
 
 DEFAULT_CONFIG_PATH = Path("warden.yaml")
 EXIT_ERROR = 1
@@ -230,6 +233,12 @@ def build_warden(
     if audit is None:
         audit = open_audit(config)
     engine, default_schema = build_engine(config, active)
+    # Budgets kept in the audit database, where every server recording there shares them,
+    # so a session or caller gets no more by reaching another replica.
+    sessions = None
+    store_in = getattr(audit, "session_store", None)
+    if callable(store_in) and (active.budget.limited or active.identity_budget.limited):
+        sessions = store_in(active.name, not_counted=NOT_COUNTED)
     warden = Warden(
         engine,
         audit=audit,
@@ -244,6 +253,8 @@ def build_warden(
         if config.masking.key is None
         else config.masking.key.get_secret_value().encode(),
         budget=active.budget,
+        identity_budget=active.identity_budget,
+        sessions=sessions,
     )
     if serving:
         vet_role(warden, active.dsn)
@@ -788,6 +799,8 @@ def validate(state: CliState, path: Path | None, live: bool) -> None:
     limit = format_amount(loaded.cost.max_total_cost, unit)
     click.echo(f"  cost:      refused above an estimated {limit}{scanned}")
     click.echo(f"  budgets:   {describe_budget(loaded.budgets)}")
+    if loaded.identity_budgets.limited:
+        click.echo(f"             {describe_identity_budget(loaded.identity_budgets)}")
     if "server" in loaded.model_fields_set:
         server = loaded.server
         host = f"[{server.host}]" if ":" in server.host else server.host
@@ -868,6 +881,12 @@ def describe_auth(auth: AuthConfig | None) -> list[str]:
     ]
 
 
+def describe_identity_budget(budget: IdentityBudgetConfig) -> str:
+    """A caller's budget in a line: `per caller over any 24 hours: 500 queries`."""
+    limits = describe_budget(budget).removeprefix("per session: ")
+    return f"per caller over any {window(budget.window_hours)}: {limits}"
+
+
 def describe_budget(budget: BudgetConfig) -> str:
     """A session budget in a line: `per session: 20 queries, cost 50,000`."""
     limits = [
@@ -942,6 +961,9 @@ def describe_profiles(config: WardenConfig) -> list[str]:
         if profile.budgets is not None:
             budget = describe_budget(profile_budget(config, profile))
             lines.append(f"               budget {budget}")
+        if profile.identity_budgets is not None:
+            theirs = describe_identity_budget(profile_identity_budget(config, profile))
+            lines.append(f"               budget {theirs}")
     if config.default_profile is None:
         lines.append("             no default_profile: servers must be given --profile")
     return lines

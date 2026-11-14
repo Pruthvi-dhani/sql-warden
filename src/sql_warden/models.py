@@ -117,6 +117,8 @@ class Decision:
     """The profile the query was checked for; the Warden always sets it."""
     session_id: str | None = None
     """The session the request belongs to; the Warden always sets it."""
+    identity: str | None = None
+    """Who asked, when the caller authenticated."""
     cost: CostEstimate | None = None
     """The planner's estimate, once the cost check got one, whether or not it refused."""
     cost_limit: float | None = None

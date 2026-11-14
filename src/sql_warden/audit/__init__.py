@@ -8,6 +8,7 @@ from sql_warden.audit.sink import (
     PostgresAuditSink,
     usage_from,
 )
+from sql_warden.audit.store import PostgresSessionStore
 
 __all__ = [
     "AuditError",
@@ -17,5 +18,6 @@ __all__ = [
     "Decision",
     "MemoryAuditSink",
     "PostgresAuditSink",
+    "PostgresSessionStore",
     "usage_from",
 ]

@@ -140,7 +140,7 @@ class TestChargingWithinABudget:
         store.charge("s", Usage(queries=1), within=self.BUDGET)
         assert store.charge("s", Usage(queries=1), within=self.BUDGET).made
         refused = store.charge("s", Usage(queries=1), within=self.BUDGET)
-        assert refused == Charge(Usage(queries=2), exceeded="max_queries")
+        assert refused == Charge(Usage(queries=2), exceeded="max_queries", by="session")
         assert not refused.made
 
     def test_a_charge_over_one_limit_charges_nothing(self) -> None:
@@ -240,7 +240,9 @@ class TestRestoring:
             asked.append(session_id)
             return earlier.get(session_id, Usage())
 
-        return MemorySessionStore(restore=restore, **settings), asked
+        return MemorySessionStore(
+            restore=restore, max_sessions=settings.get("max_sessions", 10_000)
+        ), asked
 
     def test_a_session_starts_from_what_it_had_used(self) -> None:
         store, _ = self._store({"s": Usage(queries=3, total_cost=60, refusals=1)})
@@ -251,7 +253,7 @@ class TestRestoring:
     def test_a_charge_is_held_against_what_was_restored(self) -> None:
         store, _ = self._store({"s": Usage(queries=2)})
         refused = store.charge("s", Usage(queries=1), within=BudgetConfig(max_queries=2))
-        assert refused == Charge(Usage(queries=2), exceeded="max_queries")
+        assert refused == Charge(Usage(queries=2), exceeded="max_queries", by="session")
 
     def test_it_is_asked_once_per_session(self) -> None:
         store, asked = self._store({"s": Usage(queries=3)})

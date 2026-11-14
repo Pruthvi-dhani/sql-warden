@@ -25,6 +25,9 @@ class CheckContext:
     """Which of the result's columns come from masked columns, set by the masking check."""
     session_id: str | None = None
     """The session the request belongs to; the Warden always sets it."""
+    identity: str | None = None
+    """Who is asking, when the caller authenticated: their budget over the window counts
+    too."""
     dry_run: bool = False
     """True if the query is only being checked: then nothing may be charged for it."""
     tag: str | None = None

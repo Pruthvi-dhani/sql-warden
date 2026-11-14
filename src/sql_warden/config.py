@@ -262,6 +262,29 @@ class BudgetConfig(_Section):
         return any(limit is not None for limit in self.model_dump().values())
 
 
+MAX_WINDOW_HOURS = 24 * 31
+
+
+class IdentityBudgetConfig(BudgetConfig):
+    """What one caller may use over a rolling window, across all their sessions: a token's
+    holder can't start a fresh budget by connecting again. Only for callers with a token, so
+    only with an auth section. A limit left out is not enforced."""
+
+    window_hours: float = Field(default=24.0, gt=0, le=MAX_WINDOW_HOURS)
+    """How far back their use counts: 24 is "in any 24 hours"."""
+
+    @property
+    def limited(self) -> bool:
+        return any(
+            getattr(self, limit) is not None
+            for limit in ("max_queries", "max_total_cost", "max_rows_returned", "max_refusals")
+        )
+
+    @property
+    def window_s(self) -> float:
+        return self.window_hours * 3600
+
+
 def default_cost(dialect: str) -> CostConfig:
     """The cost limits when none are given, in that dialect's planner's units."""
     return (
@@ -577,6 +600,9 @@ class ProfileConfig(_Section):
     budgets: BudgetConfig | None = None
     """What one of the profile's sessions may use; any limit it leaves out comes from the
     top-level budgets section, and one it sets to null is lifted."""
+    identity_budgets: IdentityBudgetConfig | None = None
+    """What one of the profile's callers may use over the window; filled in from the
+    top-level identity_budgets section as budgets are."""
 
     @field_validator("masks")
     @classmethod
@@ -666,6 +692,9 @@ class WardenConfig(_Section):
     budgets: BudgetConfig = BudgetConfig()
     """What one session may use. No limits unless set: a session can be as long-lived as the
     agent that opened it."""
+    identity_budgets: IdentityBudgetConfig = IdentityBudgetConfig()
+    """What one caller (a token's identity) may use over a rolling window, across their
+    sessions. No limits unless set."""
     masking: MaskingConfig = MaskingConfig()
     audit: AuditConfig = AuditConfig()
     server: ServerConfig = ServerConfig()
@@ -689,6 +718,25 @@ class WardenConfig(_Section):
         if cost is not None and not isinstance(cost, dict):
             return data  # not a section at all: its own validation says so
         return {**data, "cost": {**(cost or {}), "max_total_cost": SNOWFLAKE_MAX_TOTAL_COST}}
+
+    @model_validator(mode="after")
+    def _identity_budgets_need_identities(self) -> Self:
+        if self.auth is not None:
+            return self
+        where = ["identity_budgets"] if self.identity_budgets.limited else []
+        where += [
+            f"profiles.{name}.identity_budgets"
+            for name, profile in (self.profiles or {}).items()
+            if profile.identity_budgets is not None and profile.identity_budgets.limited
+        ]
+        if where:
+            raise PydanticCustomError(
+                "identity_budgets_without_auth",
+                "{where} limits what each caller with a token may use, but there is no auth "
+                "section, so no caller has one: it would never be enforced",
+                {"where": " and ".join(where)},
+            )
+        return self
 
     @model_validator(mode="after")
     def _auth_gives_real_profiles(self) -> Self:

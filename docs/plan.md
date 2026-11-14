@@ -901,7 +901,7 @@ CLI.
   40 worker threads can hold a warehouse connection), with 9.4's metrics; the deployment
   guide with a proxy (`docs/deploy.md`, 9.6), which the README only sketches.
 
-**9.2 Authentication → profiles** ✅ done
+**9.2 Authentication → profiles** ✅ done (`4802d98`)
 - Bearer tokens: either static hashed API keys in config, or OIDC/JWT validated with `pyjwt`
   against JWKS. Each token maps to one of the **profiles from Phase 2** (an API key names its
   profile; for OIDC a claim or group maps to a profile name). There is no separate per-client
@@ -962,7 +962,7 @@ CLI.
   since each unauthenticated request is one audit write; tokens with scopes; and `/readyz`
   checking the provider (9.4).
 
-**9.3 Shared budget state across replicas**
+**9.3 Shared budget state across replicas** ✅ done
 - `PostgresSessionStore` lives in the audit DB and uses atomic `UPDATE … RETURNING` counters,
   so budgets hold when N replicas serve the same session. Works with sticky sessions or the
   SDK's stateless HTTP mode.
@@ -973,6 +973,43 @@ CLI.
 - Tests: an integration test runs two Warden instances against one audit container with
   concurrent queries and never exceeds the budget. A reconnect test checks that a new session
   under the same identity is still refused once the identity budget is used up.
+- As built, the store: `PostgresSessionStore` (`audit/store.py`), one per profile, on its own
+  connection to the audit database, so a charge waiting on another server's doesn't hold up
+  audit records. Two tables come with the audit schema: `session_usage`, one row per
+  (profile, session), and `caller_charges`, one row per charge to a caller. Not quite the
+  planned `UPDATE ... RETURNING`: a charge has to check the session's limits and the caller's
+  before changing either, so it is one transaction that locks the session's row (`SELECT ...
+  FOR UPDATE`) and the caller (`pg_advisory_xact_lock`), checks both, and only then writes
+  both. Always in that order, and a session has at most one caller, so two charges can't
+  deadlock. A session's row is seeded from the audit log the first time it is charged, so
+  6.3's behaviour holds: a `--session` name is one session for good.
+- As built, who uses it: `serve`, `query`, `check` and the portal, for every profile with a
+  session or caller limit (`build_warden` asks the audit sink for it). The Warden on its own
+  still defaults to `MemorySessionStore`, which now counts callers too, in memory. 6.3's
+  restore-from-audit stays for that one.
+- As built, caller budgets: an `identity_budgets` section (top level and per profile, merged
+  as `budgets` is) with the four limits and `window_hours` (default 24, at most 31 days).
+  A rolling window, exact rather than bucketed: use counts while it is younger than the
+  window, by the database's clock, and rows older than it are deleted as the caller is
+  charged. Only requests with an identity are held to it, so a config error says so without
+  an `auth` section. The gate refuses a caller who has reached a limit before any check
+  runs; the reservation checks both budgets in one charge; rows and refusals are charged to
+  both. The refusal names whose budget it was (`web-agent's budget for any 24 hours is used
+  up: ...`), with the same codes as the session's, and results and `budget_status` carry
+  the caller's budget as `budget.caller`.
+- As built, a lost commit errs high: a charge whose connection broke after the commit is
+  retried once, as audit writes are, and may count twice. Usage only ever reads high.
+- Tests: 31 unit (`test_identity_budget.py`: across sessions, whichever runs out first, each
+  limit, the window on a clock, the memory store under 8 threads, config), the reconnect test
+  over HTTP (`test_http_auth.py`), and 7 on Postgres (`test_shared_budgets_on_postgres.py`):
+  two replicas with 12 threads charging one session (exactly 30 of 96 run), and 10 threads
+  charging one caller from separate sessions (exactly 25), a charge that doesn't fit
+  changing nothing, seeding from the audit log, the window and its clean-up, an unreachable
+  store failing closed, and the CLI keeping budgets in the audit database.
+- Left for later: callers' use from before this point isn't seeded (identities only began
+  in 9.2); a longer `window_hours` set later doesn't bring back charges already deleted; the
+  warden's audit role needs UPDATE and DELETE on the two budget tables, which 9.6's
+  INSERT-only role for `audit_events` must leave it.
 
 **9.4 Container image + health checks + metrics**
 - A multi-stage `Dockerfile` (non-root, slim). `/healthz` is the liveness check; `/readyz`

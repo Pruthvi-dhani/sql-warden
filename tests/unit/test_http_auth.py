@@ -21,7 +21,7 @@ from sql_warden import cli as cli_module
 from sql_warden.audit import AuditError, AuditEvent, MemoryAuditSink
 from sql_warden.auth import Authenticator, key_hash, new_api_key
 from sql_warden.cli import ONLY_READERS, cli
-from sql_warden.config import AuthConfig, BudgetConfig
+from sql_warden.config import AuthConfig, BudgetConfig, IdentityBudgetConfig
 from sql_warden.engines import Column, RoleReport, Table
 from sql_warden.profiles import Access
 from sql_warden.server import create_http_app
@@ -294,6 +294,23 @@ class TestSessions:
                 spent = _structured(await one.call_tool("run_query", {"sql": "select 1"}))
                 fresh = await other.call_tool("run_query", {"sql": "select 1"})
         assert spent["code"] == "BUDGET_EXHAUSTED"
+        assert fresh.is_error is False
+
+    async def test_reconnecting_doesnt_start_a_fresh_caller_budget(self) -> None:
+        served = Served(identity_budget=IdentityBudgetConfig(max_queries=1))
+        with _served(served) as url:
+            async with _client(url, PUBLIC_KEY, mode="legacy") as first:
+                ran = _structured(await first.call_tool("run_query", {"sql": "select 1"}))
+            # A new connection is a new session...
+            async with _client(url, PUBLIC_KEY, mode="legacy") as again:
+                refused = _structured(await again.call_tool("run_query", {"sql": "select 1"}))
+            # ...and another caller is not held to this one's budget.
+            async with _client(url, OTHER_PUBLIC_KEY, mode="legacy") as other:
+                fresh = await other.call_tool("run_query", {"sql": "select 1"})
+        assert refused["session_id"] != ran["session_id"]
+        assert refused["code"] == "BUDGET_EXHAUSTED"
+        assert refused["reason"].startswith("web-agent's budget for any 24 hours is used up")
+        assert refused["budget"]["caller"]["exhausted"] == "max_queries"
         assert fresh.is_error is False
 
     async def test_a_connection_is_its_callers_alone(self) -> None:

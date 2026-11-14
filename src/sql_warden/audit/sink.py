@@ -7,12 +7,15 @@ import uuid
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from importlib.resources import files
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from sql_warden.sessions import Usage
+
+if TYPE_CHECKING:
+    from sql_warden.audit.store import PostgresSessionStore
 
 Decision = Literal["allowed", "refused", "failed"]
 """allowed: the checks passed (and, unless a dry run, it ran). refused: a check stopped it.
@@ -200,6 +203,21 @@ class PostgresAuditSink:
         assert row is not None  # an aggregate without GROUP BY always returns one row
         queries, total_cost, rows_returned, refusals = row
         return Usage(int(queries), float(total_cost), int(rows_returned), int(refusals))
+
+    def session_store(
+        self, profile: str, *, not_counted: Collection[str] = ()
+    ) -> "PostgresSessionStore":
+        """A store for the profile's budgets in this audit database, where every server
+        recording here shares them. On its own connection: a charge waiting for another
+        server's must not hold up the audit records."""
+        from sql_warden.audit.store import PostgresSessionStore
+
+        return PostgresSessionStore(
+            self._dsn,
+            profile=profile,
+            not_counted=not_counted,
+            connect_timeout_s=self._connect_timeout_s,
+        )
 
     def close(self) -> None:
         with self._lock:

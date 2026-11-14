@@ -15,6 +15,7 @@ from sql_warden.config import (
     IMPLICIT_PROFILE,
     BudgetConfig,
     CostConfig,
+    IdentityBudgetConfig,
     MaskRule,
     ShapeConfig,
     default_cost,
@@ -47,6 +48,8 @@ from sql_warden.pipeline.parse import MAX_LENGTH
 from sql_warden.profiles import Access
 from sql_warden.sessions import (
     BudgetStatus,
+    CallerCharge,
+    CallerStatus,
     MemorySessionStore,
     SessionStore,
     SessionStoreError,
@@ -92,6 +95,7 @@ class Warden:
         masks: Mapping[MaskedColumn, MaskRule] | None = None,
         mask_key: bytes | None = None,
         budget: BudgetConfig | None = None,
+        identity_budget: IdentityBudgetConfig | None = None,
         sessions: SessionStore | None = None,
         default_schema: str | None = None,
     ) -> None:
@@ -152,6 +156,8 @@ class Warden:
         self.budget = budget or BudgetConfig()
         """What one session may use. Without limits there is no budget check, but usage is
         still counted."""
+        self.identity_budget = identity_budget or IdentityBudgetConfig()
+        """What one caller with a token may use over the window, across their sessions."""
         if sessions is None:
             # With limits to hold, a session this server hasn't seen starts from what the
             # audit log says it used, so a budget outlives the server that counted it.
@@ -161,8 +167,10 @@ class Warden:
         self.sessions: SessionStore = sessions
         # Around the other checks rather than among them: the gate before any of them, the
         # reservation once they have all passed.
-        self._gate = Pipeline([BudgetGate(self.sessions, self.budget)])
-        self._reservation = Pipeline([BudgetReservation(self.sessions, self.budget)])
+        self._gate = Pipeline([BudgetGate(self.sessions, self.budget, self.identity_budget)])
+        self._reservation = Pipeline(
+            [BudgetReservation(self.sessions, self.budget, self.identity_budget)]
+        )
         self.pipeline = Pipeline(
             [
                 ParseCheck(),
@@ -185,7 +193,9 @@ class Warden:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
         started = time.perf_counter()
         request = uuid.uuid4()
-        decision = self._decide(sql, session_id, dry_run=True, request=request)[0]
+        decision = self._decide(sql, session_id, identity=identity, dry_run=True, request=request)[
+            0
+        ]
         outcome = QueryOutcome(decision, result=None)
         return self._recorded(
             sql, outcome, started, dry_run=True, client=client, identity=identity, request=request
@@ -207,7 +217,7 @@ class Warden:
         session the request belongs to: without one, this Warden's own."""
         started = time.perf_counter()
         request = uuid.uuid4()
-        decision, columns = self._decide(sql, session_id, request=request)
+        decision, columns = self._decide(sql, session_id, identity=identity, request=request)
         if decision.sql is None:
             return self._recorded(
                 sql,
@@ -227,7 +237,7 @@ class Warden:
             result = self.engine.execute(decision.sql, tag=_tag(request))
             # Known only now, so charged now: the query that takes a session past its rows
             # still comes back, and the next request finds the budget used up.
-            if not self._count(self._session(decision), Usage(rows_returned=len(result.rows))):
+            if not self._count(decision, Usage(rows_returned=len(result.rows))):
                 raise EngineError(
                     "the rows could not be counted against the session's budget, so they "
                     "are withheld"
@@ -245,10 +255,24 @@ class Warden:
             sql, outcome, started, client=client, identity=identity, request=request
         )
 
-    def budget_status(self, session_id: str | None = None) -> BudgetStatus:
-        """What the session (without one, this Warden's own) has used, against its budget.
-        Raises SessionStoreError if its usage can't be read."""
-        return BudgetStatus(self.sessions.usage(session_id or self.session_id), self.budget)
+    @property
+    def limited(self) -> bool:
+        """True if a session or a caller has any limit to hold."""
+        return self.budget.limited or self.identity_budget.limited
+
+    def budget_status(
+        self, session_id: str | None = None, identity: str | None = None
+    ) -> BudgetStatus:
+        """What the session (without one, this Warden's own) has used, against its budget,
+        and what its caller has, if they have a budget. Raises SessionStoreError if usage
+        can't be read."""
+        usage = self.sessions.usage(session_id or self.session_id)
+        caller = None
+        if identity is not None and self.identity_budget.limited:
+            window = self.identity_budget
+            used = self.sessions.caller_usage(identity, window.window_s)
+            caller = CallerStatus(identity, window.window_hours, used, window)
+        return BudgetStatus(usage, self.budget, caller)
 
     def _audited_usage(self, session_id: str) -> Usage:
         """What the audit log says the session has used under this profile."""
@@ -263,6 +287,7 @@ class Warden:
         sql: str,
         session_id: str | None = None,
         *,
+        identity: str | None = None,
         dry_run: bool = False,
         request: uuid.UUID | None = None,
     ) -> tuple[Decision, int | None]:
@@ -276,10 +301,13 @@ class Warden:
             sql=sql,
             dialect=self.dialect,
             session_id=session_id,
+            identity=identity,
             dry_run=dry_run,
             tag=None if request is None else _tag(request),
         )
-        decision = replace(self._checked(ctx), profile=self.profile, session_id=session_id)
+        decision = replace(
+            self._checked(ctx), profile=self.profile, session_id=session_id, identity=identity
+        )
         if ctx.cost is not None:  # kept on a refusal too: the audit record shows the estimate
             limit = self.cost_check.limits.max_total_cost
             decision = replace(decision, cost=ctx.cost, cost_limit=limit)
@@ -289,7 +317,7 @@ class Warden:
             assert refused_by.refusal is not None
             if refused_by.refusal.code not in NOT_COUNTED:
                 # Refused either way; if it can't be counted, the gate refuses what follows.
-                self._count(session_id, Usage(refusals=1))
+                self._count(decision, Usage(refusals=1))
             return decision, None
         decision = replace(decision, sql=ctx.sql_to_run(), rewrites=tuple(ctx.rewrites))
         lineage = ctx.lineage
@@ -299,7 +327,7 @@ class Warden:
 
     def _checked(self, ctx: CheckContext) -> Decision:
         """The checks' verdict on ctx, with the budget around them."""
-        if self.budget.limited:
+        if self.limited:
             gate = self._gate.run(ctx)
             if not gate.allowed:
                 return gate
@@ -307,30 +335,36 @@ class Warden:
         if not decision.allowed:
             return decision
         reserved = self._reservation.run(ctx)
-        if not self.budget.limited and reserved.allowed:
+        if not self.limited and reserved.allowed:
             return decision  # counted, but with no limits there was nothing to check
         return replace(decision, trace=(*decision.trace, *reserved.trace))
 
     def _session(self, decision: Decision) -> str:
         return decision.session_id or self.session_id
 
-    def _count(self, session_id: str, spent: Usage) -> bool:
-        """Add spent to the session's usage. False if the store failed: callers decide what
-        that costs, rather than a request ending without its audit record."""
+    def _count(self, decision: Decision, spent: Usage) -> bool:
+        """Add spent to the decision's session's usage, and its caller's if they have a
+        budget. False if the store failed: callers decide what that costs, rather than a
+        request ending without its audit record."""
+        caller = None
+        if decision.identity is not None and self.identity_budget.limited:
+            caller = CallerCharge(decision.identity, self.identity_budget.window_s)
         try:
-            self.sessions.charge(session_id, spent)
+            self.sessions.charge(self._session(decision), spent, caller=caller)
         except Exception:
             return False
         return True
 
     def _with_budget(self, decision: Decision) -> Decision:
-        """decision, with what its session has now used of its budget, if it has one."""
-        if not self.budget.limited:
+        """decision, with what its session (and caller) has now used of its budget, if it
+        has one."""
+        if not self.limited:
             return decision
         try:
-            return replace(decision, budget=self.budget_status(self._session(decision)))
+            status = self.budget_status(self._session(decision), decision.identity)
         except Exception:
             return decision  # the store is failing, and the decision already says so
+        return replace(decision, budget=status)
 
     def _masked_outputs(self, lineage: Lineage) -> tuple[MaskedOutput, ...]:
         masked = []

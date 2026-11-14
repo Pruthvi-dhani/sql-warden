@@ -13,6 +13,7 @@ from sql_warden.config import (
     IMPLICIT_PROFILE,
     BudgetConfig,
     CostConfig,
+    IdentityBudgetConfig,
     MaskRule,
     ProfileConfig,
     WardenConfig,
@@ -72,6 +73,8 @@ class Profile:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     """What one session may use: the profile's own limits, filled in from the top-level
     budgets section."""
+    identity_budget: IdentityBudgetConfig = field(default_factory=IdentityBudgetConfig)
+    """What one caller may use over the window, filled in the same way."""
 
 
 def profile_cost(config: WardenConfig, profile: ProfileConfig) -> CostConfig:
@@ -87,6 +90,14 @@ def profile_budget(config: WardenConfig, profile: ProfileConfig) -> BudgetConfig
     if profile.budgets is None:
         return config.budgets
     return config.budgets.model_copy(update=profile.budgets.model_dump(exclude_unset=True))
+
+
+def profile_identity_budget(config: WardenConfig, profile: ProfileConfig) -> IdentityBudgetConfig:
+    """The profile's per-caller budget: what it sets, and the top-level section's for the rest."""
+    if profile.identity_budgets is None:
+        return config.identity_budgets
+    own = profile.identity_budgets.model_dump(exclude_unset=True)
+    return config.identity_budgets.model_copy(update=own)
 
 
 def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
@@ -106,6 +117,7 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
             implicit=True,
             cost=config.cost,
             budget=config.budgets,
+            identity_budget=config.identity_budgets,
         )
 
     known = ", ".join(config.profiles)
@@ -127,6 +139,7 @@ def select_profile(config: WardenConfig, name: str | None = None) -> Profile:
         cost=profile_cost(config, profile),
         masks={_column(name): rule for name, rule in profile.masks.items()},
         budget=profile_budget(config, profile),
+        identity_budget=profile_identity_budget(config, profile),
     )
 
 

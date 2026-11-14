@@ -39,6 +39,15 @@ cost:
 budgets:
   max_refusals: 50
 
+# What one caller with a token (see auth below) may use over a rolling window, across all
+# their sessions: a new connection is a new session, but not a new caller. Held as well as
+# the session's budget; whichever runs out first refuses, and says which. The same four
+# limits; needs an auth section, since only callers with a token have one.
+# identity_budgets:
+#   window_hours: 24            # "in any 24 hours"
+#   max_queries: 500
+#   max_refusals: 50
+
 # The key for hmac masks (see profiles below), shared by every profile. Whoever has it can
 # check guesses against masked values, so set it from the environment. The default after :-
 # is for the local demo stack only: never use it anywhere else.

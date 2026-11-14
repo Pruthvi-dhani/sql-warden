@@ -700,11 +700,14 @@ $ uv run sql-warden --config warden.example.yaml check "select id, name from pro
   would run: SELECT id, name FROM public.products LIMIT 51
 ```
 
-#### Budgets outlive the server
+#### Budgets outlive the server, and are shared by every server
 
-The audit log already records what every request used, so it is where a budget is kept for
-good. A server counts in memory, and the first time it sees a session it reads what that
-session has used from the audit log: its queries that were sent to the database with their
+A server keeps budgets in the audit database, next to the log: what each session has used is
+one row there, charged in one locked transaction per request. Every server recording to that
+database charges the same rows, so a session (or a caller, below) gets no more by reaching
+another replica behind a load balancer, and requests arriving at once on different servers
+can't spend the same last query. The first time a session is charged, its row starts from
+what the audit log says it used: its queries that were sent to the database with their
 estimated costs and rows, and its counted refusals, under the same profile. So CLI calls
 given the same `--session` share one budget, though each is its own process:
 
@@ -720,14 +723,42 @@ session budget: 2 of 25 queries, 0.12 of 50,000 cost, 6 of 500 rows, 0 of 10 ref
 - **A name is one session for good.** Its budget never starts again, however old its
   records, so give each run its own name, say with the date in it.
 - **If the usage can't be read, nothing runs**: the query is refused with
-  `BUDGET_UNAVAILABLE`. A profile without limits never reads it.
+  `BUDGET_UNAVAILABLE`. A profile without limits never reads it, and keeps nothing there.
 - **An agent's session doesn't survive a restart anyway.** Over stdio the session is the
   server process, and over HTTP it is the connection, which a restarted server has forgotten:
-  the agent reconnects and gets a new session, with a new budget. Budgets per identity, which
-  close that, come with authentication (9.2, 9.3 on the [plan](docs/plan.md)).
-- **Servers don't share their counts while running.** Two processes using one session at the
-  same moment each count from what the audit log said when they first saw it, so between
-  them they can overspend. One shared store fixes that (9.3).
+  the agent reconnects and gets a new session, with a new budget. A caller with a token is
+  held to their own budget as well, which doesn't start again (next).
+- The tables are `session_usage` and `caller_charges`, created with `audit_events`. The role
+  servers connect to the audit database as needs to update them, which it doesn't need for
+  the log itself.
+
+#### Budgets per caller
+
+A session's budget starts afresh with every connection. A caller with a
+[token](#authentication) can also be held to a budget of their own, over a rolling window,
+across all their sessions: connecting again doesn't give them more.
+
+```yaml
+identity_budgets:           # for every caller with a token
+  window_hours: 24          # "in any 24 hours"; the default
+  max_queries: 500
+  max_refusals: 50
+profiles:
+  public:
+    identity_budgets:       # public's callers', merged with the above as budgets are
+      max_rows_returned: 5000
+```
+
+The limits are the session budget's four, counted the same way. A request is held to both
+budgets, its session's and its caller's, in one step: whichever runs out first refuses, and
+the refusal says which (`this session's budget is used up` or `web-agent's budget for any 24
+hours is used up`). Use counts while it is younger than the window, so a caller who reached a
+limit can go on once enough of their earlier use is older than that. Each result's `budget`
+has the caller's as `caller`, beside the session's, and so does `budget_status`.
+
+Only callers with a token have one, so `identity_budgets` needs an `auth` section:
+`config validate` says so rather than let it be ignored. A charge is kept as a row of
+`caller_charges`, and deleted once it is older than the window.
 
 ### Snowflake
 

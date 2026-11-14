@@ -128,6 +128,22 @@ class BudgetInfo(BaseModel):
     """Requests a check refused, dry runs included."""
     exhausted: str | None = None
     """The limit the session has reached, e.g. max_queries. Then nothing more runs in it."""
+    caller: "CallerBudgetInfo | None" = None
+    """The caller's budget over the window, across all their sessions: with a token, where
+    the profile sets one. Whichever runs out first refuses."""
+
+
+class CallerBudgetInfo(BaseModel):
+    identity: str
+    window_hours: float
+    """Use counts for this long: a budget for any 24 hours, say."""
+    queries: BudgetLine
+    total_cost: BudgetLine
+    rows_returned: BudgetLine
+    refusals: BudgetLine
+    exhausted: str | None = None
+    """The limit the caller has reached. Then nothing more runs for them, in any session,
+    until enough of their use is older than the window."""
 
 
 class BudgetResponse(BaseModel):
@@ -215,26 +231,42 @@ def json_value(value: object) -> Any:
     return str(value)
 
 
-def budget_info(status: BudgetStatus) -> BudgetInfo:
-    lines = {
+def _lines(lines: tuple[tuple[str, float, float | None], ...]) -> dict[str, BudgetLine]:
+    return {
         what: BudgetLine(
             used=_number(used),
             limit=limit,
             remaining=None if limit is None else _number(max(limit - used, 0)),
         )
-        for what, used, limit in status.lines()
+        for what, used, limit in lines
     }
-    return BudgetInfo(**lines, exhausted=status.exhausted)
+
+
+def budget_info(status: BudgetStatus) -> BudgetInfo:
+    caller = status.caller
+    theirs = (
+        None
+        if caller is None
+        else CallerBudgetInfo(
+            identity=caller.name,
+            window_hours=caller.window_hours,
+            **_lines(caller.lines()),
+            exhausted=caller.exhausted,
+        )
+    )
+    return BudgetInfo(**_lines(status.lines()), exhausted=status.exhausted, caller=theirs)
 
 
 def _number(value: float) -> float:
     return value if isinstance(value, int) else round(value, 2)
 
 
-def describe_budget(warden: Warden, session_id: str | None = None) -> BudgetResponse:
+def describe_budget(
+    warden: Warden, session_id: str | None = None, identity: str | None = None
+) -> BudgetResponse:
     """What budget_status returns. A session whose usage can't be read is a tool error."""
     try:
-        status = warden.budget_status(session_id)
+        status = warden.budget_status(session_id, identity)
     except SessionStoreError as exc:
         raise ToolError(f"this session's budget could not be read: {exc}") from exc
     return BudgetResponse(
@@ -377,8 +409,8 @@ def create_server(wardens: Warden | Mapping[str, Warden]) -> MCPServer:
         """What this session has used and what it has left: queries, their total estimated
         cost, rows returned and refusals. A limit that isn't set has no `limit`. Asking is
         free: it isn't a query, and is never refused."""
-        warden, _, session_id = caller(ctx)
-        return describe_budget(warden, session_id)
+        warden, identity, session_id = caller(ctx)
+        return describe_budget(warden, session_id, _name(identity))
 
     @server.tool(annotations=READ_ONLY)
     def list_tables(ctx: Context[Any, Any]) -> TablesResponse:

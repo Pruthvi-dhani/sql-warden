@@ -406,6 +406,7 @@ class TestMcp:
                 "rows_returned": {"used": 0, "limit": None, "remaining": None},
                 "refusals": {"used": 0, "limit": 5, "remaining": 5},
                 "exhausted": None,
+                "caller": None,  # no token, so no caller's budget
             },
         }
         assert ran["budget"]["queries"] == {"used": 1, "limit": 2, "remaining": 1}
