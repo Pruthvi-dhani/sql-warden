@@ -962,7 +962,7 @@ CLI.
   since each unauthenticated request is one audit write; tokens with scopes; and `/readyz`
   checking the provider (9.4).
 
-**9.3 Shared budget state across replicas** ✅ done
+**9.3 Shared budget state across replicas** ✅ done (`a84d945`)
 - `PostgresSessionStore` lives in the audit DB and uses atomic `UPDATE … RETURNING` counters,
   so budgets hold when N replicas serve the same session. Works with sticky sessions or the
   SDK's stateless HTTP mode.
@@ -1011,7 +1011,7 @@ CLI.
   warden's audit role needs UPDATE and DELETE on the two budget tables, which 9.6's
   INSERT-only role for `audit_events` must leave it.
 
-**9.4 Container image + health checks + metrics**
+**9.4 Container image + health checks + metrics** ✅ done
 - A multi-stage `Dockerfile` (non-root, slim). `/healthz` is the liveness check; `/readyz`
   checks that the warehouse and audit are reachable and the role is read-only. Prometheus
   `/metrics` covers requests and refusals by code, the cost histogram, latency and audit-write
@@ -1019,6 +1019,38 @@ CLI.
 - Tests: unit tests for the metrics counters. An integration test builds the image and runs it
   with Testcontainers against the warehouse and audit containers, then hits health, readiness
   and one MCP call.
+- As built, the image: two stages on `python:3.12-slim`, uv 0.11.32 copied into the build
+  stage only, dependencies installed from `uv.lock` before the source is copied (so a code
+  change doesn't reinstall them), the package installed as a wheel, not editable. The
+  runtime stage has the virtualenv and nothing else of the repo, runs as uid 10001 with no
+  shell or home, reads `/etc/sql-warden/warden.yaml`, and its `HEALTHCHECK` asks
+  `/healthz`. `--build-arg EXTRAS=snowflake` adds the Snowflake connector. 311 MB without
+  it. `.dockerignore` lets in only `pyproject.toml`, `uv.lock`, `README.md` and `src/`.
+- As built, metrics written by hand (`metrics.py`), not with `prometheus_client`: a few
+  counters, a gauge and two histograms need no dependency. Every label's values are bounded
+  (profiles from the config, checks and codes from the code); an identity is never one. The
+  Warden counts each request as it is answered, so a refusal for a failed audit write is
+  counted as what the caller got (`AUDIT_UNAVAILABLE`) and in
+  `sql_warden_audit_write_failures_total`. `RequireToken` counts what it turns away.
+- As built, the endpoints sit beside `/mcp` in an outer app, so they need no token and
+  aren't held to the MCP Host check: `/healthz` always, `/readyz` (the audit database
+  pings, and each profile's warehouse role still can't write, so a grant made after
+  startup shows up within 10 seconds; failures are named, their reasons only logged), and
+  `/metrics` where the server has metrics (`serve` always does). The README says to route
+  only `/mcp` through the public proxy.
+- As built, from 9.1's list: `server.max_concurrent_requests` (default 32) caps the worker
+  threads tool calls run in, so at most that many requests reach the warehouses at once;
+  more wait. `server.shutdown_grace_s` (default 30) is uvicorn's graceful-shutdown timeout.
+  A connection pool is still left: the Postgres engine opens a connection per query.
+- Tests: 24 unit (`test_metrics.py`: the text format, what the Warden counts, the
+  endpoints, readiness caching and its failures, the request cap, `serve`'s settings) and
+  4 that build the image and run it (`test_image.py`): non-root, health and readiness, an
+  agent's query and refusal with the metrics that follow, and a clean exit within 15
+  seconds of `SIGTERM`. The integration fixtures now also give each container's address on
+  Docker's bridge network, for one container to reach another.
+- Left for later: the readiness check doesn't ask the identity provider (API keys work
+  without it, so its outage shouldn't take the server out of rotation); base images are
+  pinned by tag, not digest; there is no image published anywhere.
 
 **9.5 Config validation & hot reload**
 - `sql-warden config validate` gains `--live`, which checks the policy against the live catalog

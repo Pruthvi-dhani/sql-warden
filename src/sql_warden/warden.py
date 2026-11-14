@@ -1,6 +1,7 @@
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 
 from sqlglot import exp
@@ -21,6 +22,7 @@ from sql_warden.config import (
     default_cost,
 )
 from sql_warden.engines import Engine, EngineError, Result, Table
+from sql_warden.metrics import Metrics
 from sql_warden.models import (
     Decision,
     MaskedOutput,
@@ -98,6 +100,7 @@ class Warden:
         identity_budget: IdentityBudgetConfig | None = None,
         sessions: SessionStore | None = None,
         default_schema: str | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         if dialect not in DIALECTS:
             raise ValueError(
@@ -105,6 +108,8 @@ class Warden:
             )
         self.engine = engine
         self.audit = audit
+        self.metrics = metrics
+        """Where what this Warden answers is counted, for /metrics; None to count nothing."""
         self.dialect = dialect
         """The SQL dialect the checks read queries in: the warehouse's."""
         self.default_schema = default_schema or DEFAULT_SCHEMAS[dialect]
@@ -191,6 +196,17 @@ class Warden:
         identity: str | None = None,
     ) -> Decision:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
+        with self._busy():
+            return self._check(sql, client=client, session_id=session_id, identity=identity)
+
+    def _check(
+        self,
+        sql: str,
+        *,
+        client: str | None,
+        session_id: str | None,
+        identity: str | None,
+    ) -> Decision:
         started = time.perf_counter()
         request = uuid.uuid4()
         decision = self._decide(sql, session_id, identity=identity, dry_run=True, request=request)[
@@ -215,6 +231,29 @@ class Warden:
         client names the software that asked (the MCP client, or cli), and identity who
         did, when the caller authenticated; both go in the audit record. session_id is the
         session the request belongs to: without one, this Warden's own."""
+        with self._busy():
+            return self._run(sql, client=client, session_id=session_id, identity=identity)
+
+    @contextmanager
+    def _busy(self) -> Iterator[None]:
+        """While a request is being answered: the in-flight gauge counts it."""
+        if self.metrics is None:
+            yield
+            return
+        self.metrics.in_flight.add(1)
+        try:
+            yield
+        finally:
+            self.metrics.in_flight.add(-1)
+
+    def _run(
+        self,
+        sql: str,
+        *,
+        client: str | None,
+        session_id: str | None,
+        identity: str | None,
+    ) -> QueryOutcome:
         started = time.perf_counter()
         request = uuid.uuid4()
         decision, columns = self._decide(sql, session_id, identity=identity, request=request)
@@ -232,7 +271,8 @@ class Warden:
         except Exception as exc:
             # Nothing can be recorded, so nothing runs, and there is no record to write.
             refused = _withheld(decision, f"{_audit_problem(exc)}; the query was not run")
-            return QueryOutcome(self._with_budget(refused), result=None)
+            withheld = QueryOutcome(self._with_budget(refused), result=None)
+            return self._observed(withheld, started, dry_run=False, audit_failed=True)
         try:
             result = self.engine.execute(decision.sql, tag=_tag(request))
             # Known only now, so charged now: the query that takes a session past its rows
@@ -450,8 +490,32 @@ class Warden:
                 f"{_audit_problem(exc)}; {consequence}",
                 duration_ms=(time.perf_counter() - writing) * 1000,
             )
-            return QueryOutcome(refused, result=None)
-        return replace(outcome, decision=replace(outcome.decision, audit_id=event.id))
+            withheld = QueryOutcome(refused, result=None)
+            return self._observed(withheld, started, dry_run=dry_run, audit_failed=True)
+        recorded = replace(outcome, decision=replace(outcome.decision, audit_id=event.id))
+        return self._observed(recorded, started, dry_run=dry_run)
+
+    def _observed(
+        self,
+        outcome: QueryOutcome,
+        started: float,
+        *,
+        dry_run: bool,
+        audit_failed: bool = False,
+    ) -> QueryOutcome:
+        """outcome, counted in the metrics as it is answered."""
+        if self.metrics is not None:
+            if audit_failed:
+                self.metrics.audit_failures.inc()
+            self.metrics.observe(
+                outcome.decision,
+                profile=self.profile,
+                dry_run=dry_run,
+                duration_s=time.perf_counter() - started,
+                rows=None if outcome.result is None else len(outcome.result.rows),
+                failed=outcome.error is not None,
+            )
+        return outcome
 
     def _event(
         self,

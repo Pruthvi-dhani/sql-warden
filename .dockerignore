@@ -1,0 +1,7 @@
+# Only what the image is built from: pyproject.toml, uv.lock, README.md and src/.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+**/__pycache__

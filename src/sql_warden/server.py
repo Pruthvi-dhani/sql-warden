@@ -9,11 +9,12 @@ the caller is and which profile its queries are checked against.
 import datetime
 import hashlib
 import json
+import logging
 import secrets
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager, suppress
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -27,6 +28,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.routing import BaseRoute, Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sql_warden import __version__
@@ -34,6 +38,8 @@ from sql_warden.audit import AuditEvent, AuditSink
 from sql_warden.auth import Authenticator, AuthError, Identity
 from sql_warden.config import IMPLICIT_PROFILE, LOOPBACK_ONLY, is_loopback
 from sql_warden.engines import EngineError, Table
+from sql_warden.metrics import CONTENT_TYPE as METRICS_TYPE
+from sql_warden.metrics import Metrics
 from sql_warden.models import Decision, QueryOutcome
 from sql_warden.sessions import MAX_SESSIONS, BudgetStatus, SessionStoreError
 from sql_warden.warden import Warden, trace_step
@@ -519,6 +525,47 @@ def describe_one_table(warden: Warden, name: str) -> TableResponse:
     return TableResponse(profile=warden.profile, table=table_info(warden, table))
 
 
+NO_STORE = {"Cache-Control": "no-store"}
+READY_FOR_S = 10.0
+"""How long a readiness answer is reused: probes come every few seconds, and asking every
+profile's role each time would be a load of its own."""
+log = logging.getLogger("sql_warden.server")
+
+
+class Readiness:
+    """Whether the server can answer: each check raises if what it looks at can't be used.
+    The answer is kept READY_FOR_S seconds, and reasons are logged rather than sent: whoever
+    can reach /readyz learns only which checks fail."""
+
+    def __init__(
+        self,
+        checks: Mapping[str, Callable[[], None]],
+        *,
+        ready_for_s: float = READY_FOR_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._checks = dict(checks)
+        self._ready_for_s = ready_for_s
+        self._clock = clock
+        self._answer: tuple[float, list[str]] | None = None
+        self._lock = anyio.Lock()
+
+    async def failing(self) -> list[str]:
+        async with self._lock:  # one probe asks; any at the same time wait for its answer
+            now = self._clock()
+            if self._answer is not None and now - self._answer[0] < self._ready_for_s:
+                return list(self._answer[1])
+            failing = []
+            for name, check in self._checks.items():
+                try:
+                    await anyio.to_thread.run_sync(check)
+                except Exception as exc:
+                    log.warning("not ready: %s: %s", name, exc)
+                    failing.append(name)
+            self._answer = (self._clock(), failing)
+            return list(failing)
+
+
 def create_http_app(
     wardens: Warden | Mapping[str, Warden],
     *,
@@ -528,8 +575,16 @@ def create_http_app(
     allowed_origins: Sequence[str] = (),
     max_sessions: int = MAX_SESSIONS,
     session_idle_s: float = SESSION_IDLE_S,
+    metrics: Metrics | None = None,
+    readiness: Readiness | None = None,
+    max_concurrent_requests: int | None = None,
 ) -> Starlette:
     """The MCP server as an ASGI app, serving Streamable HTTP at /mcp.
+
+    Beside it, needing no token: /healthz (the process answers), /readyz (readiness's checks
+    pass; without any, the same as /healthz) and, given metrics, /metrics for Prometheus.
+    max_concurrent_requests caps the worker threads requests are answered in, so no more
+    than that many reach the databases at once; the rest wait their turn.
 
     Without an authenticator it serves one Warden, on loopback only. With one, every request
     must carry a bearer token (see RequireToken), wardens may be one per profile, and host
@@ -575,8 +630,44 @@ def create_http_app(
     )
     if authenticator is not None:
         first = wardens if isinstance(wardens, Warden) else next(iter(wardens.values()))
-        app.add_middleware(RequireToken, authenticator=authenticator, audit=first.audit)
-    return app
+        app.add_middleware(
+            RequireToken, authenticator=authenticator, audit=first.audit, metrics=metrics
+        )
+    return _with_health(app, metrics, readiness or Readiness({}), max_concurrent_requests)
+
+
+def _with_health(
+    mcp: Starlette, metrics: Metrics | None, readiness: Readiness, workers: int | None
+) -> Starlette:
+    async def healthz(request: Request) -> Response:
+        return PlainTextResponse("ok\n", headers=NO_STORE)
+
+    async def readyz(request: Request) -> Response:
+        failing = await readiness.failing()
+        body = {"ready": not failing, "failing": failing}
+        return JSONResponse(body, status_code=503 if failing else 200, headers=NO_STORE)
+
+    async def scrape(request: Request) -> Response:
+        assert metrics is not None
+        return Response(metrics.render(), media_type=METRICS_TYPE, headers=NO_STORE)
+
+    routes: list[BaseRoute] = [
+        Route("/healthz", healthz, methods=["GET"]),
+        Route("/readyz", readyz, methods=["GET"]),
+    ]
+    if metrics is not None:
+        routes.append(Route("/metrics", scrape, methods=["GET"]))
+    routes.append(Mount("/", app=mcp))
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        if workers is not None:
+            # Tool calls run in these threads, and each holds a database connection.
+            anyio.to_thread.current_default_thread_limiter().total_tokens = workers
+        async with mcp.router.lifespan_context(mcp):
+            yield
+
+    return Starlette(routes=routes, lifespan=lifespan)
 
 
 REALM = "sql-warden"
@@ -593,10 +684,18 @@ class RequireToken:
     known, or done.
     """
 
-    def __init__(self, app: ASGIApp, *, authenticator: Authenticator, audit: AuditSink) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        authenticator: Authenticator,
+        audit: AuditSink,
+        metrics: Metrics | None = None,
+    ) -> None:
         self.app = app
         self.authenticator = authenticator
         self.audit = audit
+        self.metrics = metrics
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -609,6 +708,8 @@ class RequireToken:
                 raise AuthError("this server needs a token: send Authorization: Bearer <token>")
             identity = await anyio.to_thread.run_sync(self.authenticator.authenticate, token)
         except AuthError as exc:
+            if self.metrics is not None:
+                self.metrics.auth_refusals.inc(code=str(exc.code))
             await anyio.to_thread.run_sync(self._record, scope, exc, started)
             await _refuse(send, exc, asked=token is not None)
             return

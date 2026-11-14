@@ -346,6 +346,11 @@ class ServerConfig(_Section):
     """Web pages that may call the server from a browser, e.g. [https://portal.example.com].
     Requests from any other page are refused; requests from outside a browser carry no
     Origin and are not affected."""
+    max_concurrent_requests: int = Field(default=32, ge=1, le=1000)
+    """Requests answered at once; more wait their turn. Each one being answered can hold a
+    connection to the warehouse, so this bounds those too."""
+    shutdown_grace_s: int = Field(default=30, ge=0, le=600)
+    """On SIGTERM, how long requests already being answered get to finish."""
 
     @field_validator("allowed_hosts")
     @classmethod

@@ -69,6 +69,8 @@ server:
   port: 8000
   # allowed_hosts: [warden.example.com]
   # allowed_origins: [https://portal.example.com]   # web pages that may call it
+  max_concurrent_requests: 32  # answered at once; more wait. Each can hold a warehouse connection
+  shutdown_grace_s: 30         # on SIGTERM, how long requests in progress get to finish
 
 # Who may call the server over HTTP. With this section every HTTP request needs
 # `Authorization: Bearer <token>`, and one server serves every profile: each request gets its

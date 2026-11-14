@@ -2,7 +2,7 @@ import datetime
 import json
 import logging
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ from sql_warden.config import (
 from sql_warden.engines import Engine, EngineError
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.engines.snowflake import BYTES, SnowflakeEngine
+from sql_warden.metrics import Metrics
 from sql_warden.pipeline.budget import window
 from sql_warden.pipeline.cost import format_amount, format_cost
 from sql_warden.profiles import (
@@ -56,6 +57,7 @@ from sql_warden.render import (
     format_tables,
 )
 from sql_warden.server import (
+    Readiness,
     create_http_app,
     create_server,
     describe,
@@ -218,6 +220,7 @@ def build_warden(
     *,
     audit: AuditSink | None = None,
     serving: bool = False,
+    metrics: Metrics | None = None,
 ) -> Warden:
     """A Warden for one profile, recording to audit (by default, the configured audit database).
 
@@ -255,6 +258,7 @@ def build_warden(
         budget=active.budget,
         identity_budget=active.identity_budget,
         sessions=sessions,
+        metrics=metrics,
     )
     if serving:
         vet_role(warden, active.dsn)
@@ -516,16 +520,39 @@ def serve(
             )
         _serve_authenticated(config, config.auth, host, port)
         return
-    warden = build_warden(config, profile, serving=True)
     if transport == "stdio":
-        create_server(warden).run("stdio")
+        create_server(build_warden(config, profile, serving=True)).run("stdio")
         return
+    metrics = Metrics()
+    warden = build_warden(config, profile, serving=True, metrics=metrics)
     host, port = host or config.server.host, port or config.server.port
     try:
-        app = create_http_app(warden, host=host)
+        app = create_http_app(
+            warden,
+            host=host,
+            metrics=metrics,
+            readiness=readiness([warden]),
+            max_concurrent_requests=config.server.max_concurrent_requests,
+        )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    _listen(app, host, port, f"profile {warden.profile}")
+    _listen(app, host, port, f"profile {warden.profile}", config.server.shutdown_grace_s)
+
+
+def readiness(wardens: Iterable[Warden]) -> Readiness:
+    """What /readyz checks: the audit database answers, and every profile's warehouse
+    answers as a role that still can't write. Grants can change while a server runs."""
+    wardens = list(wardens)
+    checks: dict[str, Callable[[], None]] = {"audit": wardens[0].audit.ping}
+    for warden in wardens:
+
+        def read_only(engine: Engine = warden.engine) -> None:
+            report = engine.role()
+            if not report.read_only:
+                raise RuntimeError(f"role {report.role} can now change the warehouse")
+
+        checks[f"warehouse:{warden.profile}"] = read_only
+    return Readiness(checks)
 
 
 def _serve_authenticated(
@@ -533,8 +560,12 @@ def _serve_authenticated(
 ) -> None:
     profiles = list(config.profiles or {})
     audit = open_audit(config)  # one audit log for every profile
+    metrics = Metrics()
     # Every profile is served, so every profile's role must be one that can't write.
-    wardens = {name: build_warden(config, name, audit=audit, serving=True) for name in profiles}
+    wardens = {
+        name: build_warden(config, name, audit=audit, serving=True, metrics=metrics)
+        for name in profiles
+    }
     host, port = host or config.server.host, port or config.server.port
     try:
         app = create_http_app(
@@ -543,6 +574,9 @@ def _serve_authenticated(
             authenticator=Authenticator(auth, profiles),
             allowed_hosts=config.server.allowed_hosts,
             allowed_origins=config.server.allowed_origins,
+            metrics=metrics,
+            readiness=readiness(wardens.values()),
+            max_concurrent_requests=config.server.max_concurrent_requests,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -553,17 +587,26 @@ def _serve_authenticated(
             "through the proxy.",
             err=True,
         )
-    _listen(app, host, port, f"profiles {', '.join(profiles)}, to callers with a token")
+    serving = f"profiles {', '.join(profiles)}, to callers with a token"
+    _listen(app, host, port, serving, config.server.shutdown_grace_s)
 
 
-def _listen(app: Any, host: str, port: int, serving: str) -> None:
+def _listen(app: Any, host: str, port: int, serving: str, grace_s: int) -> None:
     url_host = f"[{host}]" if ":" in host else host
     click.echo(
         f"sql-warden MCP server on http://{url_host}:{port}/mcp, {serving} (Ctrl+C stops it)",
         err=True,
     )
-    # No Server header: what it runs on is nobody's business who can reach the port.
-    uvicorn.run(app, host=host, port=port, log_level="warning", server_header=False)
+    # No Server header: what it runs on is nobody's business who can reach the port. On
+    # SIGTERM uvicorn stops taking connections and lets the ones it has finish, for grace_s.
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        server_header=False,
+        timeout_graceful_shutdown=grace_s,
+    )
 
 
 FOLLOW_INTERVAL_S = 1.0

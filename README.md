@@ -432,6 +432,47 @@ server:
   allowed_hosts: [warden.example.com]
 ```
 
+#### Running it as a service
+
+The repository's `Dockerfile` builds an image of the HTTP server: two stages, so the image
+holds the installed package and its dependencies but not uv or the source tree, running as
+an unprivileged user of its own (uid 10001).
+
+```bash
+docker build -t sql-warden .                                  # Postgres only
+docker build -t sql-warden --build-arg EXTRAS=snowflake .     # with the Snowflake engine
+docker run -p 8000:8000 -v "$PWD/warden.yaml:/etc/sql-warden/warden.yaml:ro" sql-warden
+```
+
+It serves `serve --transport http --host 0.0.0.0`, so its config needs an `auth` section and
+`server.allowed_hosts`. Beside `/mcp` it answers three paths that need no token, for what
+runs it:
+
+| Path       | Answers                                                                                |
+|------------|----------------------------------------------------------------------------------------|
+| `/healthz` | `200 ok` while the process answers at all: the liveness probe                         |
+| `/readyz`  | `200` if the audit database answers and every profile's warehouse role answers and still can't write; otherwise `503` with the names of what fails (`audit`, `warehouse:public`), the reasons going to the log. Asked at most every 10 seconds |
+| `/metrics` | Prometheus's text format                                                               |
+
+| Metric                                   | What it counts                                                    |
+|------------------------------------------|-------------------------------------------------------------------|
+| `sql_warden_requests_total`              | requests answered, by `profile`, `kind` (query, check) and `decision` |
+| `sql_warden_refusals_total`              | refusals, by `profile`, the `check` that refused, and `code`      |
+| `sql_warden_request_duration_seconds`    | a histogram of how long requests took, by `profile` and `kind`    |
+| `sql_warden_estimated_cost`              | a histogram of the planner's estimates, by `profile`              |
+| `sql_warden_rows_returned_total`         | rows returned, by `profile`                                       |
+| `sql_warden_audit_write_failures_total`  | requests answered `AUDIT_UNAVAILABLE`                             |
+| `sql_warden_auth_refusals_total`         | HTTP requests turned away before reaching a profile, by `code`    |
+| `sql_warden_requests_in_flight`          | requests being answered right now                                 |
+
+No label holds anything a caller chooses (an identity, say), so no caller can make the set
+grow. Route only `/mcp` through the public proxy: the other three are for the cluster.
+
+On `SIGTERM` the server stops taking connections and gives the requests it has
+`server.shutdown_grace_s` (30) seconds to finish. `server.max_concurrent_requests` (32) is how
+many requests it answers at once; the rest wait. Each one being answered can hold a
+connection to a warehouse, so this bounds those too.
+
 ### Claude Code
 
 Claude Code can use sql-warden as a tool. It starts `sql-warden serve` itself over stdio, so
