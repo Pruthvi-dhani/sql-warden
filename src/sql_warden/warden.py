@@ -1,3 +1,4 @@
+import threading
 import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -101,6 +102,7 @@ class Warden:
         sessions: SessionStore | None = None,
         default_schema: str | None = None,
         metrics: Metrics | None = None,
+        session_id: str | None = None,
     ) -> None:
         if dialect not in DIALECTS:
             raise ValueError(
@@ -116,9 +118,12 @@ class Warden:
         """Where a table named without a schema is looked up, as the database stores it."""
         self.profile = profile
         """The profile this Warden serves. Fixed for its lifetime."""
-        self.session_id = new_session_id()
+        self.session_id = session_id or new_session_id()
         """The session of requests that don't name one: this Warden's own, as long as it
-        lives. For the CLI and a stdio server that is the process, which serves one caller."""
+        lives. For the CLI and a stdio server that is the process, which serves one caller.
+        A Warden built by a reload takes over the one it replaces."""
+        self._in_flight = 0
+        self._in_flight_lock = threading.Lock()
         self.access = access
         self.masks: dict[MaskedColumn, MaskRule] = dict(masks or {})
         """The profile's masked columns: (schema, table, column) → its rule."""
@@ -236,15 +241,33 @@ class Warden:
 
     @contextmanager
     def _busy(self) -> Iterator[None]:
-        """While a request is being answered: the in-flight gauge counts it."""
-        if self.metrics is None:
-            yield
-            return
-        self.metrics.in_flight.add(1)
+        """While a request is being answered: counted, and in the in-flight gauge."""
+        with self._in_flight_lock:
+            self._in_flight += 1
+        if self.metrics is not None:
+            self.metrics.in_flight.add(1)
         try:
             yield
         finally:
-            self.metrics.in_flight.add(-1)
+            if self.metrics is not None:
+                self.metrics.in_flight.add(-1)
+            with self._in_flight_lock:
+                self._in_flight -= 1
+
+    @property
+    def idle(self) -> bool:
+        """True while no request is being answered."""
+        with self._in_flight_lock:
+            return self._in_flight == 0
+
+    def close(self) -> None:
+        """Close what this Warden holds open: its session store's connection and its
+        engine's session, where they keep one. Not the audit sink, which it was given. A
+        request that comes after opens them again."""
+        for held in (self.sessions, self.engine):
+            close = getattr(held, "close", None)
+            if callable(close):
+                close()
 
     def _run(
         self,

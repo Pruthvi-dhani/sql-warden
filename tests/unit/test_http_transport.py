@@ -339,7 +339,8 @@ class TestServerConfig:
         outcome = CliRunner().invoke(cli, ["--config", policy, "serve", "--transport", "http"])
         assert outcome.exit_code == 0, outcome.output
         assert outcome.stderr.splitlines() == [
-            "sql-warden MCP server on http://localhost:9321/mcp, profile all (Ctrl+C stops it)"
+            "sql-warden MCP server on http://localhost:9321/mcp, profile all (Ctrl+C stops "
+            "it, SIGHUP reloads the policy)"
         ]
         (run,) = served_with
         assert (run["host"], run["port"]) == ("localhost", 9321)

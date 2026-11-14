@@ -1011,7 +1011,7 @@ CLI.
   warden's audit role needs UPDATE and DELETE on the two budget tables, which 9.6's
   INSERT-only role for `audit_events` must leave it.
 
-**9.4 Container image + health checks + metrics** ✅ done
+**9.4 Container image + health checks + metrics** ✅ done (`2d6bc29`)
 - A multi-stage `Dockerfile` (non-root, slim). `/healthz` is the liveness check; `/readyz`
   checks that the warehouse and audit are reachable and the role is read-only. Prometheus
   `/metrics` covers requests and refusals by code, the cost histogram, latency and audit-write
@@ -1052,12 +1052,61 @@ CLI.
   without it, so its outage shouldn't take the server out of rotation); base images are
   pinned by tag, not digest; there is no image published anywhere.
 
-**9.5 Config validation & hot reload**
+**9.5 Config validation & hot reload** ✅ done
 - `sql-warden config validate` gains `--live`, which checks the policy against the live catalog
   (approved columns that no longer exist, masks on unknown columns). A policy reload on SIGHUP
   is atomic; a bad config keeps the old policy and logs the error.
 - Tests: unit tests for the reload swap and for rejecting a bad config. An integration test for
   catalog drift.
+- As built, drift: `check_role` (8.1) now also compares each profile with the catalog its
+  role sees, from the same read: tables and listed columns the profile allows that aren't
+  there (`missing`), and masked columns that aren't (`unmasked`). Names are compared as
+  stored, as the access check compares them, so a Snowflake profile in lower case shows up
+  too. Masks on columns the *profile* can't read were already config errors (5.1); this is
+  the catalog's side.
+- As built, what drift does: `config validate --live` lists it under each profile and exits
+  1, with its own message beside 8.1's. A server still **starts** with drift and warns on
+  stderr, at startup and on reload: a migration that drops a column shouldn't take a server
+  down, and queries for what is gone are refused anyway. A masked column that is gone gets
+  the louder warning, because it may have been renamed, and then a profile that allows the
+  whole table reads it under its new name unmasked. The integration test shows exactly that
+  on Postgres.
+- As built, the reload: what a server answers with is now a `Policy` (its Wardens, and the
+  `Authenticator` when there is one) held by a `LivePolicy`, which a reload swaps in one
+  step. `RequireToken` reads the policy once per request, checks the token against it and
+  leaves it in the request's scope, and the tool answers from that same policy, so a request
+  is never authenticated by one policy and answered by another. `Readiness` takes its checks
+  from the policy served now. `create_server` and `create_http_app` take a `LivePolicy`
+  where they took Wardens.
+- As built, what a reload checks (`Reloader`, `reload.py`; the CLI's `policy_builder`): the
+  file read again with the command-line overrides applied again, every profile's Warden
+  built and its role looked at (8.1's refusal, so a profile whose role can now write keeps
+  the old policy), and the authenticator built. Only then the swap. Refused, keeping the old
+  policy: any of those failing, a changed `audit` or `server` section, and adding or
+  removing `auth`, which change what was opened at startup. A server of one profile keeps
+  the profile it started with, whatever `default_profile` now says, and the Warden's own
+  session carries over so its budget does too. Every failure is logged with the message a
+  failed start would print (config errors carry no input values); a bug only by its type.
+- As built, around it: SIGHUP is taken only by `serve --transport http`, only while it runs
+  (the handler before is put back), and a reload runs on a thread of its own so the event
+  loop never waits for a warehouse. Signals that arrive during a reload make one more,
+  so the file as it is after the last one is what loads. Replaced Wardens are closed (their
+  session store's connection, Snowflake's session) once their requests finish, after a 5 s
+  settle and at most 120 s. New metrics `sql_warden_config_reloads_total{outcome}` and
+  `sql_warden_config_last_reload_successful`. What sql-warden logs now goes to stderr while
+  `serve` runs over HTTP.
+- Tests: 35 unit (`test_reload.py`: what the catalog lacks, `--live` and `serve` with drift,
+  `LivePolicy`, the `Reloader` with stand-ins: refused builds, a bug's message kept out of the
+  log, a held request delaying the close, signals during a reload, a real SIGHUP to the test
+  process; and `serve`'s reloads over real local HTTP: a key revoked and one issued, a
+  profile's rules changed and one added, a broken file, a role that can now write, each
+  restart-only change, one profile kept with its session, the flags still winning), 2 on
+  Postgres (`test_reload_on_postgres.py`: a column renamed, one dropped and a grant revoked
+  under a policy; a real `serve` process given a new key and then a broken file by SIGHUP),
+  and 1 more for the image (`docker kill --signal HUP`).
+- Left for later: watching the file instead of waiting for a signal; reloading over stdio
+  (its agent restarts it); the catalog compared only at startup and reload, not as it
+  changes.
 
 **9.6 Hardened audit**
 - Deployment SQL for an INSERT-only warden role on `audit_events` (no UPDATE/DELETE) and a

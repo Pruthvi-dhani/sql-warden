@@ -142,6 +142,8 @@ class TestWhatIsCounted:
             "sql_warden_audit_write_failures_total",
             "sql_warden_auth_refusals_total",
             "sql_warden_requests_in_flight",
+            "sql_warden_config_reloads_total",
+            "sql_warden_config_last_reload_successful",
         ]
         assert "sql_warden_info 1" in text.splitlines()
 

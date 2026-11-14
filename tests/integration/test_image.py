@@ -134,6 +134,46 @@ async def test_an_agent_with_a_token_is_answered(
     assert 'sql_warden_auth_refusals_total{code="UNAUTHENTICATED"} 1' in lines
 
 
+def test_it_reloads_its_policy_on_sighup(
+    image: str, config: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    # Its own copy of the policy, so the module's server keeps the one it has.
+    own = tmp_path_factory.mktemp("reload") / "warden.yaml"
+    own.write_text(config.read_text())
+    own.chmod(0o644)
+    container = _started(image, own)
+    try:
+        status = _get(_url(container, "/readyz"))[0]
+        assert status == 200
+        second = new_api_key()
+        text = own.read_text().replace(key_hash(KEY), key_hash(second))
+        own.write_text(text)  # in place: the container sees the file it mounted change
+        container.get_wrapped_container().kill(signal="SIGHUP")
+
+        def answer(key: str) -> int:
+            request = urllib.request.Request(
+                _url(container, "/mcp"),
+                data=b"{}",
+                method="POST",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    return int(response.status)
+            except urllib.error.HTTPError as exc:
+                return exc.code
+
+        deadline = time.monotonic() + 30
+        while answer(second) == 401:
+            assert time.monotonic() < deadline, container.get_logs()
+            time.sleep(0.2)
+        assert answer(KEY) == 401
+        status, metrics = _get(_url(container, "/metrics"))
+        assert 'sql_warden_config_reloads_total{outcome="applied"} 1' in metrics.splitlines()
+    finally:
+        container.stop()
+
+
 def test_it_stops_cleanly_on_sigterm(image: str, config: Path) -> None:
     container = _started(image, config)
     wrapped = container.get_wrapped_container()

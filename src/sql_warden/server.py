@@ -11,11 +11,14 @@ import hashlib
 import json
 import logging
 import secrets
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Annotated, Any
 
 import anyio.to_thread
@@ -353,38 +356,89 @@ def instructions(profile: str) -> str:
 
 IDENTITY = "sql_warden.identity"
 """Where RequireToken leaves the caller's Identity in the request's ASGI scope."""
+POLICY = "sql_warden.policy"
+"""And the Policy it checked the caller's token against, which answers the request."""
 MULTI_PROFILE = (
     "\nWhich profile your queries are checked against comes from your token, and every "
     "result names it. It can't be changed from here."
 )
 
 
-def create_server(wardens: Warden | Mapping[str, Warden]) -> MCPServer:
+@dataclass(frozen=True)
+class Policy:
+    """What a server answers with: one Warden, or one per profile (by name) when callers
+    authenticate, and the Authenticator that says who they are."""
+
+    wardens: Warden | Mapping[str, Warden]
+    authenticator: Authenticator | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.wardens, Warden):
+            if not self.wardens:
+                raise ValueError("a server needs at least one profile to serve")
+            object.__setattr__(self, "wardens", MappingProxyType(dict(self.wardens)))
+
+    @property
+    def all(self) -> tuple[Warden, ...]:
+        return (self.wardens,) if isinstance(self.wardens, Warden) else tuple(self.wardens.values())
+
+    @property
+    def audit(self) -> AuditSink:
+        """Where requests turned away before reaching a profile are recorded."""
+        return self.all[0].audit
+
+    def warden_for(self, identity: Identity | None) -> Warden:
+        if isinstance(self.wardens, Warden):
+            return self.wardens
+        if identity is None or identity.profile not in self.wardens:
+            # RequireToken lets no such request through; this is the last line.
+            raise ToolError("this server answers only requests that carry a token")
+        return self.wardens[identity.profile]
+
+
+class LivePolicy:
+    """The Policy a running server answers with, which a reload replaces whole. A request
+    reads it once, so it is answered by the policy before a reload or the one after, never
+    by parts of both."""
+
+    def __init__(self, policy: Policy) -> None:
+        self._policy = policy
+        self._lock = threading.Lock()
+
+    @property
+    def current(self) -> Policy:
+        return self._policy
+
+    def swap(self, policy: Policy) -> Policy:
+        """Answer with policy from now on, and return the one it replaces. It must serve the
+        way the current one does: one profile or every profile, with tokens or without."""
+        with self._lock:
+            old = self._policy
+            if (policy.authenticator is None) != (old.authenticator is None):
+                raise ValueError("a reload can't turn authentication on or off")
+            if isinstance(policy.wardens, Warden) != isinstance(old.wardens, Warden):
+                raise ValueError("a reload can't change between one profile and every profile")
+            self._policy = policy
+            return old
+
+
+def create_server(served: Warden | Mapping[str, Warden] | LivePolicy) -> MCPServer:
     """The MCP tools, for one Warden, or for one per profile (by name) when callers
-    authenticate: then each request is answered by its caller's profile's Warden."""
+    authenticate: then each request is answered by its caller's profile's Warden. Given a
+    LivePolicy, each request is answered by whatever policy it holds then."""
+    live = served if isinstance(served, LivePolicy) else LivePolicy(Policy(served))
     nonce = secrets.token_hex(16)
-    if isinstance(wardens, Warden):
-        only = wardens
-        pick: Callable[[Identity | None], Warden] = lambda identity: only  # noqa: E731
-        text = instructions(only.profile)
-    else:
-        by_profile = dict(wardens)
-        if not by_profile:
-            raise ValueError("a server needs at least one profile to serve")
-
-        def pick(identity: Identity | None) -> Warden:
-            if identity is None or identity.profile not in by_profile:
-                # RequireToken lets no such request through; this is the last line.
-                raise ToolError("this server answers only requests that carry a token")
-            return by_profile[identity.profile]
-
-        text = INSTRUCTIONS + MULTI_PROFILE
+    first = live.current.wardens
+    text = (
+        instructions(first.profile) if isinstance(first, Warden) else INSTRUCTIONS + MULTI_PROFILE
+    )
     server = MCPServer("sql-warden", version=__version__, instructions=text)
 
     def caller(ctx: Context[Any, Any]) -> tuple[Warden, Identity | None, str | None]:
         """Who is asking: the Warden for their profile, their identity, their session."""
         identity = identity_of(ctx)
-        return pick(identity), identity, session_of(ctx, identity, nonce=nonce)
+        policy = policy_of(ctx) or live.current
+        return policy.warden_for(identity), identity, session_of(ctx, identity, nonce=nonce)
 
     @server.tool(annotations=READ_ONLY)
     def run_query(sql: str, ctx: Context[Any, Any]) -> Annotated[CallToolResult, QueryResponse]:
@@ -443,6 +497,13 @@ def identity_of(ctx: Context[Any, Any]) -> Identity | None:
     scope = getattr(ctx.request_context.request, "scope", None)
     identity = scope.get(IDENTITY) if isinstance(scope, dict) else None
     return identity if isinstance(identity, Identity) else None
+
+
+def policy_of(ctx: Context[Any, Any]) -> Policy | None:
+    """The policy RequireToken checked this request's token against, if it did."""
+    scope = getattr(ctx.request_context.request, "scope", None)
+    policy = scope.get(POLICY) if isinstance(scope, dict) else None
+    return policy if isinstance(policy, Policy) else None
 
 
 def client_name(ctx: Context[Any, Any]) -> str | None:
@@ -539,12 +600,17 @@ class Readiness:
 
     def __init__(
         self,
-        checks: Mapping[str, Callable[[], None]],
+        checks: Mapping[str, Callable[[], None]] | Callable[[], Mapping[str, Callable[[], None]]],
         *,
         ready_for_s: float = READY_FOR_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._checks = dict(checks)
+        """checks, or a function giving them as they are now (a reload changes them)."""
+        if callable(checks):
+            self._checks = checks
+        else:
+            fixed = dict(checks)
+            self._checks = lambda: fixed
         self._ready_for_s = ready_for_s
         self._clock = clock
         self._answer: tuple[float, list[str]] | None = None
@@ -556,7 +622,7 @@ class Readiness:
             if self._answer is not None and now - self._answer[0] < self._ready_for_s:
                 return list(self._answer[1])
             failing = []
-            for name, check in self._checks.items():
+            for name, check in self._checks().items():
                 try:
                     await anyio.to_thread.run_sync(check)
                 except Exception as exc:
@@ -567,7 +633,7 @@ class Readiness:
 
 
 def create_http_app(
-    wardens: Warden | Mapping[str, Warden],
+    served: Warden | Mapping[str, Warden] | LivePolicy,
     *,
     host: str = "127.0.0.1",
     authenticator: Authenticator | None = None,
@@ -598,7 +664,17 @@ def create_http_app(
     open at once (one more is answered 503 until one closes), and one that sends nothing
     for session_idle_s is closed. Queries run in worker threads, so a slow one holds up
     nobody else's.
+
+    Given a LivePolicy instead of Wardens, it carries the authenticator too, and a reload
+    that swaps it changes who may call and what they get without a restart.
     """
+    if isinstance(served, LivePolicy):
+        if authenticator is not None:
+            raise ValueError("a LivePolicy carries its own authenticator")
+        live = served
+    else:
+        live = LivePolicy(Policy(served, authenticator))
+    wardens, authenticator = live.current.wardens, live.current.authenticator
     if authenticator is None:
         if not isinstance(wardens, Warden):
             raise ValueError(
@@ -621,7 +697,7 @@ def create_http_app(
         + [form for name in allowed_hosts for form in (name, f"{name}:*")],
         allowed_origins=[f"http://{name}:*" for name in names] + list(allowed_origins),
     )
-    app = create_server(wardens).streamable_http_app(
+    app = create_server(live).streamable_http_app(
         transport_security=security,
         host=host,
         max_request_body_size=MAX_REQUEST_BYTES,
@@ -629,10 +705,7 @@ def create_http_app(
         session_idle_timeout=session_idle_s,
     )
     if authenticator is not None:
-        first = wardens if isinstance(wardens, Warden) else next(iter(wardens.values()))
-        app.add_middleware(
-            RequireToken, authenticator=authenticator, audit=first.audit, metrics=metrics
-        )
+        app.add_middleware(RequireToken, policy=live, metrics=metrics)
     return _with_health(app, metrics, readiness or Readiness({}), max_concurrent_requests)
 
 
@@ -682,19 +755,16 @@ class RequireToken:
     that gives no profile) or 503 (the provider's keys couldn't be fetched), and is recorded
     in the audit log as refused by `auth`. Its body is never read: nothing it asked for is
     known, or done.
+
+    The token is checked against the policy as it is when the request arrives, and that
+    policy answers it: a key revoked by a reload lets in nothing that arrives after it.
     """
 
-    def __init__(
-        self,
-        app: ASGIApp,
-        *,
-        authenticator: Authenticator,
-        audit: AuditSink,
-        metrics: Metrics | None = None,
-    ) -> None:
+    def __init__(self, app: ASGIApp, *, policy: LivePolicy, metrics: Metrics | None = None) -> None:
+        if policy.current.authenticator is None:
+            raise ValueError("RequireToken needs a policy with an authenticator")
         self.app = app
-        self.authenticator = authenticator
-        self.audit = audit
+        self.policy = policy
         self.metrics = metrics
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -703,14 +773,17 @@ class RequireToken:
             return
         started = time.perf_counter()
         token = _bearer(scope)
+        policy = self.policy.current
+        authenticator = policy.authenticator
+        assert authenticator is not None  # a swap can't take it away
         try:
             if token is None:
                 raise AuthError("this server needs a token: send Authorization: Bearer <token>")
-            identity = await anyio.to_thread.run_sync(self.authenticator.authenticate, token)
+            identity = await anyio.to_thread.run_sync(authenticator.authenticate, token)
         except AuthError as exc:
             if self.metrics is not None:
                 self.metrics.auth_refusals.inc(code=str(exc.code))
-            await anyio.to_thread.run_sync(self._record, scope, exc, started)
+            await anyio.to_thread.run_sync(self._record, policy.audit, scope, exc, started)
             await _refuse(send, exc, asked=token is not None)
             return
         # The transport keeps each connection to the caller who opened it, by this.
@@ -724,9 +797,10 @@ class RequireToken:
             )
         )
         scope[IDENTITY] = identity
+        scope[POLICY] = policy
         await self.app(scope, receive, send)
 
-    def _record(self, scope: Scope, refusal: AuthError, started: float) -> None:
+    def _record(self, audit: AuditSink, scope: Scope, refusal: AuthError, started: float) -> None:
         duration_ms = (time.perf_counter() - started) * 1000
         step = {
             "check": "auth",
@@ -749,7 +823,7 @@ class RequireToken:
             identity=refusal.who,
         )
         with suppress(Exception):  # refused either way, and nothing was done to need a record
-            self.audit.record(event)
+            audit.record(event)
 
 
 def _header(scope: Scope, name: bytes) -> str | None:

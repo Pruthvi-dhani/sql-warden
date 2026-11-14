@@ -464,6 +464,8 @@ runs it:
 | `sql_warden_audit_write_failures_total`  | requests answered `AUDIT_UNAVAILABLE`                             |
 | `sql_warden_auth_refusals_total`         | HTTP requests turned away before reaching a profile, by `code`    |
 | `sql_warden_requests_in_flight`          | requests being answered right now                                 |
+| `sql_warden_config_reloads_total`        | reloads of the policy on `SIGHUP`, by `outcome` (applied, failed) |
+| `sql_warden_config_last_reload_successful` | `0` while the policy file as it is now failed to load, else `1` |
 
 No label holds anything a caller chooses (an identity, say), so no caller can make the set
 grow. Route only `/mcp` through the public proxy: the other three are for the cluster.
@@ -472,6 +474,32 @@ On `SIGTERM` the server stops taking connections and gives the requests it has
 `server.shutdown_grace_s` (30) seconds to finish. `server.max_concurrent_requests` (32) is how
 many requests it answers at once; the rest wait. Each one being answered can hold a
 connection to a warehouse, so this bounds those too.
+
+#### Reloading the policy
+
+On `SIGHUP` the HTTP server reads its policy file again (`docker kill --signal HUP`, or
+`kill -HUP` on its process), so keys can be revoked and issued, and profiles added or
+changed, without a restart. The new policy is built in full first: the file validated, and
+every profile's role looked at as at startup. Only then is it served, all at once. A request
+already being answered finishes with the policy it started with, and one whose token was
+checked a moment before the swap is answered by the policy that checked it. If anything
+fails (a typo, a profile whose role can now write, a warehouse that can't be reached) the
+server goes on with the policy it had and logs why on stderr:
+
+```console
+could not reload /etc/sql-warden/warden.yaml, so the policy loaded before is still served: /etc/sql-warden/warden.yaml: invalid config
+  (top level): auth gives api key helpdesk the profile 'suport', but the config defines support
+```
+
+`sql_warden_config_last_reload_successful` stays `0` until a reload succeeds, which is
+something to alert on: the file and what is served differ. Three things take a restart, and
+a reload that changes them is refused: the `audit` section, the `server` section, and adding
+or removing `auth`. Command-line flags still win over the file after a reload, and a server
+of one profile keeps serving the one it started with. Over stdio there is no reload: the
+agent that started the server restarts it.
+
+In Kubernetes, mount the policy from a ConfigMap as a directory, not with `subPath` (a file
+mounted with `subPath` is never updated), and send `SIGHUP` once the new file is in place.
 
 ### Claude Code
 
@@ -562,8 +590,9 @@ Which config is used, highest priority first:
 Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
 stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
 enforces it. Today that is `warehouse` (connection, timeout, row cap), `audit` (the audit
-database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists, allowed types), `cost`
-(`max_total_cost`), `budgets` (what one session may use), `masking` (the hmac key) and
+database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists, allowed
+types), `cost` (`max_total_cost`), `budgets` (what one session may use), `identity_budgets`
+(what one caller may use), `masking` (the hmac key), `server` (HTTP), `auth` (tokens) and
 `profiles`;
 [warden.example.yaml](warden.example.yaml) documents every key.
 
@@ -660,7 +689,9 @@ Only the access check keeps the profile from these. Give the profile a dsn of it
 
 `sql-warden config validate --live` does the same for every profile at once, and exits 1 if a
 server would not start for one of them, so a deploy can check the policy against the real
-roles first:
+roles first. It also compares each profile with what its role can see, since the warehouse
+changes under a policy, and exits 1 if a profile names a table, column or masked column
+that isn't there (dropped, renamed, or never granted):
 
 ```console
 $ sql-warden config validate --live
@@ -672,9 +703,22 @@ $ sql-warden config validate --live
              admin: role warden_reader can only read
 ```
 
+A table or column that is gone is refused to callers, so it is safe if not useful. A masked
+column that is gone is worse: if it was renamed, a profile that allows the whole table reads
+it under its new name, unmasked. A server still starts with either (a migration that drops a
+column shouldn't take it down), and warns on stderr:
+
+```console
+warning: profile support masks columns its role can't see, so those masks protect nothing:
+  public.customers.ssn
+If a column was renamed, it is not masked under its new name: mask that one.
+```
+
 What it does not cover:
 
-- **Later grants.** The role is looked at when the server starts, not again while it runs.
+- **Grants made while it runs.** The role is looked at when the server starts and when it
+  reloads; `/readyz` asks again whether it can write, at most every 10 seconds. The catalog
+  is compared with the policy only at those two moments.
 - **`query`, `check` and `tables` run by hand.** Whoever runs them holds the connection
   string and could use it without sql-warden; the server is the boundary, so the server is
   what is held to this.

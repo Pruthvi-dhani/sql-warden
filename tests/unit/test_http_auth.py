@@ -431,7 +431,7 @@ class TestServe:
         assert built == ["warden_public", "warden_reader"]
         assert outcome.stderr.splitlines()[-1] == (
             "sql-warden MCP server on http://127.0.0.1:8000/mcp, profiles public, admin, to "
-            "callers with a token (Ctrl+C stops it)"
+            "callers with a token (Ctrl+C stops it, SIGHUP reloads the policy)"
         )
         assert len(listening) == 1
 

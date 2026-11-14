@@ -190,6 +190,19 @@ class Metrics:
         self.in_flight = Gauge(
             "sql_warden_requests_in_flight", "Requests being checked or run right now."
         )
+        self.reloads = Counter(
+            "sql_warden_config_reloads_total",
+            "Reloads of the policy on SIGHUP, by outcome: applied, or failed (the policy "
+            "loaded before is still served).",
+            ("outcome",),
+        )
+        for outcome in ("applied", "failed"):
+            self.reloads.inc(0, outcome=outcome)  # both series exist before the first reload
+        self.last_reload_ok = Gauge(
+            "sql_warden_config_last_reload_successful",
+            "1 if the policy file as it is now is what is served; 0 if the last reload failed.",
+        )
+        self.last_reload_ok.set(1)
         self._all: tuple[_Metric, ...] = (
             self.info,
             self.requests,
@@ -200,6 +213,8 @@ class Metrics:
             self.audit_failures,
             self.auth_refusals,
             self.in_flight,
+            self.reloads,
+            self.last_reload_ok,
         )
 
     def observe(

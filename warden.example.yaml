@@ -1,7 +1,11 @@
 # sql-warden policy file. Copy to warden.yaml (git-ignored) and adjust:
 #
 #   cp warden.example.yaml warden.yaml
-#   uv run sql-warden config validate
+#   uv run sql-warden config validate          # the file alone
+#   uv run sql-warden config validate --live   # and against each profile's role and catalog
+#
+# An HTTP server reads it again on SIGHUP, and serves the new policy only if all of it loads;
+# audit, server, and adding or removing auth take a restart.
 #
 # Strings may reference environment variables as ${NAME} or ${NAME:-default}, so secrets can
 # stay out of the file. Unknown keys are errors: a section appears here once sql-warden

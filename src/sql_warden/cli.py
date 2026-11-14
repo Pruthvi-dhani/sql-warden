@@ -1,8 +1,10 @@
 import datetime
 import json
 import logging
+import sys
 import time
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,7 @@ from sql_warden.profiles import (
     profile_identity_budget,
     select_profile,
 )
+from sql_warden.reload import Reloader, ReloadError
 from sql_warden.render import (
     AUDIT_HEADER,
     audit_json,
@@ -57,6 +60,8 @@ from sql_warden.render import (
     format_tables,
 )
 from sql_warden.server import (
+    LivePolicy,
+    Policy,
     Readiness,
     create_http_app,
     create_server,
@@ -221,6 +226,7 @@ def build_warden(
     audit: AuditSink | None = None,
     serving: bool = False,
     metrics: Metrics | None = None,
+    session_id: str | None = None,
 ) -> Warden:
     """A Warden for one profile, recording to audit (by default, the configured audit database).
 
@@ -228,7 +234,8 @@ def build_warden(
     role that can read less, and a flag must not widen it.
 
     serving is for a Warden that will answer agents: its database role is looked at first,
-    and one that can write is refused (see vet_role)."""
+    and one that can write is refused (see vet_role). session_id is the Warden's own
+    session, to carry one over from the Warden it replaces."""
     try:
         active = select_profile(config, profile)
     except ProfileError as exc:
@@ -259,9 +266,14 @@ def build_warden(
         identity_budget=active.identity_budget,
         sessions=sessions,
         metrics=metrics,
+        session_id=session_id,
     )
     if serving:
-        vet_role(warden, active.dsn)
+        try:
+            vet_role(warden, active.dsn)
+        except click.ClickException:
+            warden.close()
+            raise
     return warden
 
 
@@ -271,13 +283,19 @@ ONLY_READERS = (
 )
 
 
+DRIFTED = (
+    "the policy names tables or columns its roles can't see: dropped or renamed in the "
+    "warehouse, or never granted. Fix the policy or the grants."
+)
+
+
 def vet_role(warden: Warden, dsn: str) -> RoleCheck:
     """Look at the database role a server is about to serve with. One that can write, or
     that can't be looked at, ends the command; one that can read more than its profile
-    allows gets a warning on stderr."""
+    allows, or can't see what the profile names, gets a warning on stderr."""
     where = describe_dsn(dsn)
     try:
-        check = check_role(warden.engine, warden.access)
+        check = check_role(warden.engine, warden.access, warden.masks)
     except EngineError as exc:
         raise click.ClickException(
             f"profile {warden.profile}: could not check what its role can do in the "
@@ -307,7 +325,30 @@ def vet_role(warden: Warden, dsn: str) -> RoleCheck:
             ),
             err=True,
         )
+    for line in drift_warnings(warden.profile, check):
+        click.echo(line, err=True)
     return check
+
+
+def drift_warnings(profile: str, check: RoleCheck) -> list[str]:
+    """What a server says when its profile names what its role can't see. It still starts:
+    a migration that drops a column shouldn't take it down, and such queries are refused."""
+    lines = []
+    if check.missing:
+        lines += [
+            f"warning: profile {profile} allows what its role can't see, so queries for it "
+            "are refused:",
+            *(f"  {line}" for line in listed(check.missing)),
+            "Dropped or renamed in the warehouse, or never granted: fix the profile or the grants.",
+        ]
+    if check.unmasked:
+        lines += [
+            f"warning: profile {profile} masks columns its role can't see, so those masks "
+            "protect nothing:",
+            *(f"  {line}" for line in listed(check.unmasked)),
+            "If a column was renamed, it is not masked under its new name: mask that one.",
+        ]
+    return lines
 
 
 class _NotRecorded:
@@ -510,103 +551,199 @@ def serve(
 
     It first asks the warehouse what each profile's role can do, and doesn't start as one
     that can write. `sql-warden config validate --live` checks every profile's role that way.
+
+    Over HTTP, SIGHUP reloads the policy file: the new policy is served only once all of
+    it loads and every role in it passes the same look; otherwise the old one still is.
     """
     config = settings(state, dsn, max_rows, timeout_ms, audit_dsn)
-    if transport == "http" and config.auth is not None:
-        if profile is not None:
-            raise click.ClickException(
-                "with an auth section, each request's token says which profile it gets: "
-                "--profile is for stdio, where whoever starts the server picks"
-            )
-        _serve_authenticated(config, config.auth, host, port)
-        return
     if transport == "stdio":
         create_server(build_warden(config, profile, serving=True)).run("stdio")
         return
-    metrics = Metrics()
-    warden = build_warden(config, profile, serving=True, metrics=metrics)
-    host, port = host or config.server.host, port or config.server.port
-    try:
-        app = create_http_app(
-            warden,
-            host=host,
-            metrics=metrics,
-            readiness=readiness([warden]),
-            max_concurrent_requests=config.server.max_concurrent_requests,
+    if config.auth is not None and profile is not None:
+        raise click.ClickException(
+            "with an auth section, each request's token says which profile it gets: "
+            "--profile is for stdio, where whoever starts the server picks"
         )
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    _listen(app, host, port, f"profile {warden.profile}", config.server.shutdown_grace_s)
-
-
-def readiness(wardens: Iterable[Warden]) -> Readiness:
-    """What /readyz checks: the audit database answers, and every profile's warehouse
-    answers as a role that still can't write. Grants can change while a server runs."""
-    wardens = list(wardens)
-    checks: dict[str, Callable[[], None]] = {"audit": wardens[0].audit.ping}
-    for warden in wardens:
-
-        def read_only(engine: Engine = warden.engine) -> None:
-            report = engine.role()
-            if not report.read_only:
-                raise RuntimeError(f"role {report.role} can now change the warehouse")
-
-        checks[f"warehouse:{warden.profile}"] = read_only
-    return Readiness(checks)
-
-
-def _serve_authenticated(
-    config: WardenConfig, auth: AuthConfig, host: str | None, port: int | None
-) -> None:
-    profiles = list(config.profiles or {})
-    audit = open_audit(config)  # one audit log for every profile
+    audit = open_audit(config)  # one audit log for every profile, and for every reload
     metrics = Metrics()
-    # Every profile is served, so every profile's role must be one that can't write.
-    wardens = {
-        name: build_warden(config, name, audit=audit, serving=True, metrics=metrics)
-        for name in profiles
-    }
+    live = LivePolicy(_policy(config, profile, audit=audit, metrics=metrics))
     host, port = host or config.server.host, port or config.server.port
     try:
         app = create_http_app(
-            wardens,
+            live,
             host=host,
-            authenticator=Authenticator(auth, profiles),
             allowed_hosts=config.server.allowed_hosts,
             allowed_origins=config.server.allowed_origins,
             metrics=metrics,
-            readiness=readiness(wardens.values()),
+            readiness=readiness(live),
             max_concurrent_requests=config.server.max_concurrent_requests,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    if not is_loopback(host):
+    if config.auth is not None and not is_loopback(host):
         click.echo(
             f"warning: serving plain HTTP on {host}. Every request carries its token, so put "
             "a proxy that terminates TLS in front of it, and let clients reach it only "
             "through the proxy.",
             err=True,
         )
-    serving = f"profiles {', '.join(profiles)}, to callers with a token"
-    _listen(app, host, port, serving, config.server.shutdown_grace_s)
+
+    def reread() -> WardenConfig:
+        return settings(state, dsn, max_rows, timeout_ms, audit_dsn)
+
+    reloader = Reloader(
+        live,
+        policy_builder(reread, config, audit=audit, metrics=metrics),
+        source=config_source(state),
+        metrics=metrics,
+    )
+    if config.auth is None:
+        serving = f"profile {live.current.all[0].profile}"
+    else:
+        serving = f"profiles {', '.join(config.profiles or {})}, to callers with a token"
+    _listen(app, host, port, serving, config.server.shutdown_grace_s, reloader)
 
 
-def _listen(app: Any, host: str, port: int, serving: str, grace_s: int) -> None:
+def _policy(
+    config: WardenConfig,
+    profile: str | None,
+    *,
+    audit: AuditSink,
+    metrics: Metrics,
+    replacing: Policy | None = None,
+) -> Policy:
+    """What an HTTP server serves under config: with an auth section every profile, each
+    to callers whose token gives it; without, one profile. Every profile served has had
+    its role looked at. replacing is the policy a reload replaces: its Wardens' own
+    sessions carry over, and a server of one profile keeps serving that profile."""
+    old = {} if replacing is None else {w.profile: w for w in replacing.all}
+
+    def built(name: str | None) -> Warden:
+        before = old.get(name or "")
+        return build_warden(
+            config,
+            name,
+            audit=audit,
+            serving=True,
+            metrics=metrics,
+            session_id=None if before is None else before.session_id,
+        )
+
+    if config.auth is None:
+        return Policy(built(profile))
+    profiles = list(config.profiles or {})
+    wardens: dict[str, Warden] = {}
+    try:
+        # Every profile is served, so every profile's role must be one that can't write.
+        for name in profiles:
+            wardens[name] = built(name)
+        return Policy(wardens, Authenticator(config.auth, profiles))
+    except BaseException:
+        for warden in wardens.values():  # nothing will serve them
+            warden.close()
+        raise
+
+
+RESTART_ONLY = ("audit", "server")
+"""Sections a reload can't change: the audit log and the listening socket are opened once."""
+
+
+def policy_builder(
+    reread: Callable[[], WardenConfig],
+    started: WardenConfig,
+    *,
+    audit: AuditSink,
+    metrics: Metrics,
+) -> Callable[[Policy], Policy]:
+    """How a server's Reloader builds the policy afresh: reread() is the config as it is
+    now, command-line overrides included; started is the one the server started with."""
+
+    def build(current: Policy) -> Policy:
+        try:
+            config = reread()
+            changed = [
+                name for name in RESTART_ONLY if getattr(config, name) != getattr(started, name)
+            ]
+            if (config.auth is None) != (started.auth is None):
+                changed.append("auth (added or removed)")
+            if changed:
+                it = "it" if len(changed) == 1 else "them"
+                raise ReloadError(
+                    f"{' and '.join(changed)} changed, and only a restart changes {it}"
+                )
+            # A server of one profile serves the one it started with, whatever the
+            # default is now: it was picked when it started.
+            profile = None if current.authenticator else current.all[0].profile
+            return _policy(config, profile, audit=audit, metrics=metrics, replacing=current)
+        except click.ClickException as exc:  # what a failed start would have said
+            raise ReloadError(exc.format_message()) from exc
+
+    return build
+
+
+def config_source(state: CliState) -> str:
+    """Where the policy comes from, as resolve_config finds it."""
+    if state.config_path is not None:
+        return str(state.config_path)
+    return str(DEFAULT_CONFIG_PATH) if DEFAULT_CONFIG_PATH.is_file() else "the built-in defaults"
+
+
+def readiness(live: LivePolicy) -> Readiness:
+    """What /readyz checks: the audit database answers, and every profile's warehouse
+    answers as a role that still can't write. Grants can change while a server runs, and
+    a reload changes the profiles: the checks are those of the policy served now."""
+
+    def checks() -> dict[str, Callable[[], None]]:
+        wardens = live.current.all
+        found: dict[str, Callable[[], None]] = {"audit": wardens[0].audit.ping}
+        for warden in wardens:
+
+            def read_only(engine: Engine = warden.engine) -> None:
+                report = engine.role()
+                if not report.read_only:
+                    raise RuntimeError(f"role {report.role} can now change the warehouse")
+
+            found[f"warehouse:{warden.profile}"] = read_only
+        return found
+
+    return Readiness(checks)
+
+
+@contextmanager
+def _log_to_stderr() -> Iterator[None]:
+    """What sql-warden logs (reloads, readiness) goes to stderr, a line each."""
+    logger = logging.getLogger("sql_warden")
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)
+
+
+def _listen(app: Any, host: str, port: int, serving: str, grace_s: int, reloader: Reloader) -> None:
     url_host = f"[{host}]" if ":" in host else host
-    click.echo(
-        f"sql-warden MCP server on http://{url_host}:{port}/mcp, {serving} (Ctrl+C stops it)",
-        err=True,
-    )
-    # No Server header: what it runs on is nobody's business who can reach the port. On
-    # SIGTERM uvicorn stops taking connections and lets the ones it has finish, for grace_s.
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="warning",
-        server_header=False,
-        timeout_graceful_shutdown=grace_s,
-    )
+    with _log_to_stderr(), reloader.on_sighup() as reloads:
+        click.echo(
+            f"sql-warden MCP server on http://{url_host}:{port}/mcp, {serving} (Ctrl+C stops "
+            f"it{', SIGHUP reloads the policy' if reloads else ''})",
+            err=True,
+        )
+        # No Server header: what it runs on is nobody's business who can reach the port. On
+        # SIGTERM uvicorn stops taking connections and lets the ones it has finish, for
+        # grace_s.
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+            server_header=False,
+            timeout_graceful_shutdown=grace_s,
+        )
 
 
 FOLLOW_INTERVAL_S = 1.0
@@ -796,15 +933,17 @@ def config() -> None:
 @click.option(
     "--live",
     is_flag=True,
-    help="Also connect to the warehouse as each profile's role, and check that it can't "
-    "write and what it can read beyond the profile.",
+    help="Also connect to the warehouse as each profile's role: check that it can't write, "
+    "what it can read beyond the profile, and that it can see every table, column and "
+    "masked column the profile names.",
 )
 @click.pass_obj
 def validate(state: CliState, path: Path | None, live: bool) -> None:
     """Check a policy file (default: --config, then ./warden.yaml) without connecting.
 
     With --live it then connects as each profile's role, as a server does before it starts,
-    and exits 1 if any of them can write or can't be checked.
+    and exits 1 if any of them can write or can't be checked, or if a profile names a
+    table, column or masked column its role can't see (dropped, renamed, or not granted).
     """
     path = path or state.config_path
     if path is None and not DEFAULT_CONFIG_PATH.is_file():
@@ -858,25 +997,27 @@ def validate(state: CliState, path: Path | None, live: bool) -> None:
     for line in describe_profiles(loaded):
         click.echo(line)
     if live:
-        lines, safe = describe_roles(loaded)
+        lines, safe, drifted = describe_roles(loaded)
         for line in lines:
             click.echo(line)
-        if not safe:
-            raise click.ClickException(
-                f"a server would not start for every profile. {ONLY_READERS}"
-            )
+        problems = [] if safe else [f"a server would not start for every profile. {ONLY_READERS}"]
+        if drifted:
+            problems.append(DRIFTED)
+        if problems:
+            raise click.ClickException("\n".join(problems))
 
 
-def describe_roles(config: WardenConfig) -> tuple[list[str], bool]:
-    """What the warehouse says about each profile's role, for `config validate --live`, and
-    whether a server would start for every one of them."""
-    lines, safe = [], True
+def describe_roles(config: WardenConfig) -> tuple[list[str], bool, bool]:
+    """What the warehouse says about each profile's role, for `config validate --live`:
+    the lines to print, whether a server would start for every profile, and whether any
+    profile names what its role can't see."""
+    lines, safe, drifted = [], True, False
     for index, name in enumerate(config.profiles or [IMPLICIT_PROFILE]):
         label = "  live:      " if index == 0 else "             "
         active = select_profile(config, name)
         engine, _ = build_engine(config, active)
         try:
-            check = check_role(engine, active.access)
+            check = check_role(engine, active.access, active.masks)
         except EngineError as exc:
             safe = False
             reason = str(exc).splitlines()[0]
@@ -898,7 +1039,14 @@ def describe_roles(config: WardenConfig) -> tuple[list[str], bool]:
         if check.beyond:
             lines.append("               ! but more than the profile allows:")
             lines += [f"                 {line}" for line in listed(check.beyond)]
-    return lines, safe
+        if check.missing:
+            lines.append("               ✗ the profile allows what the role can't see:")
+            lines += [f"                 {line}" for line in listed(check.missing)]
+        if check.unmasked:
+            lines.append("               ✗ the profile masks columns the role can't see:")
+            lines += [f"                 {line}" for line in listed(check.unmasked)]
+        drifted = drifted or check.drifted
+    return lines, safe, drifted
 
 
 def describe_auth(auth: AuthConfig | None) -> list[str]:
