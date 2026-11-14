@@ -51,6 +51,13 @@ audit:
   dsn: postgresql://warden_audit:${WARDEN_AUDIT_PASSWORD:-warden_audit}@localhost:5434/audit
   connect_timeout_s: 5
 
+# Where `sql-warden serve --transport http` listens (--host and --port win). Only loopback
+# addresses for now: there is no authentication yet, and whoever can reach the port gets
+# everything the server's profile may read. stdio servers don't use this.
+server:
+  host: 127.0.0.1
+  port: 8000
+
 shape:
   max_joins: 4                 # JOINs per query, comma joins included
   max_subquery_depth: 3        # how deep subqueries and CTEs may nest

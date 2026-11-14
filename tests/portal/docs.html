@@ -113,7 +113,7 @@
       profile from it, so a client never names its own profile. stdio needs no token: whoever
       launches the process has already chosen its profile.</p>
     <h3>A session</h3>
-    <p>Every client does the same three steps, which the portal's Console panel shows:</p>
+    <p>This page speaks MCP as it was before 2026-07-28, where a client opens a connection in three steps, which the Console panel shows. Clients of 2026-07-28 or later skip the first two: each <code>tools/call</code> stands alone, with no session id, and all of them are the server's one session.</p>
     <ol>
       <li><code>initialize</code>: the reply carries an <code>Mcp-Session-Id</code> header, and the server's instructions to the agent (below).</li>
       <li><code>notifications/initialized</code>.</li>
@@ -153,7 +153,7 @@
       <tbody>
         <tr data-field="refused"><td><code>refused</code></td><td>Whether a check refused the query. Nothing runs when it did.</td></tr>
         <tr data-field="profile"><td><code>profile</code></td><td>The profile the query was checked for.</td></tr>
-        <tr data-field="session_id"><td><code>session_id</code></td><td>The session the request belongs to: this connection. The audit log records it, so <code>sql-warden audit tail --session &lt;session_id&gt;</code> lists everything the session asked. It is sql-warden's own id, derived from the <code>Mcp-Session-Id</code> header rather than being it: that header is what lets a client use the connection, so it stays out of responses and the audit log.</td></tr>
+        <tr data-field="session_id"><td><code>session_id</code></td><td>The session the request belongs to: this connection, or the server's one session for a client that speaks MCP 2026-07-28 or later, which has no connections. The audit log records it, so <code>sql-warden audit tail --session &lt;session_id&gt;</code> lists everything the session asked. It is sql-warden's own id, derived from the <code>Mcp-Session-Id</code> header rather than being it: that header is what lets a client use the connection, so it stays out of responses and the audit log.</td></tr>
         <tr data-field="check"><td><code>check</code></td><td>The check that refused it: <code>parse</code>, <code>shape</code>, <code>access</code>, <code>masking</code>, <code>cost</code>, <code>budget</code> or <code>audit</code>.</td></tr>
         <tr data-field="code"><td><code>code</code></td><td>Why, as a code an agent can act on: see <a href="#codes">Refusal codes</a>.</td></tr>
         <tr data-field="reason"><td><code>reason</code></td><td>Why, in a sentence, naming the offending table, column or function.</td></tr>

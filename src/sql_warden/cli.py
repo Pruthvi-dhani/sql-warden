@@ -466,16 +466,18 @@ def tables_command(
     help="stdio for an agent that launches sql-warden; http for local tools like the portal.",
 )
 @click.option(
-    "--host", default="127.0.0.1", show_default=True, help="HTTP only. Loopback addresses only."
+    "--host", help="HTTP only: the address to listen on; overrides server.host. Loopback only."
 )
-@click.option("--port", type=click.IntRange(1, 65535), default=8000, show_default=True)
+@click.option(
+    "--port", type=click.IntRange(1, 65535), help="HTTP only; overrides server.port (8000)."
+)
 @engine_options
 @click.pass_obj
 def serve(
     state: CliState,
     transport: str,
-    host: str,
-    port: int,
+    host: str | None,
+    port: int | None,
     dsn: str | None,
     max_rows: int | None,
     timeout_ms: int | None,
@@ -492,6 +494,7 @@ def serve(
     if transport == "stdio":
         create_server(warden).run("stdio")
         return
+    host, port = host or config.server.host, port or config.server.port
     try:
         app = create_http_app(warden, host=host)
     except ValueError as exc:
@@ -502,7 +505,8 @@ def serve(
         "(Ctrl+C stops it)",
         err=True,
     )
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # No Server header: what it runs on is nobody's business who can reach the port.
+    uvicorn.run(app, host=host, port=port, log_level="warning", server_header=False)
 
 
 FOLLOW_INTERVAL_S = 1.0
@@ -680,6 +684,9 @@ def validate(state: CliState, path: Path | None, live: bool) -> None:
     limit = format_amount(loaded.cost.max_total_cost, unit)
     click.echo(f"  cost:      refused above an estimated {limit}{scanned}")
     click.echo(f"  budgets:   {describe_budget(loaded.budgets)}")
+    if "server" in loaded.model_fields_set:
+        host = f"[{loaded.server.host}]" if ":" in loaded.server.host else loaded.server.host
+        click.echo(f"  server:    http on {host}:{loaded.server.port}, this machine only")
     if loaded.masking.key is not None:
         click.echo("  masking:   hmac key set")
     for line in describe_profiles(loaded):

@@ -4,6 +4,7 @@ Unknown keys are errors, never ignored: a misspelt or not-yet-supported rule mus
 like it is being enforced. Each section is added together with the check that enforces it.
 """
 
+import ipaddress
 import os
 import re
 from fnmatch import fnmatchcase
@@ -286,6 +287,45 @@ class MaskingConfig(_Section):
         return key
 
 
+LOOPBACK_NAMES = ("localhost",)
+
+
+def is_loopback(host: str) -> bool:
+    """True if host is this machine only: localhost, 127.0.0.1 and the rest of 127/8, ::1."""
+    if host in LOOPBACK_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+LOOPBACK_ONLY = (
+    "there is no authentication yet, so sql-warden only listens on loopback (127.0.0.1, "
+    "::1 or localhost)"
+)
+"""Why HTTP is not served to other machines. Whoever can reach the port gets everything
+the server's profile may read, so it opens up together with authentication, not before."""
+
+
+class ServerConfig(_Section):
+    """Where `sql-warden serve --transport http` listens. The --host and --port flags win."""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8000, ge=1, le=65535)
+
+    @field_validator("host")
+    @classmethod
+    def _this_machine_only(cls, host: str) -> str:
+        if not is_loopback(host):
+            raise PydanticCustomError(
+                "not_loopback",
+                "{host} is not this machine alone: {why}",
+                {"host": host, "why": LOOPBACK_ONLY},
+            )
+        return host
+
+
 class AuditConfig(_Section):
     """Where every request is recorded. Always Postgres, whatever the warehouse engine, and on
     its own instance: the warehouse role must not be able to touch the audit log. There is no
@@ -461,6 +501,7 @@ class WardenConfig(_Section):
     agent that opened it."""
     masking: MaskingConfig = MaskingConfig()
     audit: AuditConfig = AuditConfig()
+    server: ServerConfig = ServerConfig()
     profiles: dict[str, ProfileConfig] | None = None
     """None: no profiles are defined, and the one profile is the implicit `all`."""
     default_profile: str | None = None

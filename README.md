@@ -172,7 +172,8 @@ requests:
 | Caller                         | Its session                                                     |
 |--------------------------------|-----------------------------------------------------------------|
 | an agent over stdio            | the server process: the agent starts it, and it serves only that agent |
-| a client over HTTP             | its connection; reconnecting starts a new session                |
+| a client over HTTP that connects | its connection; reconnecting starts a new session              |
+| a client over HTTP that doesn't  | the server's one session, shared with every other such client  |
 | `sql-warden query` and `check` | each call, unless calls are given the same `--session NAME`      |
 
 ```bash
@@ -184,6 +185,14 @@ uv run sql-warden audit tail --session nightly-report
 A name is up to 64 letters, digits, `.`, `_`, `:` or `-`. Over HTTP the id is sql-warden's own,
 derived from the transport's `Mcp-Session-Id` rather than being it: whoever holds that header's
 value can use the connection, so it stays out of responses and the audit log.
+
+Whether an HTTP client connects depends on the MCP version it speaks. Before 2026-07-28 a
+client opens a connection with a handshake and sends its `Mcp-Session-Id` with every request.
+From 2026-07-28 on there are no connections over HTTP: each request stands alone, and nothing
+on it says which other requests came from the same caller. Until callers have identities
+(which comes with authentication), those requests are all one session, the server's own. A
+limit then holds for the server as a whole and lasts until it restarts: it can't be got
+around, but one caller can use it up for the others.
 
 Sessions are what [budgets](#session-budgets) count against.
 
@@ -333,9 +342,33 @@ Before it serves anything, `serve` asks the warehouse what its role can do, and 
 as one that can write, or while the warehouse can't be asked: see
 [Defence in depth](#defence-in-depth).
 
+#### Over HTTP
+
 The HTTP transport has no authentication yet, so it only listens on loopback (`127.0.0.1`,
 `::1`, `localhost`) and rejects requests whose `Host` or `Origin` isn't local, which stops web
-pages from reaching it through your browser.
+pages from reaching it through your browser. Where it listens is `server.host` and
+`server.port` in `warden.yaml`, or `--host` and `--port`; an address other machines can reach
+is refused by both, and by `config validate`.
+
+It serves many clients at once. Each query runs in a worker thread with its own database
+connection, so a slow one holds up nobody else's. What keeps one client from using the
+server up:
+
+| Limit                                 | Past it                                                    |
+|---------------------------------------|------------------------------------------------------------|
+| a request body of 256 KiB             | `413`, unread (a query is at most 20,000 characters)       |
+| 10,000 open connections               | `503` for a new one until another closes                   |
+| 30 minutes without a request          | the connection is closed; the client connects again, as a new [session](#sessions) |
+| a made-up or expired `Mcp-Session-Id` | `404`: a client can't choose its session, or join another's |
+
+The connection limits are for clients that connect; see [Sessions](#sessions) for the ones
+that don't.
+
+Serving other machines comes with authentication, the next step in the [plan](docs/plan.md).
+The shape it will have: sql-warden keeps listening on loopback or a private address, a proxy
+in front of it terminates TLS and passes the `Host` it was asked for, and every request
+carries a token that says which profile it gets. Until then, don't put a proxy in front of
+it yourself: the proxy's callers would all get the server's profile, and its one session.
 
 ### Claude Code
 

@@ -11,8 +11,9 @@ from mcp_types import CallToolResult, TextContent
 
 from sql_warden.audit import MemoryAuditSink
 from sql_warden.cli import cli
+from sql_warden.config import is_loopback
 from sql_warden.engines import EngineUnavailable, QueryTimeout, Result
-from sql_warden.server import create_http_app, create_server, is_loopback, json_value
+from sql_warden.server import create_http_app, create_server, json_value
 from sql_warden.warden import Warden
 from tests.support import TOOLS
 from tests.unit.conftest import FakeEngine

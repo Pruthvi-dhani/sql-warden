@@ -793,7 +793,7 @@ account.
   looks again), `SECURITY DEFINER` functions, and Snowflake databases other than the
   connection's.
 
-**8.2 Adversarial corpus** ✅ done
+**8.2 Adversarial corpus** ✅ done (`c48f18a`)
 - `tests/unit/test_adversarial.py` covers comment and Unicode tricks, nested forbidden
   functions, `COPY`, `DO $$`, `EXPLAIN ANALYZE` smuggling, stacked statements, `set_config` in a
   subquery, and casting tricks.
@@ -861,13 +861,45 @@ Snowflake (dedicated XS warehouse + resource monitor). The audit DB is a managed
 separate account. `warden.yaml` lives in git and changes through PR review. Scripts use the
 CLI.
 
-**9.1 Production HTTP transport**
+**9.1 Production HTTP transport** ✅ done
 - Builds on the local-only HTTP mode from 1.4: lifts the loopback-only restriction (only
   together with 9.2 auth, and only when the policy defines real profiles rather than the
   implicit `all`), adds configurable host/port and TLS-terminating proxy guidance. Each
   MCP session id maps to a warden session.
 - Tests: an in-process HTTP MCP client session covers the tool list, run, refuse, and session
   isolation between two clients.
+- As built: a `server` config section (`host`, `port`; `--host` and `--port` win) and the
+  transport's limits set on purpose rather than left to the SDK's defaults: a 256 KiB
+  request body (`413`), 10,000 open connections (`503` for one more), 30 idle minutes (the
+  connection is closed), and no `Server` header. Queries run in the SDK's worker threads,
+  each on its own database connection, and a test holds one query open while another
+  client's completes.
+- As built, the restriction is **not lifted here**. The plan ties that to authentication,
+  and there is none until 9.2, so a host other machines can reach is refused in three
+  places (the config file, `--host`, `create_http_app`) with the reason. 9.2 opens it, and
+  takes the names a proxy forwards (`allowed_hosts`, `allowed_origins`) with it: before
+  then they could hold nothing but loopback names.
+- As built, the finding of this point: **MCP 2026-07-28 has no sessions over HTTP.** Each
+  request is a self-contained POST, with no handshake and no `Mcp-Session-Id`, and the SDK's
+  client speaks that version by default. So "each MCP session id maps to a warden session"
+  (6.1) holds only for clients of the older protocol. A request without a session id falls
+  into the Warden's own session, as it always did; that is now stated and tested rather
+  than accidental. What follows from it:
+  - A budget over HTTP is, for those clients, one budget for the whole server, lasting
+    until it restarts. It can't be got around, but one caller can use it up for the
+    others. That is acceptable on loopback, where the callers are one person's tools.
+  - Per-caller budgets and a per-caller audit trail need identities. So 9.3's per-identity
+    budgets are not an extra on top of session budgets: for current clients they are the
+    only per-caller budget there can be, and 9.2 must give every request an identity that
+    the session is derived from.
+  - A client can't choose a session: an unknown or made-up `Mcp-Session-Id` is `404`, and
+    the id in responses is not the transport's, so it opens nothing.
+- Tests: 31 in `test_http_transport.py`, over a real local HTTP server: clients of both
+  protocol versions (two connections, two sessions, two budgets; no connection, one session,
+  one budget), the slow query, the limits above, and the config section.
+- Left for later: a cap on queries running at once and a connection pool (each of the SDK's
+  40 worker threads can hold a warehouse connection), with 9.4's metrics; the deployment
+  guide with a proxy (`docs/deploy.md`, 9.6), which the README only sketches.
 
 **9.2 Authentication → profiles**
 - Bearer tokens: either static hashed API keys in config, or OIDC/JWT validated with `pyjwt`

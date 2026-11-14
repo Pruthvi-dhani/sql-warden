@@ -7,7 +7,6 @@ yet, so it never listens anywhere else.
 
 import datetime
 import hashlib
-import ipaddress
 import uuid
 from decimal import Decimal
 from typing import Annotated, Any
@@ -21,10 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.applications import Starlette
 
 from sql_warden import __version__
-from sql_warden.config import IMPLICIT_PROFILE
+from sql_warden.config import IMPLICIT_PROFILE, LOOPBACK_ONLY, is_loopback
 from sql_warden.engines import EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
-from sql_warden.sessions import BudgetStatus, SessionStoreError
+from sql_warden.sessions import MAX_SESSIONS, BudgetStatus, SessionStoreError
 from sql_warden.warden import Warden, trace_step
 
 INSTRUCTIONS = """\
@@ -48,7 +47,12 @@ costs more than is left, and a cheaper one may fit; BUDGET_EXHAUSTED means the s
 done, and nothing more will run in it."""
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
-LOOPBACK_NAMES = ("localhost",)
+MAX_REQUEST_BYTES = 256 * 1024
+"""The largest HTTP request body read. A request carries one query of at most 20,000
+characters; the rest is the envelope around it."""
+SESSION_IDLE_S = 30 * 60.0
+"""How long a connection may send nothing before the server closes its session. The client
+connects again and gets a new one, with a new budget."""
 
 
 class TraceStep(BaseModel):
@@ -125,7 +129,8 @@ class QueryResponse(BaseModel):
     profile: str | None = None
     """The profile the query was checked for: what this server lets its callers see."""
     session_id: str | None = None
-    """The session the request belongs to: this connection. The audit log records it, so
+    """The session the request belongs to: this connection, or the server's one session for
+    callers that have no connection (see session_of). The audit log records it, so
     `sql-warden audit tail --session <session_id>` lists everything the session asked."""
     check: str | None = None
     """The check that refused the query."""
@@ -351,10 +356,16 @@ def client_name(ctx: Context[Any, Any]) -> str | None:
 def session_of(ctx: Context[Any, Any]) -> str | None:
     """sql-warden's id for the session this request belongs to, or None for the Warden's own.
 
-    Over HTTP each connection is a session. Its id is derived from the transport's
-    Mcp-Session-Id rather than being that id: whoever holds the transport's id can use the
-    connection, so it stays out of responses and the audit log. Over stdio there is one
-    connection per process, which is the Warden's own session."""
+    Over HTTP a client that opens a connection (MCP before 2026-07-28: a handshake, then an
+    Mcp-Session-Id on every request) has that connection as its session. Its id is derived
+    from the transport's rather than being it: whoever holds the transport's id can use the
+    connection, so it stays out of responses and the audit log.
+
+    From 2026-07-28 on MCP has no connections over HTTP: each request stands alone, and
+    nothing on it says which other requests came from the same caller. Those are all the
+    Warden's own session, as stdio's one connection per process is. A limit then holds for
+    the server as a whole, so it can't be got around; telling callers apart needs them to
+    have identities, which comes with authentication."""
     headers = ctx.headers
     transport_id = None if headers is None else headers.get(MCP_SESSION_ID_HEADER)
     if not transport_id:
@@ -404,30 +415,35 @@ def describe_one_table(warden: Warden, name: str) -> TableResponse:
     return TableResponse(profile=warden.profile, table=table_info(warden, table))
 
 
-def is_loopback(host: str) -> bool:
-    if host in LOOPBACK_NAMES:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def create_http_app(warden: Warden, *, host: str = "127.0.0.1") -> Starlette:
+def create_http_app(
+    warden: Warden,
+    *,
+    host: str = "127.0.0.1",
+    max_sessions: int = MAX_SESSIONS,
+    session_idle_s: float = SESSION_IDLE_S,
+) -> Starlette:
     """The MCP server as an ASGI app, serving Streamable HTTP at /mcp.
 
     Requests must name a loopback host and, from a browser, a loopback origin, which stops a
     web page from reaching the server through DNS rebinding.
+
+    Each connection is a session of its own, with its own budget. At most max_sessions are
+    open at once (one more is answered 503 until one closes), and one that sends nothing
+    for session_idle_s is closed. Queries run in worker threads, so a slow one holds up
+    nobody else's.
     """
     if not is_loopback(host):
-        raise ValueError(
-            f"refusing to serve MCP over HTTP on {host}: there is no authentication yet, so "
-            "it only listens on loopback (127.0.0.1, ::1 or localhost)"
-        )
+        raise ValueError(f"refusing to serve MCP over HTTP on {host}: {LOOPBACK_ONLY}")
     names = ["127.0.0.1", "localhost", "[::1]"]
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[f"{name}:*" for name in names],
         allowed_origins=[f"http://{name}:*" for name in names],
     )
-    return create_server(warden).streamable_http_app(transport_security=security, host=host)
+    return create_server(warden).streamable_http_app(
+        transport_security=security,
+        host=host,
+        max_request_body_size=MAX_REQUEST_BYTES,
+        max_sessions=max_sessions,
+        session_idle_timeout=session_idle_s,
+    )
