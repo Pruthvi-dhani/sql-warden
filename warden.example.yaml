@@ -63,6 +63,9 @@ masking:
 audit:
   dsn: postgresql://warden_audit:${WARDEN_AUDIT_PASSWORD:-warden_audit}@localhost:5434/audit
   connect_timeout_s: 5
+  # true: refuse to serve unless this role can only add records, not change or remove one
+  # (docs/deploy.md). The demo's role is the audit database's superuser, so a server warns.
+  append_only: false
 
 # Where `sql-warden serve --transport http` listens (--host and --port win). Without an auth
 # section, only loopback addresses: whoever could reach the port would get everything the

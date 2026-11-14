@@ -1,9 +1,10 @@
-"""Reading the audit log back: for `sql-warden audit tail` and `audit show`."""
+"""Reading the audit log back: for `sql-warden audit tail`, `audit show` and `audit export`."""
 
 import dataclasses
 import datetime
 import re
 import uuid
+from collections.abc import Iterator
 from typing import Any, cast
 
 import psycopg
@@ -19,6 +20,7 @@ _SELECT = sql.SQL("SELECT {} FROM audit_events").format(
 MIN_PREFIX = 4
 """The fewest characters of an id that `show` accepts, as git does for commit hashes."""
 _ID_PREFIX = re.compile(r"[0-9a-f-]+")
+EXPORT_BATCH = 1_000
 
 
 class AuditReader:
@@ -56,6 +58,24 @@ class AuditReader:
         where, params = _filters(profile, decision, session_id, identity, since=ts)
         query = sql.SQL("{} {} ORDER BY ts, id").format(_SELECT, where)
         return self._events(query, params)
+
+    def export(self, since: datetime.datetime, until: datetime.datetime) -> Iterator[AuditEvent]:
+        """Every event recorded at or after since and before until, oldest first, read a
+        batch at a time so an export of millions holds only a batch in memory. Windows that
+        meet (one's until the next one's since) export every event once."""
+        query = sql.SQL("{} WHERE ts >= %s AND ts < %s ORDER BY ts, id").format(_SELECT)
+        try:
+            conn = self._connection()
+            with conn.transaction(), conn.cursor(name="sql_warden_export") as cursor:
+                cursor.itersize = EXPORT_BATCH
+                cursor.execute(query, [since, until])
+                for row in cursor:
+                    yield _event(row)
+        except errors.UndefinedTable:
+            return  # sql-warden has never started against this database: nothing recorded
+        except psycopg.Error as exc:
+            self.close()
+            raise AuditError(f"could not read the audit log: {str(exc).strip()}") from exc
 
     def find(self, id_or_prefix: str) -> list[AuditEvent]:
         """The event with this id, or every event whose id starts with it (at most two: enough

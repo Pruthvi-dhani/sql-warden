@@ -85,7 +85,8 @@ def test_catalog_drift(
 
     fits = validate()
     assert fits.exit_code == 0, fits.output
-    assert fits.output.splitlines()[-1] == "  live:      support: role dr_reader can only read"
+    # The last two lines are the test audit database's superuser, which isn't this test's.
+    assert fits.output.splitlines()[-3] == "  live:      support: role dr_reader can only read"
 
     # A migration renames the masked column, drops one the profile lists, and the role loses
     # a grant.
@@ -95,12 +96,14 @@ def test_catalog_drift(
     )
     columns_gone = validate()
     assert columns_gone.exit_code == 1
-    assert columns_gone.output.splitlines()[-6:] == [
+    assert columns_gone.output.splitlines()[-8:] == [
         "  live:      support: role dr_reader can only read",
         "               ✗ the profile allows what the role can't see:",
         "                 column body of drift_test.notes",
         "               ✗ the profile masks columns the role can't see:",
         "                 drift_test.accounts.ssn",
+        "  audit:     ! its role can change or remove records:",
+        "               it is a superuser",
         f"Error: {DRIFTED}",
     ]
     # Which is why: the column under its new name is read unmasked.

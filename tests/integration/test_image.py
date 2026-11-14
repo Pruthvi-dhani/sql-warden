@@ -58,6 +58,8 @@ def _started(image: str, config: Path) -> DockerContainer:
         DockerContainer(image)
         .with_volume_mapping(str(config), CONFIG_PATH, "ro")
         .with_exposed_ports(8000)
+        # As docs/deploy.md runs it: nothing written to the image, no capabilities.
+        .with_kwargs(read_only=True, cap_drop=["ALL"], security_opt=["no-new-privileges"])
     )
     container.start()
     deadline = time.monotonic() + 60

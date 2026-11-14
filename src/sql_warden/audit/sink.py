@@ -10,6 +10,7 @@ from importlib.resources import files
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import psycopg
+from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
 from sql_warden.sessions import Usage
@@ -167,9 +168,52 @@ class PostgresAuditSink:
         self._lock = threading.Lock()
 
     def ensure_schema(self) -> None:
-        """Create audit_events if it doesn't exist. Safe to call from every server start."""
+        """Make sure the audit tables are there and current. Safe to call from every start.
+
+        A role that owns them (or finds none yet) applies the schema itself, as the demo
+        stack's does. One that doesn't, the deployed writer that may only add records,
+        can't run DDL and must not: it checks the tables are current and that it can add
+        records, and otherwise says to run `sql-warden audit init` as their owner."""
         with self._lock:
-            self._attempt(self._apply_schema, "could not set up the audit table")
+            self._attempt(self._ensure, "could not set up the audit tables")
+
+    def apply_schema(self, owner: str | None = None) -> None:
+        """Create or update the audit tables, and grant the deploy roles what they may do:
+        `sql-warden audit init`. As owner (a role this one is a member of, which then owns
+        the tables) if given."""
+        with self._lock:
+            self._attempt(
+                lambda conn: self._apply_schema(conn, owner=owner),
+                "could not set up the audit tables",
+            )
+
+    def tampering(self) -> tuple[str, ...] | None:
+        """Every way this role can change or remove what is already recorded, in words
+        ("can UPDATE, DELETE on audit_events"); none for a role that can only add records,
+        and None while there is no audit table. Asked for every role it is a member of,
+        since SET ROLE would give it theirs."""
+        with self._lock:
+            row = self._attempt(
+                lambda conn: conn.execute(_TAMPERING).fetchone(),
+                "could not check what the audit role can do",
+            )
+        if row is None:
+            return None  # no table yet: nothing recorded to change
+        superuser, owner, privileges = row
+        if superuser == "itself":
+            return ("is a superuser",)  # a member of every role: the rest says nothing more
+        found = []
+        if superuser:
+            found.append(f"can act as superuser {superuser}")
+        if owner:
+            found.append(
+                "owns audit_events"
+                if owner == "itself"
+                else f"can act as {owner}, which owns audit_events"
+            )
+        if privileges:
+            found.append(f"can {', '.join(privileges)} on audit_events")
+        return tuple(found)
 
     def ping(self) -> None:
         with self._lock:
@@ -225,8 +269,29 @@ class PostgresAuditSink:
                 self._conn.close()
                 self._conn = None
 
-    def _apply_schema(self, conn: psycopg.Connection[Any]) -> None:
+    def _ensure(self, conn: psycopg.Connection[Any]) -> None:
+        owned = conn.execute(_OWNED).fetchone()
+        if owned is None or owned[0]:
+            self._apply_schema(conn)
+            return
+        problems = _schema_problems(conn)
+        if problems:
+            raise AuditError(
+                f"the audit tables need updating, which role {_current_role(conn)} can't "
+                f"do since it doesn't own them ({'; '.join(problems)}): run `sql-warden "
+                "audit init` as their owner"
+            )
+        can = conn.execute("SELECT has_table_privilege('audit_events', 'INSERT')").fetchone()
+        if not (can and can[0]):
+            raise AuditError(
+                f"role {_current_role(conn)} can't add records to audit_events: grant it "
+                "sql_warden_writer (deploy/audit_roles.sql)"
+            )
+
+    def _apply_schema(self, conn: psycopg.Connection[Any], *, owner: str | None = None) -> None:
         with conn.transaction():
+            if owner is not None:
+                conn.execute(psql.SQL("SET LOCAL ROLE {}").format(psql.Identifier(owner)))
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_SCHEMA_LOCK,))
             conn.execute(SCHEMA.read_text())
 
@@ -255,6 +320,111 @@ class PostgresAuditSink:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+
+# Whether this role owns audit_events (has its owner's privileges), if it exists.
+_OWNED = """
+    SELECT pg_has_role(c.relowner, 'USAGE') FROM pg_class c
+    WHERE c.oid = to_regclass('audit_events')
+"""
+# How this role could change or remove a record: as a superuser, as the owner (who may do
+# anything to the table), or with a privilege that changes rows. For every role it can
+# become, inherited or not.
+_TAMPERING = """
+    WITH roles AS (
+        SELECT r.oid, r.rolname, r.rolsuper, r.rolname = current_user AS itself
+        FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER')
+    ), events AS (
+        SELECT c.oid, c.relowner FROM pg_class c WHERE c.oid = to_regclass('audit_events')
+    )
+    SELECT
+        (SELECT CASE WHEN bool_or(itself) THEN 'itself' ELSE min(rolname) END
+         FROM roles WHERE rolsuper),
+        (SELECT CASE WHEN bool_or(itself) THEN 'itself' ELSE min(rolname) END
+         FROM roles WHERE oid = events.relowner),
+        ARRAY(
+            SELECT p FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE']) WITH ORDINALITY AS t(p, n)
+            WHERE EXISTS (SELECT FROM roles WHERE has_table_privilege(roles.oid, events.oid, p))
+            ORDER BY n
+        )
+    FROM events
+"""
+REQUIRED = {
+    "audit_events": (
+        "id",
+        "ts",
+        "session_id",
+        "identity",
+        "client",
+        "profile",
+        "dry_run",
+        "sql",
+        "executed_sql",
+        "rewrites",
+        "decision",
+        "refused_by",
+        "code",
+        "reason",
+        "error",
+        "cost_estimate",
+        "rows_returned",
+        "truncated",
+        "masked_columns",
+        "duration_ms",
+        "trace",
+    ),
+    "session_usage": (
+        "profile",
+        "session_id",
+        "queries",
+        "total_cost",
+        "rows_returned",
+        "refusals",
+        "updated_at",
+    ),
+    "caller_charges": (
+        "profile",
+        "caller",
+        "ts",
+        "queries",
+        "total_cost",
+        "rows_returned",
+        "refusals",
+    ),
+    "audit_prunes": ("ts", "pruned_by", "older_than", "events", "sessions", "caller_charges"),
+}
+"""The tables and columns the schema makes, which a server that may not apply it checks for."""
+NULLABLE = {("audit_events", "profile")}
+"""Columns made nullable after their table was first made."""
+_COLUMNS_OF = """
+    SELECT a.attname, a.attnotnull FROM pg_attribute a
+    WHERE a.attrelid = to_regclass(%s) AND a.attnum > 0 AND NOT a.attisdropped
+"""
+
+
+def _schema_problems(conn: psycopg.Connection[Any]) -> list[str]:
+    """What the audit tables lack that this version of sql-warden needs. Asked of the
+    catalog, so it needs no privileges on the tables."""
+    problems = []
+    for table, columns in REQUIRED.items():
+        found = dict(conn.execute(_COLUMNS_OF, (table,)).fetchall())
+        if not found:
+            problems.append(f"there is no table {table}")
+            continue
+        missing = [column for column in columns if column not in found]
+        if missing:
+            problems.append(f"{table} has no column {', '.join(missing)}")
+        problems += [
+            f"{table}.{column} must allow NULL"
+            for t, column in NULLABLE
+            if t == table and found.get(column)
+        ]
+    return problems
+
+
+def _current_role(conn: psycopg.Connection[Any]) -> str:
+    row = conn.execute("SELECT current_user").fetchone()
+    return str(row[0]) if row else "?"
 
 
 _COLUMNS = (

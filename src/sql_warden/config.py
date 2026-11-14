@@ -528,6 +528,9 @@ class AuditConfig(_Section):
 
     dsn: str = DEFAULT_AUDIT_DSN
     connect_timeout_s: PositiveInt = 5
+    append_only: bool = False
+    """Refuse to serve unless the audit role can only add records: it can't change or remove
+    one, nor own the table. Without it a server that could only warns."""
 
 
 EVERYTHING: Literal["*"] = "*"

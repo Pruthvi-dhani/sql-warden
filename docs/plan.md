@@ -1052,7 +1052,7 @@ CLI.
   without it, so its outage shouldn't take the server out of rotation); base images are
   pinned by tag, not digest; there is no image published anywhere.
 
-**9.5 Config validation & hot reload** ✅ done
+**9.5 Config validation & hot reload** ✅ done (`544aafb`)
 - `sql-warden config validate` gains `--live`, which checks the policy against the live catalog
   (approved columns that no longer exist, masks on unknown columns). A policy reload on SIGHUP
   is atomic; a bad config keeps the old policy and logs the error.
@@ -1108,7 +1108,7 @@ CLI.
   (its agent restarts it); the catalog compared only at startup and reload, not as it
   changes.
 
-**9.6 Hardened audit**
+**9.6 Hardened audit** ✅ done
 - Deployment SQL for an INSERT-only warden role on `audit_events` (no UPDATE/DELETE) and a
   retention job (`sql-warden audit prune --older-than`, run by a separately privileged role).
   Optional one-way export to Snowflake for analytics. The deployment guide goes in
@@ -1116,6 +1116,63 @@ CLI.
   warehouse).
 - Tests: an integration test where the warden role's UPDATE/DELETE on audit is denied, and a
   prune test.
+- As built, the roles: `deploy/audit_roles.sql` (run once by the audit database's
+  administrator, safe to run again) makes four group roles that can't log in, and logins are
+  made members of them: `sql_warden_owner` (owns the tables), `sql_warden_writer` (the
+  server's), `sql_warden_pruner` and `sql_warden_reader`. It also takes `CREATE` on `public`
+  from everyone but the owner. "INSERT-only" is not quite what the writer has: it also
+  **reads** `audit_events`, since budgets are seeded and restored from it (6.3, 9.3), and keeps
+  the two budget tables (9.3's note). What it can't do is change or remove a record: no
+  UPDATE, DELETE or TRUNCATE on `audit_events`, and it doesn't own it.
+- As built, the schema: `schema.sql` grants each of those roles its privileges, where they
+  exist, so `sql-warden audit init --owner sql_warden_owner` (new) makes or updates the
+  tables as the owner and grants in one step. A server whose role doesn't own the tables no
+  longer runs DDL as it starts (it can't, and must not): it reads the catalog to check that
+  every table and column this version needs is there and that it can add records, and
+  otherwise refuses to start, saying to run `audit init` as their owner. A role that owns them
+  or finds none, as in the demo stack, applies the schema as before.
+- As built, the server checks its audit role as 8.1 checks the warehouse's: what it can do to
+  records already written, as a superuser, as the owner or a role that can act as it, or by
+  UPDATE, DELETE or TRUNCATE, for every role it is a member of. It warns by default (the
+  demo's audit role is a superuser), and with the new `audit.append_only: true` refuses to
+  start. `config validate --live` adds an `audit:` line for the same, and fails it under
+  `append_only` or when the audit database can't be reached.
+- As built, retention: `sql-warden audit prune --older-than 90d [--dry-run]` removes the
+  events recorded before the cutoff (by the database's clock), the budget rows of sessions
+  idle since then, and callers' charges older than both the cutoff and the longest window a
+  budget can have (31 days, so no caller's budget gets anything back). It refuses less than a
+  day. All of it, and a row in the new `audit_prunes` table (who, the cutoff, how many of
+  each), is one transaction. The pruner reads only the time columns and may only add to
+  `audit_prunes`, so a prune can't be hidden and the pruner reads no SQL.
+- As built, export: not a writer into Snowflake (there is no account to test one against, and
+  a push would need the audit database's credentials and Snowflake's in one place), but
+  `sql-warden audit export --since --until [-o FILE]`: every event in the window as JSON
+  Lines, as `audit tail --json` writes them, read a thousand at a time through a server-side
+  cursor. Windows that meet export each event once, and `--until` defaults to a minute ago so
+  a window is closed. `docs/deploy.md` shows loading it into Snowflake through a stage, marked
+  as never run against a real account.
+- As built, `docs/deploy.md`: the shape of a deployment; the warehouse's roles (with
+  Snowflake's warehouse and resource monitor); the audit roles, `append_only`, moving an
+  existing audit database to the owner, retention and export; secrets (`${VAR}` in the file,
+  from a secrets manager; a rotated password takes a restart, since a reload re-reads the
+  file, not the environment); Kubernetes (ConfigMap mounted as a directory, Secret,
+  Deployment with probes and a locked-down security context, Service, a NetworkPolicy both
+  ways, a CronJob for retention, and reloading each pod with SIGHUP through Python, since
+  the image has no shell); ECS (a Fargate task definition with Secrets Manager, ALB, security
+  groups); and a checklist. The image test now runs the image as the guide says: read-only
+  root filesystem, every capability dropped, no new privileges.
+- Tests: 26 unit (`test_hardened_audit.py`: ages, arguments, what `serve` and `validate
+  --live` make of each audit role), 5 for the guide (`test_deploy_docs.py`: its YAML and JSON
+  parse, its two policies validate, the pod's grace period outlasts the server's), and 22 on
+  Postgres (`test_hardened_audit_on_postgres.py`, in a database of its own with the deploy
+  roles): the tables the owner's; the writer starting without DDL, recording and keeping
+  budgets, and refused UPDATE, DELETE, TRUNCATE, ALTER and DROP; the message for a schema it
+  can't update; what each role could tamper with, including a grant only `SET ROLE` would
+  give; prune and its record, the pruner reading no SQL nor hiding a prune, the writer unable
+  to prune; export windows; the reader only reading.
+- Left for later: tamper **evidence** (the writer can still add false records; a hash chain,
+  or shipping records elsewhere as they are written, would show it); exporting straight into
+  Snowflake; a schema version number rather than a column check.
 
 ---
 

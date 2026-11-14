@@ -152,7 +152,7 @@ class TestDriftWhereItIsChecked:
         _catalog(monkeypatch, CATALOG)
         outcome = CliRunner().invoke(cli, ["config", "validate", drifting, "--live"])
         assert outcome.exit_code == 1
-        assert outcome.output.splitlines()[-8:] == [
+        assert outcome.output.splitlines()[-9:] == [
             "  live:      support: role warden_reader can only read",
             "               ✗ the profile allows what the role can't see:",
             "                 column price_cents of public.products",
@@ -160,6 +160,7 @@ class TestDriftWhereItIsChecked:
             "               ✗ the profile masks columns the role can't see:",
             "                 public.customers.tax_id",
             "             admin: role warden_reader can only read",
+            "  audit:     its role can only add records",
             f"Error: {DRIFTED}",
         ]
         assert "hunter2" not in outcome.output

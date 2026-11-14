@@ -15,6 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from sql_warden import __version__
 from sql_warden.audit import AuditError, AuditEvent, AuditReader, AuditSink, PostgresAuditSink
+from sql_warden.audit.retention import parse_age, prune
 from sql_warden.auth import Authenticator, key_hash, new_api_key
 from sql_warden.config import (
     EVERYTHING,
@@ -162,6 +163,35 @@ def open_audit(config: WardenConfig) -> PostgresAuditSink:
             "sql-warden records every request and won't run without its audit database."
         ) from exc
     return sink
+
+
+ONLY_APPENDS = (
+    "An audit log its writer can change is no record of what happened: give the server a "
+    "role that can only add records (sql_warden_writer, in deploy/audit_roles.sql)."
+)
+
+
+def vet_audit(audit: AuditSink, config: WardenConfig) -> None:
+    """Look at what the audit role can do to what it has recorded, before a server serves.
+    A role that could change or remove records gets a warning, or with audit.append_only
+    ends the command."""
+    tampering = getattr(audit, "tampering", None)
+    if not callable(tampering):
+        return  # a sink that isn't a database
+    where = describe_dsn(config.audit.dsn)
+    try:
+        found = tampering()
+    except AuditError as exc:
+        raise click.ClickException(f"audit database at {where}: {exc}") from exc
+    if not found:
+        return
+    lines = [
+        f"the audit role ({where}) can change or remove what is recorded:",
+        *(f"  it {line}" for line in found),
+    ]
+    if config.audit.append_only:
+        raise click.ClickException("\n".join([*lines, ONLY_APPENDS, "audit.append_only is set."]))
+    click.echo("\n".join([f"warning: {lines[0]}", *lines[1:], ONLY_APPENDS]), err=True)
 
 
 def _session_name(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
@@ -557,7 +587,9 @@ def serve(
     """
     config = settings(state, dsn, max_rows, timeout_ms, audit_dsn)
     if transport == "stdio":
-        create_server(build_warden(config, profile, serving=True)).run("stdio")
+        audit = open_audit(config)
+        vet_audit(audit, config)
+        create_server(build_warden(config, profile, audit=audit, serving=True)).run("stdio")
         return
     if config.auth is not None and profile is not None:
         raise click.ClickException(
@@ -565,6 +597,7 @@ def serve(
             "--profile is for stdio, where whoever starts the server picks"
         )
     audit = open_audit(config)  # one audit log for every profile, and for every reload
+    vet_audit(audit, config)
     metrics = Metrics()
     live = LivePolicy(_policy(config, profile, audit=audit, metrics=metrics))
     host, port = host or config.server.host, port or config.server.port
@@ -875,6 +908,156 @@ def show(state: CliState, event_id: str, as_json: bool, audit_dsn: str | None) -
     click.echo(json.dumps(audit_json(event)) if as_json else format_audit_event(event))
 
 
+@audit_group.command("init")
+@click.option(
+    "--owner",
+    help="Make the tables as this role, which then owns them: the sql_warden_owner role "
+    "from deploy/audit_roles.sql, which the connecting role must be a member of.",
+)
+@audit_dsn_option
+@click.pass_obj
+def init_audit(state: CliState, owner: str | None, audit_dsn: str | None) -> None:
+    """Create or update the audit tables, and grant the roles from deploy/audit_roles.sql
+    what each may do. A server whose role owns the tables does this itself as it starts; a
+    server whose role may only add records can't, so their owner runs this first, and
+    again after an upgrade."""
+    config = settings(state, None, None, None, audit_dsn)
+    where = describe_dsn(config.audit.dsn)
+    sink = PostgresAuditSink(config.audit.dsn, connect_timeout_s=config.audit.connect_timeout_s)
+    try:
+        sink.apply_schema(owner)
+    except AuditError as exc:
+        raise click.ClickException(f"audit database at {where}: {exc}") from exc
+    finally:
+        sink.close()
+    owned = f", owned by {owner}" if owner else ""
+    click.echo(f"✓ the audit tables at {where} are up to date{owned}")
+
+
+def _age(ctx: click.Context, param: click.Parameter, value: str) -> datetime.timedelta:
+    try:
+        return parse_age(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+
+@audit_group.command("prune")
+@click.option(
+    "--older-than",
+    "older_than",
+    required=True,
+    callback=_age,
+    help="Remove records older than this: days or hours, like 90d or 36h. At least 1d.",
+)
+@click.option("--dry-run", is_flag=True, help="Count what would be removed; remove nothing.")
+@audit_dsn_option
+@click.pass_obj
+def prune_audit(
+    state: CliState, older_than: datetime.timedelta, dry_run: bool, audit_dsn: str | None
+) -> None:
+    """Remove old records from the audit log, and record that they were.
+
+    Removes the events recorded before the cutoff, the budgets of sessions idle since then,
+    and callers' charges older than any budget's window. Run it on a schedule as a role
+    that may (sql_warden_pruner), not as the server's: each prune is recorded in
+    audit_prunes in the same transaction, which that role can add to and nothing more."""
+    config = settings(state, None, None, None, audit_dsn)
+    where = describe_dsn(config.audit.dsn)
+    try:
+        pruned = prune(
+            config.audit.dsn,
+            older_than,
+            dry_run=dry_run,
+            connect_timeout_s=config.audit.connect_timeout_s,
+        )
+    except AuditError as exc:
+        raise click.ClickException(f"audit database at {where}: {exc}") from exc
+    cutoff = pruned.older_than.astimezone(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    verb = "would remove" if dry_run else "removed"
+    click.echo(
+        f"{verb} {pruned.events:,} audit events recorded before {cutoff}, the budgets of "
+        f"{pruned.sessions:,} sessions idle since then, and {pruned.caller_charges:,} caller "
+        "charges"
+    )
+    click.echo("nothing was removed: this was a dry run" if dry_run else "recorded in audit_prunes")
+
+
+class _Timestamp(click.ParamType[datetime.datetime]):
+    """An ISO 8601 date or time, in UTC unless it says otherwise."""
+
+    name = "timestamp"
+
+    def convert(
+        self, value: Any, param: click.Parameter | None, ctx: click.Context | None
+    ) -> datetime.datetime:
+        if isinstance(value, datetime.datetime):
+            return value
+        try:
+            ts = datetime.datetime.fromisoformat(str(value).strip())
+        except ValueError:
+            self.fail(
+                f"'{value}' is not a date or time: give one like 2026-11-01 or "
+                "2026-11-01T09:30:00+00:00",
+                param,
+                ctx,
+            )
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=datetime.UTC)
+
+
+EXPORT_SETTLE = datetime.timedelta(minutes=1)
+"""How far back from now an export ends by default. An event's time is set when its request
+finishes and it is written a moment later, so a window that ended just now could still
+gain one."""
+
+
+@audit_group.command("export")
+@click.option("--since", type=_Timestamp(), required=True, help="From this time, included.")
+@click.option(
+    "--until",
+    type=_Timestamp(),
+    help="Up to this time, not included. Default: a minute ago, so the window is closed.",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.File("w", encoding="utf-8", lazy=True),
+    default="-",
+    help="Write here instead of to stdout.",
+)
+@audit_dsn_option
+@click.pass_obj
+def export_audit(
+    state: CliState,
+    since: datetime.datetime,
+    until: datetime.datetime | None,
+    output: Any,
+    audit_dsn: str | None,
+) -> None:
+    """Every event recorded in a window, oldest first, one JSON object a line (as `audit
+    tail --json` prints them): to load into an analytics warehouse, such as Snowflake.
+
+    One-way: it only reads, and a role that may only read is enough (sql_warden_reader).
+    Windows that meet export every event once, so a scheduled export can start each run
+    where the last ended."""
+    until = until or datetime.datetime.now(datetime.UTC) - EXPORT_SETTLE
+    if until <= since:
+        raise click.ClickException("--until must be after --since")
+    reader, where = _open_reader(state, audit_dsn)
+    exported = 0
+    try:
+        for event in reader.export(since, until):
+            output.write(json.dumps(audit_json(event)) + "\n")
+            exported += 1
+    except AuditError as exc:
+        raise click.ClickException(f"audit database at {where}: {exc}") from exc
+    finally:
+        reader.close()
+    click.echo(
+        f"exported {exported:,} events recorded from {since.isoformat()} until {until.isoformat()}",
+        err=True,
+    )
+
+
 @cli.group("auth")
 def auth_group() -> None:
     """Make API keys for callers of the HTTP server."""
@@ -998,13 +1181,45 @@ def validate(state: CliState, path: Path | None, live: bool) -> None:
         click.echo(line)
     if live:
         lines, safe, drifted = describe_roles(loaded)
-        for line in lines:
+        audit_lines, audit_problem = describe_audit_role(loaded)
+        for line in [*lines, *audit_lines]:
             click.echo(line)
         problems = [] if safe else [f"a server would not start for every profile. {ONLY_READERS}"]
         if drifted:
             problems.append(DRIFTED)
+        if audit_problem is not None:
+            problems.append(audit_problem)
         if problems:
             raise click.ClickException("\n".join(problems))
+
+
+def describe_audit_role(config: WardenConfig) -> tuple[list[str], str | None]:
+    """What the audit database says its role can do to records, for `config validate
+    --live`, and why a server would not start because of it, if it wouldn't. It reads the
+    catalog and changes nothing, tables included."""
+    label = "  audit:     "
+    sink = PostgresAuditSink(config.audit.dsn, connect_timeout_s=config.audit.connect_timeout_s)
+    try:
+        found = sink.tampering()
+    except AuditError as exc:
+        reason = str(exc).splitlines()[0]
+        return [f"{label}✗ could not check its role: {reason}"], (
+            "a server would not start: it records every request, and can't reach the audit database"
+        )
+    finally:
+        sink.close()
+    if found is None:
+        return [f"{label}no audit tables yet: `sql-warden audit init` makes them"], None
+    if not found:
+        return [f"{label}its role can only add records"], None
+    refused = config.audit.append_only
+    lines = [
+        f"{label}{'✗' if refused else '!'} its role can change or remove records:",
+        *(f"               it {line}" for line in found),
+    ]
+    if not refused:
+        return lines, None
+    return lines, f"a server would not start, since audit.append_only is set. {ONLY_APPENDS}"
 
 
 def describe_roles(config: WardenConfig) -> tuple[list[str], bool, bool]:

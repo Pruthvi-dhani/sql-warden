@@ -1,8 +1,9 @@
 -- sql-warden's audit log: one row per request, allowed or not.
 --
--- Applied at startup and safe to apply again: everything is IF NOT EXISTS. A column added
+-- Applied by `sql-warden audit init`, and at startup by a server whose role owns the tables
+-- (or finds none yet); safe to apply again: everything is IF NOT EXISTS. A column added
 -- later must be added here as ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so existing audit
--- databases pick it up too.
+-- databases pick it up too, and to the columns PostgresAuditSink checks for (sink.py).
 
 CREATE TABLE IF NOT EXISTS audit_events (
     id             uuid             PRIMARY KEY,
@@ -68,3 +69,38 @@ CREATE TABLE IF NOT EXISTS caller_charges (
     refusals       integer          NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS caller_charges_by_caller ON caller_charges (profile, caller, ts);
+
+-- Every `sql-warden audit prune`: who removed what, recorded in the same transaction as the
+-- removal. The role that prunes may add rows here and nothing more, so what it removed
+-- stays on record.
+CREATE TABLE IF NOT EXISTS audit_prunes (
+    ts              timestamptz      NOT NULL DEFAULT now(),
+    pruned_by       text             NOT NULL DEFAULT session_user,
+    older_than      timestamptz      NOT NULL,  -- events recorded before this were removed
+    events          bigint           NOT NULL,
+    sessions        bigint           NOT NULL,  -- budget rows of sessions idle since then
+    caller_charges  bigint           NOT NULL
+);
+
+-- What each of the roles from deploy/audit_roles.sql may do, for the ones that exist. The
+-- writer (the server) adds records and reads them back for budgets, and keeps the budget
+-- tables, but can't change or remove a record. The pruner removes old rows and records
+-- that it did. The reader reads, for `audit tail`, `show` and `export`.
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'sql_warden_writer') THEN
+        GRANT SELECT, INSERT ON audit_events TO sql_warden_writer;
+        GRANT SELECT, INSERT, UPDATE ON session_usage TO sql_warden_writer;
+        GRANT SELECT, INSERT, DELETE ON caller_charges TO sql_warden_writer;
+    END IF;
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'sql_warden_pruner') THEN
+        GRANT SELECT (ts), DELETE ON audit_events TO sql_warden_pruner;
+        GRANT SELECT (updated_at), DELETE ON session_usage TO sql_warden_pruner;
+        GRANT SELECT (ts), DELETE ON caller_charges TO sql_warden_pruner;
+        GRANT INSERT ON audit_prunes TO sql_warden_pruner;
+    END IF;
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'sql_warden_reader') THEN
+        GRANT SELECT ON audit_events, audit_prunes TO sql_warden_reader;
+    END IF;
+END
+$$;

@@ -163,6 +163,18 @@ uv run sql-warden audit show 5019a2f1 --json             # an id, or its first f
 uv run sql-warden audit tail --session nightly-report    # everything one session asked
 ```
 
+In production the server's audit role should be able to add records and never change or
+remove one. [docs/deploy.md](docs/deploy.md#2-the-audit-databases-roles) sets that up with
+[deploy/audit_roles.sql](deploy/audit_roles.sql), and `audit.append_only: true` makes a
+server refuse to start otherwise (it warns either way, as the demo stack's superuser gets).
+Three more commands are for that setup, each run as a role of its own:
+
+```bash
+sql-warden audit init --owner sql_warden_owner           # make or update the tables, as their owner
+sql-warden audit prune --older-than 90d [--dry-run]      # remove old records; each prune is recorded
+sql-warden audit export --since 2026-11-13 --until 2026-11-14 > day.jsonl   # JSON Lines, for analytics
+```
+
 #### Sessions
 
 Every request belongs to a session, and its record in the audit log says which
@@ -469,6 +481,8 @@ runs it:
 
 No label holds anything a caller chooses (an identity, say), so no caller can make the set
 grow. Route only `/mcp` through the public proxy: the other three are for the cluster.
+[docs/deploy.md](docs/deploy.md) has the whole of a deployment: the databases' roles,
+secrets, Kubernetes and ECS, the network, and keeping the audit log.
 
 On `SIGTERM` the server stops taking connections and gives the requests it has
 `server.shutdown_grace_s` (30) seconds to finish. `server.max_concurrent_requests` (32) is how

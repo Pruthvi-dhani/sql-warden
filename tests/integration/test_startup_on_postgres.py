@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from psycopg.conninfo import make_conninfo
 
 from sql_warden import cli as cli_module
-from sql_warden.cli import ONLY_READERS, cli
+from sql_warden.cli import ONLY_APPENDS, ONLY_READERS, cli
 from sql_warden.engines import RoleReport
 from sql_warden.engines.postgres import PostgresEngine
 from sql_warden.profiles import Access
@@ -157,16 +157,33 @@ def served(monkeypatch: pytest.MonkeyPatch) -> Served:
     return served
 
 
+def _past_audit_warning(output: str) -> list[str]:
+    """output's lines after the warning every server here gives: the test audit database's
+    role is its superuser, as the demo stack's is."""
+    lines = output.splitlines()
+    assert lines[0].startswith("warning: the audit role ("), output
+    assert lines[1:3] == AUDIT_WARNING, output
+    return lines[3:]
+
+
+AUDIT_WARNING = ["  it is a superuser", ONLY_APPENDS]
+"""What follows the first line of it, which names the audit database."""
+
+
 class TestServe:
     def test_it_starts_as_the_reader(self, warehouse: Warehouse, served: Served) -> None:
         outcome = CliRunner().invoke(cli, ["serve", "--dsn", warehouse.reader_dsn])
-        assert (outcome.exit_code, outcome.output) == (0, "")
+        assert outcome.exit_code == 0
+        lines = outcome.output.splitlines()
+        assert lines[0].startswith("warning: the audit role (")
+        assert lines[0].endswith(" as warden_audit) can change or remove what is recorded:")
+        assert lines[1:] == AUDIT_WARNING
         assert served.profiles == ["all"]
 
     def test_it_does_not_start_as_the_superuser(self, warehouse: Warehouse, served: Served) -> None:
         outcome = CliRunner().invoke(cli, ["serve", "--dsn", warehouse.admin_dsn])
         assert outcome.exit_code == 1
-        lines = outcome.output.splitlines()
+        lines = _past_audit_warning(outcome.output)
         assert lines[0].startswith("Error: profile all: role warehouse_admin can change the")
         assert lines[1:] == ["  it is a superuser", ONLY_READERS]
         assert "warehouse_admin:warehouse_admin" not in outcome.output  # never the password
@@ -177,7 +194,7 @@ class TestServe:
     ) -> None:
         outcome = CliRunner().invoke(cli, ["serve", "--dsn", _as(warehouse, "st_member")])
         assert outcome.exit_code == 1
-        assert outcome.output.splitlines()[1] == (
+        assert _past_audit_warning(outcome.output)[1] == (
             "  it can TRUNCATE on public.products, as a member of st_cleaners"
         )
         assert served.profiles == []
@@ -187,7 +204,7 @@ class TestServe:
             cli, ["serve", "--dsn", "postgresql://nobody:hunter2@127.0.0.1:1/none"]
         )
         assert outcome.exit_code == 1
-        assert outcome.output.startswith(
+        assert _past_audit_warning(outcome.output)[0].startswith(
             "Error: profile all: could not check what its role can do in the warehouse "
             "(127.0.0.1:1/none as nobody): could not connect to the database"
         )
@@ -216,12 +233,14 @@ class TestValidateLive:
     def test_every_profiles_role(self, policy: Path) -> None:
         outcome = CliRunner().invoke(cli, ["config", "validate", str(policy), "--live"])
         assert outcome.exit_code == 0, outcome.output
-        assert outcome.output.splitlines()[-5:] == [
+        assert outcome.output.splitlines()[-7:] == [
             "  live:      public: role warden_public can only read",
             "             support: role warden_reader can only read",
             "               ! but more than the profile allows:",
             "                 table public.employee_salaries",
             "             admin: role warden_reader can only read",
+            "  audit:     ! its role can change or remove records:",
+            "               it is a superuser",
         ]
 
     def test_a_profile_whose_role_can_write_fails_it(
@@ -232,8 +251,10 @@ class TestValidateLive:
         )
         outcome = CliRunner().invoke(cli, ["config", "validate", str(policy), "--live"])
         assert outcome.exit_code == 1
-        assert outcome.output.splitlines()[-3:] == [
+        assert outcome.output.splitlines()[-5:] == [
             "             root: ✗ role warehouse_admin can change the warehouse",
+            "               it is a superuser",
+            "  audit:     ! its role can change or remove records:",
             "               it is a superuser",
             f"Error: a server would not start for every profile. {ONLY_READERS}",
         ]

@@ -327,7 +327,7 @@ class TestValidateLive:
         monkeypatch.setattr(cli_module, "PostgresEngine", engine)
         outcome = CliRunner().invoke(cli, ["config", "validate", policy, "--live"])
         assert outcome.exit_code == 0, outcome.output
-        assert outcome.output.splitlines()[-9:] == [
+        assert outcome.output.splitlines()[-10:] == [
             "  live:      public: role warden_public can only read",
             "               ! but more than the profile allows:",
             "                 table public.customers",
@@ -337,6 +337,7 @@ class TestValidateLive:
             "                 table public.customers",
             "                 table public.employee_salaries",
             "             admin: role warden_reader can only read",
+            "  audit:     its role can only add records",
         ]
         assert [dsn.split(":")[1] for dsn in built] == [
             "//warden_public",
@@ -356,12 +357,13 @@ class TestValidateLive:
         monkeypatch.setattr(cli_module, "PostgresEngine", engine)
         outcome = CliRunner().invoke(cli, ["config", "validate", policy, "--live"])
         assert outcome.exit_code == 1
-        assert outcome.output.splitlines()[-6:] == [
+        assert outcome.output.splitlines()[-7:] == [
             "  live:      public: role warden_public can only read",
             "             support: ✗ role warehouse_admin can change the warehouse",
             "               it is a superuser",
             "             admin: ✗ role warehouse_admin can change the warehouse",
             "               it is a superuser",
+            "  audit:     its role can only add records",
             f"Error: a server would not start for every profile. {ONLY_READERS}",
         ]
 
@@ -372,7 +374,7 @@ class TestValidateLive:
         _engine(monkeypatch, error=down)
         outcome = CliRunner().invoke(cli, ["config", "validate", policy, "--live"])
         assert outcome.exit_code == 1
-        assert outcome.output.splitlines()[-4] == (
+        assert outcome.output.splitlines()[-5] == (
             "  live:      public: ✗ could not check its role: could not connect to the "
             "database: refused"
         )
@@ -385,4 +387,7 @@ class TestValidateLive:
         _engine(monkeypatch, catalog=READABLE)
         outcome = CliRunner().invoke(cli, ["config", "validate", str(path), "--live"])
         assert outcome.exit_code == 0, outcome.output
-        assert outcome.output.splitlines()[-1] == "  live:      all: role fake_reader can only read"
+        assert outcome.output.splitlines()[-2:] == [
+            "  live:      all: role fake_reader can only read",
+            "  audit:     its role can only add records",
+        ]

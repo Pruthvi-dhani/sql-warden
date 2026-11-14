@@ -115,10 +115,19 @@ class FakeAuditSink(MemoryAuditSink):
         self.dsn = dsn
         self.connect_timeout_s = connect_timeout_s
         self.schema_applied = False
+        self.can_tamper: tuple[str, ...] | None = ()
+        """What tampering() answers: by default, a role that can only add records."""
 
     def ensure_schema(self) -> None:
         self.ping()
         self.schema_applied = True
+
+    def tampering(self) -> tuple[str, ...] | None:
+        self.ping()
+        return self.can_tamper
+
+    def close(self) -> None:
+        pass
 
 
 @dataclass
@@ -126,6 +135,8 @@ class AuditSinks:
     built: list[FakeAuditSink] = field(default_factory=list)
     fail_with: AuditError | None = None
     """Set to make the sinks built from now on fail, as an unreachable database would."""
+    can_tamper: tuple[str, ...] | None = ()
+    """What the sinks built from now on say their role can do to records."""
 
     database: list[AuditEvent] = field(default_factory=list)
     """What they all record to."""
@@ -143,6 +154,7 @@ def audit_sinks(monkeypatch: pytest.MonkeyPatch) -> AuditSinks:
     def factory(dsn: str, *, connect_timeout_s: int) -> FakeAuditSink:
         sink = FakeAuditSink(dsn, connect_timeout_s=connect_timeout_s, database=sinks.database)
         sink.fail_with = sinks.fail_with
+        sink.can_tamper = sinks.can_tamper
         sinks.built.append(sink)
         return sink
 

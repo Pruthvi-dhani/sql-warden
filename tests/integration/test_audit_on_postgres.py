@@ -169,7 +169,7 @@ def test_without_the_audit_database_nothing_starts(warehouse: Warehouse) -> None
     assert outcome.exit_code == EXIT_ERROR
     assert outcome.output.startswith(
         "Error: audit database at 127.0.0.1:1/audit as warden_audit: "
-        "could not set up the audit table: "
+        "could not set up the audit tables: "
     )
     assert "hunter2" not in outcome.output
 
