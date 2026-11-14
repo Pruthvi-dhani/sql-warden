@@ -35,6 +35,14 @@ GRANT USAGE ON SCHEMA public TO warden_public;
 GRANT SELECT (id, name, price_cents) ON public.products TO warden_public;
 ```
 
+**Connections.** Each server keeps up to `warehouse.pool.max_size` (10) connections open for
+each profile, so the replica's `max_connections` must allow replicas × profiles ×
+`max_size`, beside whatever else uses it. Size it from `sql_warden_pool_requests_waiting`:
+requests that wait often want a bigger pool, or more replicas. A connection is replaced
+after `max_lifetime_s` (30 minutes), so a replica that failed over to a new address behind
+the same name is reached without a restart. A rotated password is not: new connections still
+use the one the process started with (see Secrets).
+
 On Snowflake, give sql-warden a warehouse of its own (an XS one is plenty) with a resource
 monitor, so no query, however it gets past the cost check, can spend more than you set (as
 with all of sql-warden's Snowflake support, this has not been run against a real account):

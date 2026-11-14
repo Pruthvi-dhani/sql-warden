@@ -153,6 +153,24 @@ def check_dsn(dsn: str, engine: str) -> None:
         raise PydanticCustomError("dsn", "{problem}", {"problem": str(exc)}) from None
 
 
+class PoolConfig(_Section):
+    """How a server keeps its connections to a Postgres database, rather than opening one for
+    every request: for each profile, so profiles never share a connection."""
+
+    max_size: int = Field(default=10, ge=1, le=1000)
+    """The most connections open at once, per profile: the database must allow this many
+    for each profile, on each server."""
+    max_idle_s: float = Field(default=300.0, gt=0)
+    """An idle connection is closed after this long, down to none."""
+    max_lifetime_s: float = Field(default=1800.0, ge=60)
+    """A connection is replaced after this long: how a replica that failed over to a new
+    address behind the same name is reached. A rotated password is not picked up this way:
+    the connection string is read once, when the process starts."""
+    timeout_s: float = Field(default=5.0, gt=0, le=60)
+    """How long a request waits for a connection when all are in use. One that gets none is
+    answered as if the database couldn't be reached."""
+
+
 class WarehouseConfig(_Section):
     engine: Literal["postgres", "snowflake"] = "postgres"
     dsn: str = DEFAULT_DSN
@@ -162,6 +180,8 @@ class WarehouseConfig(_Section):
     """Snowflake counts in whole seconds, so there it is rounded up to the next one."""
     max_rows: PositiveInt = 100
     connect_timeout_s: PositiveInt = 5
+    pool: PoolConfig = PoolConfig()
+    """For the postgres engine, when serving. Commands run by hand use one connection."""
 
     @model_validator(mode="after")
     def _dsn_fits_the_engine(self) -> Self:
@@ -170,6 +190,16 @@ class WarehouseConfig(_Section):
                 "dsn_missing", "the snowflake engine needs a dsn: {form}", {"form": DSN_FORM}
             )
         check_dsn(self.dsn, self.engine)
+        return self
+
+    @model_validator(mode="after")
+    def _pool_is_postgres(self) -> Self:
+        if self.engine == "snowflake" and "pool" in self.model_fields_set:
+            raise PydanticCustomError(
+                "pool_snowflake",
+                "pool is for the postgres engine: the snowflake engine keeps one session per "
+                "profile open, and shares it",
+            )
         return self
 
     @property

@@ -478,6 +478,10 @@ runs it:
 | `sql_warden_requests_in_flight`          | requests being answered right now                                 |
 | `sql_warden_config_reloads_total`        | reloads of the policy on `SIGHUP`, by `outcome` (applied, failed) |
 | `sql_warden_config_last_reload_successful` | `0` while the policy file as it is now failed to load, else `1` |
+| `sql_warden_pool_connections`            | connections a pool has open, by `pool` (warehouse) and `profile`  |
+| `sql_warden_pool_connections_in_use`     | connections lent out right now                                    |
+| `sql_warden_pool_requests_waiting`       | requests waiting for a connection, because every one is in use    |
+| `sql_warden_pool_timeouts_total`         | requests that got none within `warehouse.pool.timeout_s`          |
 
 No label holds anything a caller chooses (an identity, say), so no caller can make the set
 grow. Route only `/mcp` through the public proxy: the other three are for the cluster.
@@ -486,8 +490,16 @@ secrets, Kubernetes and ECS, the network, and keeping the audit log.
 
 On `SIGTERM` the server stops taking connections and gives the requests it has
 `server.shutdown_grace_s` (30) seconds to finish. `server.max_concurrent_requests` (32) is how
-many requests it answers at once; the rest wait. Each one being answered can hold a
-connection to a warehouse, so this bounds those too.
+many requests it answers at once; the rest wait.
+
+A server keeps its connections to a Postgres warehouse in a pool, one per profile
+(`warehouse.pool`: up to `max_size`, 10, each), instead of opening one for every request;
+so the warehouse must allow servers × profiles × `max_size` connections. Each connection is
+checked as it is lent and reset with `DISCARD ALL` as it comes back, so nothing one request
+leaves on it reaches the next. A request that finds every connection in use waits up to
+`timeout_s` (5) and is then answered as when the warehouse can't be reached. Snowflake keeps
+one session per profile open instead. `dev/loadtest.py` measures a server under many callers
+at once, against throwaway databases of its own.
 
 #### Reloading the policy
 

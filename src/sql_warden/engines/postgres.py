@@ -1,10 +1,11 @@
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any
 
 import psycopg
 from psycopg import errors
+from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 from sql_warden.engines.base import (
     Column,
@@ -16,6 +17,7 @@ from sql_warden.engines.base import (
     RoleReport,
     Table,
 )
+from sql_warden.pools import PoolSettings, PoolStats, Reach, open_pool, stats
 
 # information_schema lists only what the connecting role has privileges on.
 _TABLES_SQL = """
@@ -232,7 +234,11 @@ class PostgresEngine:
         statement_timeout_ms: int = 5_000,
         max_rows: int = 1_000,
         connect_timeout_s: int = 5,
+        pool: PoolSettings | None = None,
+        name: str = "warehouse",
     ) -> None:
+        """pool, for an engine that serves many requests: its connections are kept and lent
+        out rather than opened for each call. name labels the pool in psycopg's logs."""
         if statement_timeout_ms <= 0:
             raise ValueError("statement_timeout_ms must be positive")
         if max_rows <= 0:
@@ -243,6 +249,23 @@ class PostgresEngine:
         self.statement_timeout_ms = statement_timeout_ms
         self.max_rows = max_rows
         self._connect_timeout_s = connect_timeout_s
+        self._pool: ConnectionPool[psycopg.Connection[Any]] | None = None
+        self._reach = Reach()
+        self._pool_timeout_s = 0.0
+        if pool is not None:
+            self._pool, self._reach = open_pool(
+                dsn, pool, name=name, connect_timeout_s=connect_timeout_s
+            )
+            self._pool_timeout_s = pool.timeout_s
+
+    def pool_stats(self) -> PoolStats | None:
+        """What the engine's pool is doing, if it has one."""
+        return None if self._pool is None else stats(self._pool)
+
+    def close(self) -> None:
+        """Close the pool, if there is one: connections in use are closed as they come back."""
+        if self._pool is not None:
+            self._pool.close()
 
     def execute(self, sql: str, *, tag: str | None = None) -> Result:
         # tag is for engines whose database records one per query; the audit log has it here.
@@ -300,12 +323,7 @@ class PostgresEngine:
         Database errors inside the block come out as engine errors; positions in them point
         into sql, if given: the query sent after prefix (the cursor's DECLARE, or EXPLAIN).
         """
-        try:
-            conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout_s)
-        except psycopg.OperationalError as exc:
-            raise EngineUnavailable(f"could not connect to the database: {exc}") from exc
-
-        with conn:
+        with self._connection() as conn:
             conn.read_only = True
             try:
                 # standard_conforming_strings is how the checks read a string: a backslash
@@ -325,3 +343,31 @@ class PostgresEngine:
                 raise QueryFailed(describe_error(exc, sql, prefix), exc.sqlstate) from exc
             finally:
                 conn.rollback()
+
+    @contextmanager
+    def _connection(self) -> Iterator[psycopg.Connection[tuple[Any, ...]]]:
+        """A connection of the engine's own, or one lent by its pool and returned after."""
+        if self._pool is None:
+            try:
+                conn = psycopg.connect(self._dsn, connect_timeout=self._connect_timeout_s)
+            except psycopg.OperationalError as exc:
+                raise EngineUnavailable(f"could not connect to the database: {exc}") from exc
+            with conn:
+                yield conn
+            return
+        with ExitStack() as returned:  # the connection goes back to the pool as this ends
+            try:
+                conn = returned.enter_context(self._pool.connection())
+            except PoolTimeout as exc:
+                failure = self._reach.failure
+                if failure is not None:  # its last try to connect failed: not merely busy
+                    raise EngineUnavailable(
+                        f"could not connect to the database: {failure}"
+                    ) from exc
+                raise EngineUnavailable(
+                    f"no connection to the database was free within "
+                    f"{self._pool_timeout_s:g} s: every one is in use"
+                ) from exc
+            except PoolClosed as exc:
+                raise EngineUnavailable("the server is shutting down") from exc
+            yield conn

@@ -8,10 +8,11 @@ an identity is never a label.
 
 import math
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 from sql_warden import __version__
 from sql_warden.models import Decision
+from sql_warden.pools import PoolStats
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 LATENCY_BUCKETS_S = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
@@ -203,6 +204,8 @@ class Metrics:
             "1 if the policy file as it is now is what is served; 0 if the last reload failed.",
         )
         self.last_reload_ok.set(1)
+        self._pools: dict[tuple[str, str], Callable[[], PoolStats | None]] = {}
+        self._pools_lock = threading.Lock()
         self._all: tuple[_Metric, ...] = (
             self.info,
             self.requests,
@@ -240,9 +243,67 @@ class Metrics:
         if rows:
             self.rows.inc(rows, profile=profile)
 
+    def watch_pool(self, pool: str, profile: str, stats_of: Callable[[], PoolStats | None]) -> None:
+        """Report a connection pool, read as /metrics is scraped: pool is what it connects
+        to (warehouse), profile whose it is. A pool watched again under the same names
+        replaces the last: after a reload, the new one is reported."""
+        with self._pools_lock:
+            self._pools[(pool, profile)] = stats_of
+
+    def unwatch_pool(
+        self, pool: str, profile: str, stats_of: Callable[[], PoolStats | None]
+    ) -> None:
+        """Stop reporting it, if it is still the one reported under those names."""
+        with self._pools_lock:
+            if self._pools.get((pool, profile)) == stats_of:
+                del self._pools[(pool, profile)]
+
     def render(self) -> str:
         lines: list[str] = []
         for metric in self._all:
             lines += metric.header()
             lines += metric.lines()
+        lines += self._pool_lines()
         return "\n".join(lines) + "\n"
+
+    def _pool_lines(self) -> list[str]:
+        with self._pools_lock:
+            watched = sorted(self._pools.items())
+        found = [(names, stats_of()) for names, stats_of in watched]
+        lines = []
+        for name, kind, help_, value in _POOL_METRICS:
+            lines += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
+            for names, stats in found:
+                if stats is not None:
+                    labels = _labels(("pool", "profile"), names)
+                    lines.append(f"{name}{labels} {_number(value(stats))}")
+        return lines
+
+
+_POOL_METRICS: tuple[tuple[str, str, str, Callable[[PoolStats], float]], ...] = (
+    (
+        "sql_warden_pool_connections",
+        "gauge",
+        "Connections a pool has open, in use or idle.",
+        lambda stats: stats.open,
+    ),
+    (
+        "sql_warden_pool_connections_in_use",
+        "gauge",
+        "Connections lent out right now, or being reset on their way back.",
+        lambda stats: stats.in_use,
+    ),
+    (
+        "sql_warden_pool_requests_waiting",
+        "gauge",
+        "Requests waiting for a connection: every one is in use.",
+        lambda stats: stats.waiting,
+    ),
+    (
+        "sql_warden_pool_timeouts_total",
+        "counter",
+        "Requests that got no connection in time, and were answered as if the database "
+        "couldn't be reached.",
+        lambda stats: stats.timeouts,
+    ),
+)

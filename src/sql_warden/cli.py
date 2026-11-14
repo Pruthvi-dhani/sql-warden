@@ -38,6 +38,7 @@ from sql_warden.engines.snowflake import BYTES, SnowflakeEngine
 from sql_warden.metrics import Metrics
 from sql_warden.pipeline.budget import window
 from sql_warden.pipeline.cost import format_amount, format_cost
+from sql_warden.pools import PoolSettings
 from sql_warden.profiles import (
     Profile,
     ProfileError,
@@ -222,9 +223,13 @@ def json_option[F: Callable[..., Any]](command: F) -> F:
     )(command)
 
 
-def build_engine(config: WardenConfig, active: Profile) -> tuple[Engine, str | None]:
+def build_engine(
+    config: WardenConfig, active: Profile, *, pooled: bool = False
+) -> tuple[Engine, str | None]:
     """The engine a profile connects with, and the schema its unqualified table names are
-    looked up in, where that isn't the dialect's usual one."""
+    looked up in, where that isn't the dialect's usual one. pooled is for a server: a
+    Postgres engine then keeps its connections (warehouse.pool) instead of opening one for
+    every call. Snowflake's keeps one session open either way."""
     warehouse = config.warehouse
     # Like its dsn, a profile's own row cap is policy: --max-rows doesn't change it.
     max_rows = active.max_rows or warehouse.max_rows
@@ -240,11 +245,14 @@ def build_engine(config: WardenConfig, active: Profile) -> tuple[Engine, str | N
             raise click.ClickException(f"warehouse dsn: {exc}") from exc
         # A table named without a schema is looked up in the session's, as Snowflake does.
         return snow, snow.default_schema
+    pool = PoolSettings(**warehouse.pool.model_dump()) if pooled else None
     postgres = PostgresEngine(
         active.dsn,
         statement_timeout_ms=warehouse.statement_timeout_ms,
         max_rows=max_rows,
         connect_timeout_s=warehouse.connect_timeout_s,
+        pool=pool,
+        name=f"warehouse:{active.name}",
     )
     return postgres, None
 
@@ -272,7 +280,7 @@ def build_warden(
         raise click.ClickException(str(exc)) from exc
     if audit is None:
         audit = open_audit(config)
-    engine, default_schema = build_engine(config, active)
+    engine, default_schema = build_engine(config, active, pooled=serving)
     # Budgets kept in the audit database, where every server recording there shares them,
     # so a session or caller gets no more by reaching another replica.
     sessions = None
@@ -589,7 +597,11 @@ def serve(
     if transport == "stdio":
         audit = open_audit(config)
         vet_audit(audit, config)
-        create_server(build_warden(config, profile, audit=audit, serving=True)).run("stdio")
+        warden = build_warden(config, profile, audit=audit, serving=True)
+        try:
+            create_server(warden).run("stdio")
+        finally:
+            warden.close()
         return
     if config.auth is not None and profile is not None:
         raise click.ClickException(
@@ -634,7 +646,11 @@ def serve(
         serving = f"profile {live.current.all[0].profile}"
     else:
         serving = f"profiles {', '.join(config.profiles or {})}, to callers with a token"
-    _listen(app, host, port, serving, config.server.shutdown_grace_s, reloader)
+    try:
+        _listen(app, host, port, serving, config.server.shutdown_grace_s, reloader)
+    finally:
+        for warden in live.current.all:  # its connections, once uvicorn has let go of it
+            warden.close()
 
 
 def _policy(

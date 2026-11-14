@@ -4,23 +4,50 @@ tests/unit/test_adversarial.py pins what the checks refuse. This is what holds w
 not there at all (the engine is handed the hostile text itself), what Postgres makes of the
 queries the checks let through rewritten, and that the questions the checks refuse to pass on
 are ones Postgres would have answered.
+
+Every test runs twice: with engines that open a connection for each call, as commands run by
+hand do, and with pooled ones, as servers use, whose connections are lent again and again.
 """
 
 from collections.abc import Iterator
 from contextlib import suppress
+from typing import Any
 
 import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
 
 from sql_warden.audit import MemoryAuditSink, PostgresAuditSink
-from sql_warden.engines import EngineError
-from sql_warden.engines.postgres import PostgresEngine
+from sql_warden.engines import EngineError, postgres
 from sql_warden.models import RefusalCode
+from sql_warden.pools import PoolSettings
 from sql_warden.warden import Warden
 from tests.integration.conftest import Warehouse
 
 pytestmark = pytest.mark.integration
+
+PostgresEngine = postgres.PostgresEngine
+"""What this module builds its engines with: swapped by `connections` below."""
+
+
+@pytest.fixture(autouse=True, params=["own connections", "pooled"])
+def connections(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    if request.param == "own connections":
+        yield
+        return
+    built: list[postgres.PostgresEngine] = []
+
+    def pooled(dsn: str, **settings: Any) -> postgres.PostgresEngine:
+        # Two connections, so the queries in one test take turns on the same ones.
+        engine = postgres.PostgresEngine(dsn, pool=PoolSettings(max_size=2), **settings)
+        built.append(engine)
+        return engine
+
+    monkeypatch.setitem(globals(), "PostgresEngine", pooled)
+    yield
+    for engine in built:
+        engine.close()
+
 
 STATE = """
     SELECT (SELECT count(*) FROM products),

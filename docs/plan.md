@@ -1208,7 +1208,7 @@ shares it, which is the right shape there (opening a session is a login round tr
 is bounded by the warehouse and its resource monitor, not by connections). What is open
 about it needs a real account, and is 10.3.
 
-**10.1 A connection pool for the Postgres warehouse**
+**10.1 A connection pool for the Postgres warehouse** ✅ done
 - `PostgresEngine` takes its connections from a pool (`psycopg_pool`, a new dependency:
   `psycopg[binary,pool]`) instead of opening one per call. One pool per engine, so per
   profile: profiles connect as different roles, and a connection is never handed from one
@@ -1247,6 +1247,62 @@ about it needs a real account, and is 10.3.
   the refusal within `timeout_s`; a reload closes the old pools once their requests finish;
   the statement timeout still cancels a query on a reused connection; 8.2's adversarial
   suite on Postgres passes on pooled engines.
+- As built, what it bought, measured with `dev/loadtest.py` on a laptop against local
+  containers (2,000 queries, 300 for one caller; each one planned by the cost check, then
+  run, and recorded):
+
+  | Callers | Before: requests/s | median | connections opened | After: requests/s | median | connections opened |
+  |--------:|-------------------:|-------:|-------------------:|------------------:|-------:|-------------------:|
+  | 1       | 85                 | 11 ms  | 600                | 316               | 3.0 ms | 0 (kept from warm-up) |
+  | 16      | 175                | 91 ms  | 4,000              | 389               | 40 ms  | 8                  |
+  | 32      | 167                | 187 ms | 4,000              | 401               | 78 ms  | 8                  |
+
+  Opening a connection was three quarters of a query's time on its own, and the "before"
+  opened exactly two per query. From 16 callers on the pool is no longer the limit: with 32
+  connections instead of 10, 32 callers go no faster (374 a second) and use only 16 of them.
+  The queue is elsewhere, most likely the audit log's one connection, which is 10.2.
+- As built, against the plan, prepared statements stay **on**. With psycopg's
+  `prepare_threshold=None` the cost check's `EXPLAIN` would no longer go as a prepared
+  statement, and an unprepared one with no parameters goes over the simple protocol, which
+  takes several statements in one string: the defence in depth 4.1 relies on. It isn't
+  needed for the reset either: psycopg forgets its own prepared statements when it sees
+  `DISCARD ALL` go through it, so it never asks for one the server has dropped (a test plans
+  the same query twelve times on one connection).
+- As built, the reset and the check cost something: with both off, 16 callers ran 449
+  queries a second instead of 389, and one caller 2.8 ms instead of 3.0. Kept: the check is
+  what lets a connection the server dropped cost no request, and the reset is what keeps one
+  request's session from the next. The reset runs in the pool's background workers, so the
+  request that returned the connection doesn't wait for it.
+- As built, the pool (`pools.py`, shared with 10.2): psycopg_pool 3.3, starting empty
+  (`min_size` 0), with a connection class that remembers how its last attempt to connect
+  went. The pool connects in the background, so without it a borrower that waited in vain
+  couldn't tell an unreachable database from a busy one; with it the answer is "could not
+  connect to the database: <why>" or "no connection was free within 5 s: every one is in
+  use". Waiting differs from before: a down warehouse is now found out after `timeout_s`,
+  where a refused connection used to fail at once; in exchange a query during a failover
+  that comes back within it is answered.
+- As built, against the plan: `max_lifetime_s` follows a failover (a new address behind the
+  same name), but doesn't pick up a rotated password, since the connection string is read
+  when the process starts (9.6's guide already said a rotation takes a restart; the plan's
+  text here was wrong). `dev/loadtest.py` drives a Warden from threads, as the HTTP server's
+  workers do, rather than going through HTTP: the MCP client in Python would be most of
+  what it measured. It starts throwaway databases by default, so it never records into the
+  demo stack's audit log.
+- As built, `/readyz`, the startup role check and `config validate --live`: the first two
+  go through the server's pool; `validate --live`, like every command run by hand, opens its
+  own connections. A stdio server pools too, and closes its pool as it exits.
+- Tests: 18 unit (`test_pools.py`: the config section and what it refuses, Snowflake
+  included; that a server pools and `query`, `check` and `tables` don't; the four metrics,
+  a reload's pool replacing the old one's; an unreachable database answered within the
+  timeout with its reason and no password; a closed pool), 10 on Postgres
+  (`test_pool_on_postgres.py`: 208 queries from 16 threads opening at most the pool's size
+  where an engine of its own opens two a query; a superuser's session settings, advisory
+  lock, prepared statement, temporary table and LISTEN all gone for the next borrower of the
+  same backend; the same query planned twelve times; the statement timeout and the read-only
+  transaction on a connection lent again; a connection the server killed costing no
+  request; a held pool refusing within its timeout; a closed pool leaving nothing open; a
+  retired Warden's pool closed and off /metrics), and 8.2's 72 adversarial tests on Postgres
+  now run twice, once with pooled engines.
 
 **10.2 Pools for the audit log and the budgets**
 - `PostgresAuditSink` writes each record on a connection from a pool, so records are written

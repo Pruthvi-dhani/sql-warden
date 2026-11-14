@@ -124,6 +124,10 @@ class Warden:
         A Warden built by a reload takes over the one it replaces."""
         self._in_flight = 0
         self._in_flight_lock = threading.Lock()
+        pool_stats = getattr(engine, "pool_stats", None)
+        self._pool_stats = pool_stats if callable(pool_stats) else None
+        if metrics is not None and self._pool_stats is not None:
+            metrics.watch_pool("warehouse", profile, self._pool_stats)
         self.access = access
         self.masks: dict[MaskedColumn, MaskRule] = dict(masks or {})
         """The profile's masked columns: (schema, table, column) → its rule."""
@@ -263,7 +267,9 @@ class Warden:
     def close(self) -> None:
         """Close what this Warden holds open: its session store's connection and its
         engine's session, where they keep one. Not the audit sink, which it was given. A
-        request that comes after opens them again."""
+        request that comes after opens them again, except through a pool, which stays shut."""
+        if self.metrics is not None and self._pool_stats is not None:
+            self.metrics.unwatch_pool("warehouse", self.profile, self._pool_stats)
         for held in (self.sessions, self.engine):
             close = getattr(held, "close", None)
             if callable(close):

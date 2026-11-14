@@ -6,6 +6,7 @@ import pytest
 from sql_warden import cli as cli_module
 from sql_warden.audit import AuditError, AuditEvent, MemoryAuditSink
 from sql_warden.engines import Column, CostEstimate, EngineError, Result, RoleReport, Table
+from sql_warden.pools import PoolSettings
 from tests.unit import dialects
 
 ONE_ROW = Result(columns=("id",), rows=((1,),), truncated=False, duration_ms=1.0)
@@ -53,6 +54,8 @@ class FakeEngine:
     """The tag of each explain() and execute(), in order."""
     report: RoleReport = READER
     """What role() answers, unless error is set."""
+    pool: PoolSettings | None = None
+    """The pool the CLI asked for: a server's engine has one, a command's doesn't."""
 
     def execute(self, sql: str, *, tag: str | None = None) -> Result:
         self.executed.append(sql)
@@ -95,9 +98,15 @@ def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
     built: list[FakeEngine] = []
 
     def factory(
-        dsn: str, *, statement_timeout_ms: int, max_rows: int, connect_timeout_s: int
+        dsn: str,
+        *,
+        statement_timeout_ms: int,
+        max_rows: int,
+        connect_timeout_s: int,
+        pool: PoolSettings | None,
+        name: str,
     ) -> FakeEngine:
-        engine = FakeEngine(dsn, statement_timeout_ms, max_rows, connect_timeout_s)
+        engine = FakeEngine(dsn, statement_timeout_ms, max_rows, connect_timeout_s, pool=pool)
         built.append(engine)
         return engine
 

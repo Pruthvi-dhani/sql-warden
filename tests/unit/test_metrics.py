@@ -144,6 +144,10 @@ class TestWhatIsCounted:
             "sql_warden_requests_in_flight",
             "sql_warden_config_reloads_total",
             "sql_warden_config_last_reload_successful",
+            "sql_warden_pool_connections",
+            "sql_warden_pool_connections_in_use",
+            "sql_warden_pool_requests_waiting",
+            "sql_warden_pool_timeouts_total",
         ]
         assert "sql_warden_info 1" in text.splitlines()
 

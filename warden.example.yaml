@@ -20,6 +20,14 @@ warehouse:
   statement_timeout_ms: 5000   # queries running longer are cancelled
   max_rows: 100                # rows returned per query; more are cut off and flagged
   connect_timeout_s: 5
+  # A server keeps its connections to the warehouse rather than opening one for every
+  # request: up to max_size per profile, on each server, so the warehouse must allow
+  # servers x profiles x max_size. Commands run by hand (query, check, tables) don't pool.
+  pool:
+    max_size: 10
+    max_idle_s: 300            # an idle connection is closed after this
+    max_lifetime_s: 1800       # and any is replaced after this, so a failover is followed
+    timeout_s: 5               # how long a request waits when every connection is in use
 
 # A query the database's planner estimates above max_total_cost is refused before it runs
 # (COST_TOO_HIGH). sql-warden asks with EXPLAIN, which plans a query without running it. The
