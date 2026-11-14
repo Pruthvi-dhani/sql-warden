@@ -176,6 +176,9 @@
     <div class="table-wrap"><table>
       <thead><tr><th>Code</th><th>Check</th><th>Refused when</th></tr></thead>
       <tbody>
+        <tr data-code="UNAUTHENTICATED"><td><code>UNAUTHENTICATED</code></td><td>auth</td><td>Over HTTP with an <code>auth</code> section: no bearer token, or one that isn't valid (unknown key, expired, signed by someone else, for another service). Answered <code>401</code>; nothing is read or run, and the attempt is recorded.</td></tr>
+        <tr data-code="NO_PROFILE"><td><code>NO_PROFILE</code></td><td>auth</td><td>A valid token that gives no profile this server has. Answered <code>403</code>, never with <code>default_profile</code>.</td></tr>
+        <tr data-code="AUTH_UNAVAILABLE"><td><code>AUTH_UNAVAILABLE</code></td><td>auth</td><td>The identity provider's keys couldn't be fetched, so the token couldn't be checked. Answered <code>503</code>; worth retrying later.</td></tr>
         <tr data-code="PARSE_ERROR"><td><code>PARSE_ERROR</code></td><td>parse</td><td>The SQL is empty or doesn't parse.</td></tr>
         <tr data-code="QUERY_TOO_COMPLEX"><td><code>QUERY_TOO_COMPLEX</code></td><td>parse</td><td>Too long (over 20,000 characters) or nested too deeply to be read safely: more than 32 levels of brackets, or more than 4 of type names with brackets, like <code>date(date(…))</code> or <code>array[array[…]]</code>.</td></tr>
         <tr data-code="MULTIPLE_STATEMENTS"><td><code>MULTIPLE_STATEMENTS</code></td><td>shape</td><td>More than one statement.</td></tr>

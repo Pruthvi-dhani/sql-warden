@@ -173,7 +173,8 @@ requests:
 |--------------------------------|-----------------------------------------------------------------|
 | an agent over stdio            | the server process: the agent starts it, and it serves only that agent |
 | a client over HTTP that connects | its connection; reconnecting starts a new session              |
-| a client over HTTP that doesn't  | the server's one session, shared with every other such client  |
+| a client over HTTP that doesn't, with a token | its caller's own session, while the server runs   |
+| a client over HTTP that doesn't, no token     | the server's one session, shared with every other such client |
 | `sql-warden query` and `check` | each call, unless calls are given the same `--session NAME`      |
 
 ```bash
@@ -189,10 +190,12 @@ value can use the connection, so it stays out of responses and the audit log.
 Whether an HTTP client connects depends on the MCP version it speaks. Before 2026-07-28 a
 client opens a connection with a handshake and sends its `Mcp-Session-Id` with every request.
 From 2026-07-28 on there are no connections over HTTP: each request stands alone, and nothing
-on it says which other requests came from the same caller. Until callers have identities
-(which comes with authentication), those requests are all one session, the server's own. A
-limit then holds for the server as a whole and lasts until it restarts: it can't be got
-around, but one caller can use it up for the others.
+on it says which other requests came from the same caller, except its token. With
+[authentication](#authentication) each caller has a session of their own, kept while the
+server runs: the same caller is the same session from any client, and a restarted server
+starts everyone afresh. Without it those requests are all one session, the server's own: a
+limit then holds for the server as a whole, so it can't be got around, but one caller can use
+it up for the others.
 
 Sessions are what [budgets](#session-budgets) count against.
 
@@ -344,11 +347,11 @@ as one that can write, or while the warehouse can't be asked: see
 
 #### Over HTTP
 
-The HTTP transport has no authentication yet, so it only listens on loopback (`127.0.0.1`,
-`::1`, `localhost`) and rejects requests whose `Host` or `Origin` isn't local, which stops web
-pages from reaching it through your browser. Where it listens is `server.host` and
-`server.port` in `warden.yaml`, or `--host` and `--port`; an address other machines can reach
-is refused by both, and by `config validate`.
+Without an [`auth` section](#authentication) HTTP serves one profile, needs no token, and
+only listens on loopback (`127.0.0.1`, `::1`, `localhost`). It rejects requests whose `Host`
+or `Origin` isn't local, which stops web pages from reaching it through your browser. Where
+it listens is `server.host` and `server.port` in `warden.yaml`, or `--host` and `--port`; an
+address other machines can reach is refused by both, and by `config validate`.
 
 It serves many clients at once. Each query runs in a worker thread with its own database
 connection, so a slow one holds up nobody else's. What keeps one client from using the
@@ -364,11 +367,70 @@ server up:
 The connection limits are for clients that connect; see [Sessions](#sessions) for the ones
 that don't.
 
-Serving other machines comes with authentication, the next step in the [plan](docs/plan.md).
-The shape it will have: sql-warden keeps listening on loopback or a private address, a proxy
-in front of it terminates TLS and passes the `Host` it was asked for, and every request
-carries a token that says which profile it gets. Until then, don't put a proxy in front of
-it yourself: the proxy's callers would all get the server's profile, and its one session.
+#### Authentication
+
+With an `auth` section, every HTTP request must carry `Authorization: Bearer <token>`, and
+one server serves every profile: the token says who the caller is and which profile their
+queries are checked against. Nothing an agent sends can choose another. stdio is not
+affected: whoever starts the process has already picked its profile, with `--profile`.
+
+```yaml
+auth:
+  api_keys:                      # made with `sql-warden auth new-key NAME --profile P`
+    - name: support-bot          # who holds it: the audit log records this
+      profile: support
+      sha256: 2372e115...        # only the key's hash is kept
+  oidc:                          # tokens from your identity provider
+    issuer: https://login.example.com/
+    audience: sql-warden         # what their aud claim must contain
+    jwks_url: https://login.example.com/.well-known/jwks.json
+    profile_claim: sql_warden_profile    # a claim that names the profile, or:
+    # group_profiles: {data-analysts: support, dba: admin}   # profile by group
+```
+
+```console
+$ sql-warden auth new-key support-bot --profile support
+key: swk_...
+
+Give it to support-bot: it is shown only this once, and can't be recovered.
+```
+
+| A request with                                    | Answer | Recorded as                    |
+|---------------------------------------------------|--------|--------------------------------|
+| no token, an unknown key, or a token that isn't valid (expired, for another service, signed with an unlisted key) | `401` | `UNAUTHENTICATED`, no profile |
+| a valid token that gives no profile this server has, or groups that give two | `403` | `NO_PROFILE`, under the caller's name |
+| an OIDC token while the provider's keys can't be fetched | `503` | `AUTH_UNAVAILABLE` |
+| a token for a profile                             | the tools, as that profile | under the caller's name and profile |
+
+A request that is turned away is never read: its body isn't parsed, and nothing runs. A
+token never gets `default_profile`: a caller gets the profile their token names, or nothing.
+Every record carries `identity` (an API key's name, or `oidc:<subject>`), shown by
+`audit show` and filtered by `audit tail --identity NAME`. A connection belongs to the caller
+who opened it: another token holding its `Mcp-Session-Id` gets `404`.
+
+OIDC tokens are JWTs. Their signature is checked against the provider's published keys, and
+so are `iss`, `aud` and `exp` (with 30 seconds' leeway for clocks). Only public-key
+signatures are accepted (`RS256` and `ES256` by default; `algorithms` lists others):
+`none`, and shared-secret ones like `HS256`, are refused, so whoever can read the keys
+can't make a token. The keys are fetched when first needed and kept for an hour; a token
+signed with a key not seen yet fetches them again, at most once a minute.
+
+Serving every profile means every profile's role must pass the [startup
+check](#defence-in-depth): `serve` doesn't start if any of them can write.
+
+With `auth`, the server can listen beyond loopback. Set `server.host` (say `0.0.0.0`) and
+list in `server.allowed_hosts` the names clients reach it by; requests for any other name
+are refused. `server.allowed_origins` lists web pages that may call it from a browser.
+sql-warden speaks plain HTTP, so put a proxy that terminates TLS in front of it, and let
+clients reach it only through the proxy: every request carries its token. `serve` warns when
+it listens beyond loopback.
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 8000
+  allowed_hosts: [warden.example.com]
+```
 
 ### Claude Code
 

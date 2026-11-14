@@ -861,7 +861,7 @@ Snowflake (dedicated XS warehouse + resource monitor). The audit DB is a managed
 separate account. `warden.yaml` lives in git and changes through PR review. Scripts use the
 CLI.
 
-**9.1 Production HTTP transport** ✅ done
+**9.1 Production HTTP transport** ✅ done (`188f89b`)
 - Builds on the local-only HTTP mode from 1.4: lifts the loopback-only restriction (only
   together with 9.2 auth, and only when the policy defines real profiles rather than the
   implicit `all`), adds configurable host/port and TLS-terminating proxy guidance. Each
@@ -901,7 +901,7 @@ CLI.
   40 worker threads can hold a warehouse connection), with 9.4's metrics; the deployment
   guide with a proxy (`docs/deploy.md`, 9.6), which the README only sketches.
 
-**9.2 Authentication → profiles**
+**9.2 Authentication → profiles** ✅ done
 - Bearer tokens: either static hashed API keys in config, or OIDC/JWT validated with `pyjwt`
   against JWKS. Each token maps to one of the **profiles from Phase 2** (an API key names its
   profile; for OIDC a claim or group maps to a profile name). There is no separate per-client
@@ -913,6 +913,54 @@ CLI.
 - Tests: unit tests for token validation (expired, wrong audience, unknown key) and profile
   resolution (unmapped token refused). An HTTP test checks that a `public` token and an
   `admin` token see different tables and get different decisions for the same query.
+- As built, tokens: an `auth` section with `api_keys` (name, profile, SHA-256 of the key;
+  `sql-warden auth new-key NAME --profile P` makes a 256-bit `swk_` key and prints the entry)
+  and/or `oidc` (issuer, audience, jwks_url; profile from `profile_claim`, or from
+  `group_profiles` by group, where groups giving two profiles are refused). JWTs are checked
+  with pyjwt, already a dependency of the MCP SDK and now declared directly: signature, `iss`,
+  `aud`, `exp` and `sub` required, 30 s leeway. Only public-key algorithms can be configured,
+  and a token's algorithm must fit its key's type (or the `alg` the provider pins), so
+  `none`, HS256 signed with the public key, and an RSA key used for ES256 are all refused;
+  shared-secret (`oct`) and encryption keys in the key set are ignored. Keys are fetched
+  when first needed, kept an hour, fetched early at most once a minute for an unknown key
+  id (made-up ids can't hammer the provider), and kept through a provider outage until
+  they are an hour old. An API key's name can't start with `oidc:`, so a key can't pass
+  for an OIDC caller in the audit log or take over their session.
+- As built, one server for every profile: `create_server` takes one Warden, or one per
+  profile, and each tool call picks its caller's. `serve --transport http` with `auth`
+  builds every profile's Warden, so it runs 8.1's role check on **every** profile's role,
+  which is what 8.1's plan text first asked; `--profile` is refused there (it is for
+  stdio). The instructions to agents no longer name a profile; every result does.
+- As built, `RequireToken`, our own ASGI middleware rather than the SDK's auth stack: the
+  SDK's returns 401 before anything could record it, and the plan asks for the attempt to
+  be audited. It answers 401/403/503 as RFC 6750 has it (`WWW-Authenticate: Bearer
+  realm="sql-warden"`, with `error` and a sanitised description once a token was sent),
+  never reads the body of a request it turns away, and records it as refused by `auth`
+  (new codes `UNAUTHENTICATED`, `NO_PROFILE`, `AUTH_UNAVAILABLE`), with no profile and,
+  for a genuine token without a profile, the caller's name. It sets the SDK's
+  `AuthenticatedUser` on the request, so the SDK keeps each connection to the caller who
+  opened it: another token with its `Mcp-Session-Id` gets 404.
+- As built, sessions for callers without connections (MCP 2026-07-28, 9.1's finding): one
+  per caller, derived from a per-process nonce and the identity, so the same caller is one
+  session from any client and a restarted server starts everyone afresh. That is the most a
+  session can be without becoming 9.3's per-identity budget; it does not replace it.
+- As built, the audit log: a new `identity` column (in the table for new databases, added
+  with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` to old ones, with `profile` made nullable
+  for refusals that never had one), shown by `audit show`, filtered by `audit tail
+  --identity`. An integration test upgrades a table made before this point.
+- As built, 9.1's restriction is lifted here: with `auth`, `server.host` may be any address
+  given `server.allowed_hosts` (the names clients use; Host is checked against them), and
+  `server.allowed_origins` lists browser pages. Without `auth` both are config errors, and
+  HTTP stays one profile on loopback. sql-warden doesn't terminate TLS; `serve` warns when
+  it listens beyond loopback, and the README says to put a TLS proxy in front.
+- Tests: 70 for the authenticator and the config (`test_auth.py`, against keys made in the
+  test and a stand-in provider with a clock to move), 32 over a real local HTTP server
+  (`test_http_auth.py`), and 2 against Postgres (`test_auth_on_postgres.py`: each key reads
+  as its own database role; the audit log read back by caller).
+- Left for later: a refused request's source address (the audit log has no column for it,
+  and behind a proxy it would be the proxy's); a cap on how fast refusals are recorded,
+  since each unauthenticated request is one audit write; tokens with scopes; and `/readyz`
+  checking the provider (9.4).
 
 **9.3 Shared budget state across replicas**
 - `PostgresSessionStore` lives in the audit DB and uses atomic `UPDATE … RETURNING` counters,

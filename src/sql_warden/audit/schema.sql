@@ -8,8 +8,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
     id             uuid             PRIMARY KEY,
     ts             timestamptz      NOT NULL,
     session_id     text,
+    identity       text,                          -- who: an API key's name, oidc:<subject>
     client         text,                          -- e.g. cli, or the MCP client's name
-    profile        text             NOT NULL,
+    profile        text,                          -- none if refused before it had one
     dry_run        boolean          NOT NULL,     -- check_query / sql-warden check
     sql            text             NOT NULL,     -- as sent
     executed_sql   text,                          -- as regenerated and run (or would run)
@@ -28,5 +29,11 @@ CREATE TABLE IF NOT EXISTS audit_events (
     trace          jsonb            NOT NULL      -- every check that ran, with its verdict
 );
 
+-- Added with authentication, for audit databases made before it: who the caller is, and no
+-- profile at all for a request refused before it got one.
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS identity text;
+ALTER TABLE audit_events ALTER COLUMN profile DROP NOT NULL;
+
 CREATE INDEX IF NOT EXISTS audit_events_ts ON audit_events (ts DESC);
+CREATE INDEX IF NOT EXISTS audit_events_identity ON audit_events (identity, ts);
 CREATE INDEX IF NOT EXISTS audit_events_session ON audit_events (session_id, ts);

@@ -1,16 +1,25 @@
 """The MCP server: how agents reach the warden.
 
-Over stdio for an agent that launches sql-warden itself, or over HTTP on the loopback
-interface for local tools such as the test portal. The HTTP transport has no authentication
-yet, so it never listens anywhere else.
+Over stdio for an agent that launches sql-warden itself, or over HTTP. Without
+authentication HTTP serves one profile, on loopback only. With it (an Authenticator), one
+server serves every profile: each request carries a bearer token, and the token says who
+the caller is and which profile its queries are checked against.
 """
 
 import datetime
 import hashlib
+import json
+import secrets
+import time
 import uuid
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from decimal import Decimal
 from typing import Annotated, Any
 
+import anyio.to_thread
+from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from mcp.server.auth.provider import AccessToken
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.streamable_http import MCP_SESSION_ID_HEADER
@@ -18,8 +27,11 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.applications import Starlette
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sql_warden import __version__
+from sql_warden.audit import AuditEvent, AuditSink
+from sql_warden.auth import Authenticator, AuthError, Identity
 from sql_warden.config import IMPLICIT_PROFILE, LOOPBACK_ONLY, is_loopback
 from sql_warden.engines import EngineError, Table
 from sql_warden.models import Decision, QueryOutcome
@@ -301,8 +313,40 @@ def instructions(profile: str) -> str:
     )
 
 
-def create_server(warden: Warden) -> MCPServer:
-    server = MCPServer("sql-warden", version=__version__, instructions=instructions(warden.profile))
+IDENTITY = "sql_warden.identity"
+"""Where RequireToken leaves the caller's Identity in the request's ASGI scope."""
+MULTI_PROFILE = (
+    "\nWhich profile your queries are checked against comes from your token, and every "
+    "result names it. It can't be changed from here."
+)
+
+
+def create_server(wardens: Warden | Mapping[str, Warden]) -> MCPServer:
+    """The MCP tools, for one Warden, or for one per profile (by name) when callers
+    authenticate: then each request is answered by its caller's profile's Warden."""
+    nonce = secrets.token_hex(16)
+    if isinstance(wardens, Warden):
+        only = wardens
+        pick: Callable[[Identity | None], Warden] = lambda identity: only  # noqa: E731
+        text = instructions(only.profile)
+    else:
+        by_profile = dict(wardens)
+        if not by_profile:
+            raise ValueError("a server needs at least one profile to serve")
+
+        def pick(identity: Identity | None) -> Warden:
+            if identity is None or identity.profile not in by_profile:
+                # RequireToken lets no such request through; this is the last line.
+                raise ToolError("this server answers only requests that carry a token")
+            return by_profile[identity.profile]
+
+        text = INSTRUCTIONS + MULTI_PROFILE
+    server = MCPServer("sql-warden", version=__version__, instructions=text)
+
+    def caller(ctx: Context[Any, Any]) -> tuple[Warden, Identity | None, str | None]:
+        """Who is asking: the Warden for their profile, their identity, their session."""
+        identity = identity_of(ctx)
+        return pick(identity), identity, session_of(ctx, identity, nonce=nonce)
 
     @server.tool(annotations=READ_ONLY)
     def run_query(sql: str, ctx: Context[Any, Any]) -> Annotated[CallToolResult, QueryResponse]:
@@ -312,14 +356,20 @@ def create_server(warden: Warden) -> MCPServer:
         which check, with a code and a reason. The result is an error when the query was
         refused or the database failed to run it.
         """
-        outcome = warden.run(sql, client=client_name(ctx), session_id=session_of(ctx))
+        warden, identity, session_id = caller(ctx)
+        outcome = warden.run(
+            sql, client=client_name(ctx), session_id=session_id, identity=_name(identity)
+        )
         return tool_result(describe(outcome.decision, outcome), is_error=outcome.result is None)
 
     @server.tool(annotations=READ_ONLY)
     def check_query(sql: str, ctx: Context[Any, Any]) -> Annotated[CallToolResult, QueryResponse]:
         """Dry run: say whether a SQL query would be allowed, its estimated cost, and the exact
         SQL that would run, without running it. The database only plans it."""
-        decision = warden.check(sql, client=client_name(ctx), session_id=session_of(ctx))
+        warden, identity, session_id = caller(ctx)
+        decision = warden.check(
+            sql, client=client_name(ctx), session_id=session_id, identity=_name(identity)
+        )
         return tool_result(describe(decision), is_error=decision.audit_id is None)
 
     @server.tool(annotations=READ_ONLY)
@@ -327,21 +377,34 @@ def create_server(warden: Warden) -> MCPServer:
         """What this session has used and what it has left: queries, their total estimated
         cost, rows returned and refusals. A limit that isn't set has no `limit`. Asking is
         free: it isn't a query, and is never refused."""
-        return describe_budget(warden, session_of(ctx))
+        warden, _, session_id = caller(ctx)
+        return describe_budget(warden, session_id)
 
     @server.tool(annotations=READ_ONLY)
-    def list_tables() -> TablesResponse:
+    def list_tables(ctx: Context[Any, Any]) -> TablesResponse:
         """List the tables and views you can query, with the columns you may read."""
-        return describe_tables(warden)
+        return describe_tables(caller(ctx)[0])
 
     @server.tool(annotations=READ_ONLY)
-    def describe_table(table: str) -> TableResponse:
+    def describe_table(table: str, ctx: Context[Any, Any]) -> TableResponse:
         """Describe one table you can query: its columns and types, and whether SELECT * works.
 
         Name it as in SQL: `products` or `public.products`."""
-        return describe_one_table(warden, table)
+        return describe_one_table(caller(ctx)[0], table)
 
     return server
+
+
+def _name(identity: Identity | None) -> str | None:
+    return None if identity is None else identity.name
+
+
+def identity_of(ctx: Context[Any, Any]) -> Identity | None:
+    """The caller RequireToken let in, or None where nobody authenticates (stdio, or HTTP
+    without an auth section)."""
+    scope = getattr(ctx.request_context.request, "scope", None)
+    identity = scope.get(IDENTITY) if isinstance(scope, dict) else None
+    return identity if isinstance(identity, Identity) else None
 
 
 def client_name(ctx: Context[Any, Any]) -> str | None:
@@ -353,24 +416,33 @@ def client_name(ctx: Context[Any, Any]) -> str | None:
     return f"{params.client_info.name} {params.client_info.version}"
 
 
-def session_of(ctx: Context[Any, Any]) -> str | None:
+def session_of(
+    ctx: Context[Any, Any], identity: Identity | None = None, *, nonce: str = ""
+) -> str | None:
     """sql-warden's id for the session this request belongs to, or None for the Warden's own.
 
     Over HTTP a client that opens a connection (MCP before 2026-07-28: a handshake, then an
     Mcp-Session-Id on every request) has that connection as its session. Its id is derived
     from the transport's rather than being it: whoever holds the transport's id can use the
-    connection, so it stays out of responses and the audit log.
+    connection, so it stays out of responses and the audit log. With authentication the
+    transport also keeps the connection to the caller who opened it.
 
-    From 2026-07-28 on MCP has no connections over HTTP: each request stands alone, and
-    nothing on it says which other requests came from the same caller. Those are all the
-    Warden's own session, as stdio's one connection per process is. A limit then holds for
-    the server as a whole, so it can't be got around; telling callers apart needs them to
-    have identities, which comes with authentication."""
+    From 2026-07-28 on MCP has no connections over HTTP: each request stands alone. A caller
+    who authenticated then has one session of their own, for as long as this server runs
+    (nonce is the server's: a restarted server starts everyone's afresh, as it does for
+    connections). Without authentication nothing tells such callers apart, and they are all
+    the Warden's own session, as stdio's one connection per process is."""
     headers = ctx.headers
     transport_id = None if headers is None else headers.get(MCP_SESSION_ID_HEADER)
-    if not transport_id:
-        return None
-    return hashlib.sha256(b"sql-warden session " + transport_id.encode()).hexdigest()[:32]
+    if transport_id:
+        return _derived("session", transport_id)
+    if identity is not None:
+        return _derived("caller", f"{nonce}:{identity.name}")
+    return None
+
+
+def _derived(kind: str, value: str) -> str:
+    return hashlib.sha256(f"sql-warden {kind} {value}".encode()).hexdigest()[:32]
 
 
 def table_info(warden: Warden, table: Table) -> TableInfo:
@@ -416,34 +488,168 @@ def describe_one_table(warden: Warden, name: str) -> TableResponse:
 
 
 def create_http_app(
-    warden: Warden,
+    wardens: Warden | Mapping[str, Warden],
     *,
     host: str = "127.0.0.1",
+    authenticator: Authenticator | None = None,
+    allowed_hosts: Sequence[str] = (),
+    allowed_origins: Sequence[str] = (),
     max_sessions: int = MAX_SESSIONS,
     session_idle_s: float = SESSION_IDLE_S,
 ) -> Starlette:
     """The MCP server as an ASGI app, serving Streamable HTTP at /mcp.
 
-    Requests must name a loopback host and, from a browser, a loopback origin, which stops a
-    web page from reaching the server through DNS rebinding.
+    Without an authenticator it serves one Warden, on loopback only. With one, every request
+    must carry a bearer token (see RequireToken), wardens may be one per profile, and host
+    may be any: allowed_hosts are then the names clients reach it by.
+
+    Requests must name a loopback host or one of allowed_hosts and, from a browser, a
+    loopback origin or one of allowed_origins, which stops a web page from reaching the
+    server through DNS rebinding.
 
     Each connection is a session of its own, with its own budget. At most max_sessions are
     open at once (one more is answered 503 until one closes), and one that sends nothing
     for session_idle_s is closed. Queries run in worker threads, so a slow one holds up
     nobody else's.
     """
-    if not is_loopback(host):
-        raise ValueError(f"refusing to serve MCP over HTTP on {host}: {LOOPBACK_ONLY}")
+    if authenticator is None:
+        if not isinstance(wardens, Warden):
+            raise ValueError(
+                "serving more than one profile needs authentication: a token is what says "
+                "which profile a request gets"
+            )
+        if not is_loopback(host):
+            raise ValueError(f"refusing to serve MCP over HTTP on {host}: {LOOPBACK_ONLY}")
+        if allowed_hosts or allowed_origins:
+            raise ValueError("allowed_hosts and allowed_origins come with authentication")
+    elif not is_loopback(host) and not allowed_hosts:
+        raise ValueError(
+            f"serving on {host}, which other machines can reach: give allowed_hosts, the "
+            "names clients reach the server by"
+        )
     names = ["127.0.0.1", "localhost", "[::1]"]
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[f"{name}:*" for name in names],
-        allowed_origins=[f"http://{name}:*" for name in names],
+        allowed_hosts=[f"{name}:*" for name in names]
+        + [form for name in allowed_hosts for form in (name, f"{name}:*")],
+        allowed_origins=[f"http://{name}:*" for name in names] + list(allowed_origins),
     )
-    return create_server(warden).streamable_http_app(
+    app = create_server(wardens).streamable_http_app(
         transport_security=security,
         host=host,
         max_request_body_size=MAX_REQUEST_BYTES,
         max_sessions=max_sessions,
         session_idle_timeout=session_idle_s,
     )
+    if authenticator is not None:
+        first = wardens if isinstance(wardens, Warden) else next(iter(wardens.values()))
+        app.add_middleware(RequireToken, authenticator=authenticator, audit=first.audit)
+    return app
+
+
+REALM = "sql-warden"
+USER_AGENT_CHARS = 200
+
+
+class RequireToken:
+    """Lets an HTTP request through only with `Authorization: Bearer <token>` for a caller
+    the Authenticator knows, and tells the rest of the server who that is.
+
+    A request turned away is answered 401 (no token, or not a valid one), 403 (a valid token
+    that gives no profile) or 503 (the provider's keys couldn't be fetched), and is recorded
+    in the audit log as refused by `auth`. Its body is never read: nothing it asked for is
+    known, or done.
+    """
+
+    def __init__(self, app: ASGIApp, *, authenticator: Authenticator, audit: AuditSink) -> None:
+        self.app = app
+        self.authenticator = authenticator
+        self.audit = audit
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = time.perf_counter()
+        token = _bearer(scope)
+        try:
+            if token is None:
+                raise AuthError("this server needs a token: send Authorization: Bearer <token>")
+            identity = await anyio.to_thread.run_sync(self.authenticator.authenticate, token)
+        except AuthError as exc:
+            await anyio.to_thread.run_sync(self._record, scope, exc, started)
+            await _refuse(send, exc, asked=token is not None)
+            return
+        # The transport keeps each connection to the caller who opened it, by this.
+        scope["user"] = AuthenticatedUser(
+            AccessToken(
+                token=identity.name,  # what the SDK keeps of it: never the token itself
+                client_id=identity.name,
+                scopes=[],
+                subject=identity.name,
+                claims={"iss": REALM},
+            )
+        )
+        scope[IDENTITY] = identity
+        await self.app(scope, receive, send)
+
+    def _record(self, scope: Scope, refusal: AuthError, started: float) -> None:
+        duration_ms = (time.perf_counter() - started) * 1000
+        step = {
+            "check": "auth",
+            "passed": False,
+            "code": str(refusal.code),
+            "reason": str(refusal),
+            "duration_ms": duration_ms,
+        }
+        agent = _header(scope, b"user-agent")
+        event = AuditEvent(
+            profile=None,
+            sql="",
+            decision="refused",
+            duration_ms=duration_ms,
+            trace=(step,),
+            refused_by="auth",
+            code=str(refusal.code),
+            reason=str(refusal),
+            client=None if agent is None else agent[:USER_AGENT_CHARS],
+            identity=refusal.who,
+        )
+        with suppress(Exception):  # refused either way, and nothing was done to need a record
+            self.audit.record(event)
+
+
+def _header(scope: Scope, name: bytes) -> str | None:
+    for key, value in scope.get("headers", ()):
+        if bytes(key).lower() == name:
+            return bytes(value).decode("latin-1")
+    return None
+
+
+def _bearer(scope: Scope) -> str | None:
+    value = _header(scope, b"authorization")
+    if value is None:
+        return None
+    scheme, _, token = value.partition(" ")
+    token = token.strip()
+    return token if scheme.lower() == "bearer" and token else None
+
+
+async def _refuse(send: Send, refusal: AuthError, *, asked: bool) -> None:
+    """The answer to a request RequireToken turns away, as RFC 6750 has it."""
+    description = "".join(c for c in str(refusal) if c.isprintable() and c not in '"\\')
+    headers = [(b"content-type", b"application/json")]
+    if refusal.status in (401, 403):
+        # Without a token there is no error to name, only the scheme to use.
+        challenge = f'Bearer realm="{REALM}"'
+        if asked:
+            challenge += f', error="{refusal.error}", error_description="{description}"'
+        headers.append((b"www-authenticate", challenge.encode("latin-1", "replace")))
+    else:
+        headers.append((b"retry-after", b"60"))
+    body = json.dumps(
+        {"error": refusal.error, "error_description": str(refusal), "code": str(refusal.code)}
+    ).encode()
+    headers.append((b"content-length", str(len(body)).encode()))
+    await send({"type": "http.response.start", "status": refusal.status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})

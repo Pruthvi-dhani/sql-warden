@@ -30,7 +30,8 @@ class AuditError(Exception):
 
 @dataclass(frozen=True)
 class AuditEvent:
-    profile: str
+    profile: str | None
+    """None for a request refused before it had one: one that failed authentication."""
     sql: str
     """As sent, before any check rewrote it."""
     decision: Decision
@@ -50,6 +51,8 @@ class AuditEvent:
     rows_returned: int | None = None
     truncated: bool | None = None
     masked_columns: tuple[str, ...] = ()
+    identity: str | None = None
+    """Who the caller is, when it authenticated: an API key's name, or oidc:<subject>."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     ts: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.UTC))
 
@@ -137,12 +140,12 @@ _INSERT = """
     INSERT INTO audit_events (
         id, ts, session_id, client, profile, dry_run, sql, executed_sql, rewrites, decision,
         refused_by, code, reason, error, cost_estimate, rows_returned, truncated,
-        masked_columns, duration_ms, trace
+        masked_columns, duration_ms, trace, identity
     ) VALUES (
         %(id)s, %(ts)s, %(session_id)s, %(client)s, %(profile)s, %(dry_run)s, %(sql)s,
         %(executed_sql)s, %(rewrites)s, %(decision)s, %(refused_by)s, %(code)s, %(reason)s,
         %(error)s, %(cost_estimate)s, %(rows_returned)s, %(truncated)s, %(masked_columns)s,
-        %(duration_ms)s, %(trace)s
+        %(duration_ms)s, %(trace)s, %(identity)s
     )
 """
 
@@ -254,4 +257,5 @@ _COLUMNS = (
     "rows_returned",
     "truncated",
     "duration_ms",
+    "identity",
 )

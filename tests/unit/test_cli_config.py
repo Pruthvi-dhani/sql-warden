@@ -121,6 +121,7 @@ class TestValidate:
             "             LIMIT added or lowered to the row cap",
             "  cost:      refused above an estimated 1,000,000",
             "  budgets:   none: a session is not limited",
+            "  auth:      none: HTTP needs no token, and is served on loopback only",
             "  profiles:  ! none defined: every server uses the implicit profile 'all',",
             "             which can read everything the warehouse role can",
         ]

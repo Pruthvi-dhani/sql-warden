@@ -199,7 +199,7 @@ def format_audit_line(event: AuditEvent) -> str:
         str(event.id)[:8],
         event.ts.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
         "check" if event.dry_run else "query",
-        event.profile,
+        event.profile or "-",
         event.client or "-",
     )
     cells = [_fit(value, width) for value, (_, width) in zip(values, _AUDIT_COLUMNS, strict=True)]
@@ -212,7 +212,9 @@ def format_audit_event(event: AuditEvent) -> str:
     """Everything recorded about one request, for audit show."""
     lines = [f"event    {event.id}"]
     lines.append(f"time     {event.ts.astimezone().isoformat(sep=' ', timespec='milliseconds')}")
-    lines.append(f"profile  {event.profile}")
+    lines.append(f"profile  {event.profile or '-'}")
+    if event.identity is not None:
+        lines.append(f"identity {event.identity}")
     lines.append(f"client   {event.client or '-'}")
     if event.session_id is not None:
         lines.append(f"session  {event.session_id}")

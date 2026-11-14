@@ -366,17 +366,19 @@ class TestServerConfig:
         with pytest.raises(ConfigError) as excinfo:
             parse_config(f'version: 1\nserver:\n  host: "{host}"\n')
         assert str(excinfo.value) == (
-            f"config: invalid config\n  server.host: {host} is not this machine alone: there is "
-            "no authentication yet, so sql-warden only listens on loopback (127.0.0.1, ::1 "
-            "or localhost)"
+            f"config: invalid config\n  (top level): server.host is {host}, which other "
+            "machines can reach: without an auth section sql-warden only listens on loopback "
+            "(127.0.0.1, ::1 or localhost): whoever could reach the port would get everything "
+            "its profile may read"
         )
 
     def test_nor_does_the_flag_get_around_it(self, served_with: list[dict[str, Any]]) -> None:
         outcome = CliRunner().invoke(cli, ["serve", "--transport", "http", "--host", "0.0.0.0"])
         assert outcome.exit_code == 1
         assert outcome.output == (
-            "Error: refusing to serve MCP over HTTP on 0.0.0.0: there is no authentication "
-            "yet, so sql-warden only listens on loopback (127.0.0.1, ::1 or localhost)\n"
+            "Error: refusing to serve MCP over HTTP on 0.0.0.0: without an auth section "
+            "sql-warden only listens on loopback (127.0.0.1, ::1 or localhost): whoever could "
+            "reach the port would get everything its profile may read\n"
         )
         assert served_with == []
 
@@ -393,7 +395,7 @@ class TestServerConfig:
         policy = _policy(tmp_path, "server:\n  host: 0.0.0.0\n")
         outcome = CliRunner().invoke(cli, ["config", "validate", policy])
         assert outcome.exit_code == 1
-        assert "server.host: 0.0.0.0 is not this machine alone" in outcome.output
+        assert "server.host is 0.0.0.0, which other machines can reach" in outcome.output
 
     @pytest.mark.parametrize("port", ["0", "65536", "-1", "http"])
     def test_a_port_that_isnt_one(self, port: str) -> None:
@@ -401,8 +403,41 @@ class TestServerConfig:
             parse_config(f"version: 1\nserver:\n  port: {port}\n")
 
     def test_an_unknown_key_is_an_error(self) -> None:
-        with pytest.raises(ConfigError, match=r"server\.allowed_hosts"):
-            parse_config("version: 1\nserver:\n  allowed_hosts: [warden.example.com]\n")
+        with pytest.raises(ConfigError, match=r"server\.tls_cert"):
+            parse_config("version: 1\nserver:\n  tls_cert: /etc/cert.pem\n")
+
+    @pytest.mark.parametrize(
+        "server",
+        ["allowed_hosts: [warden.example.com]", "allowed_origins: [https://portal.example.com]"],
+    )
+    def test_letting_callers_in_from_elsewhere_needs_auth(self, server: str) -> None:
+        with pytest.raises(ConfigError, match="come with an auth section"):
+            parse_config(f"version: 1\nserver:\n  {server}\n")
+
+    @pytest.mark.parametrize(
+        ("server", "problem"),
+        [
+            ("allowed_hosts: [https://warden.example.com]", "is not a host name"),
+            ("allowed_hosts: ['warden.example.com:443']", "is not a host name"),
+            ("allowed_origins: [portal.example.com]", "is not an origin"),
+            ("allowed_origins: ['https://portal.example.com/app']", "is not an origin"),
+        ],
+    )
+    def test_names_and_origins_are_checked(self, server: str, problem: str) -> None:
+        with pytest.raises(ConfigError, match=problem):
+            parse_config(f"version: 1\nserver:\n  {server}\n")
+
+    def test_beyond_loopback_needs_the_names_it_is_reached_by(self) -> None:
+        auth = (
+            "profiles:\n  public:\n    tables: {}\nauth:\n  api_keys:\n"
+            "    - {name: bot, profile: public, sha256: " + "a" * 64 + "}\n"
+        )
+        with pytest.raises(ConfigError, match=r"list in server\.allowed_hosts"):
+            parse_config(f"version: 1\n{auth}server:\n  host: 0.0.0.0\n")
+        config = parse_config(
+            f"version: 1\n{auth}server:\n  host: 0.0.0.0\n  allowed_hosts: [Warden.Example.com]\n"
+        )
+        assert config.server.allowed_hosts == ("warden.example.com",)
 
     def test_stdio_ignores_it(self, served_with: list[dict[str, Any]], tmp_path: Path) -> None:
         # The section is about HTTP: a stdio server has no port.

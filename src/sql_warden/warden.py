@@ -175,7 +175,12 @@ class Warden:
         )
 
     def check(
-        self, sql: str, *, client: str | None = None, session_id: str | None = None
+        self,
+        sql: str,
+        *,
+        client: str | None = None,
+        session_id: str | None = None,
+        identity: str | None = None,
     ) -> Decision:
         """Run the checks only. Nothing reaches the database. Recorded as a dry run."""
         started = time.perf_counter()
@@ -183,23 +188,34 @@ class Warden:
         decision = self._decide(sql, session_id, dry_run=True, request=request)[0]
         outcome = QueryOutcome(decision, result=None)
         return self._recorded(
-            sql, outcome, started, dry_run=True, client=client, request=request
+            sql, outcome, started, dry_run=True, client=client, identity=identity, request=request
         ).decision
 
     def run(
-        self, sql: str, *, client: str | None = None, session_id: str | None = None
+        self,
+        sql: str,
+        *,
+        client: str | None = None,
+        session_id: str | None = None,
+        identity: str | None = None,
     ) -> QueryOutcome:
         """Check the query and, if allowed, execute it. Engine errors are reported in the
         outcome, not raised, so the decision is never lost.
 
-        client names who asked (the MCP client, or cli), for the audit record. session_id is
-        the session the request belongs to: without one, this Warden's own."""
+        client names the software that asked (the MCP client, or cli), and identity who
+        did, when the caller authenticated; both go in the audit record. session_id is the
+        session the request belongs to: without one, this Warden's own."""
         started = time.perf_counter()
         request = uuid.uuid4()
         decision, columns = self._decide(sql, session_id, request=request)
         if decision.sql is None:
             return self._recorded(
-                sql, QueryOutcome(decision, None), started, client=client, request=request
+                sql,
+                QueryOutcome(decision, None),
+                started,
+                client=client,
+                identity=identity,
+                request=request,
             )
         try:
             self.audit.ping()
@@ -223,9 +239,11 @@ class Warden:
             # A bug, not a database error: still leave a record of the attempt, then let it
             # surface.
             failed = QueryOutcome(decision, result=None, error=EngineError(_crash(exc)))
-            self._recorded(sql, failed, started, client=client, request=request)
+            self._recorded(sql, failed, started, client=client, identity=identity, request=request)
             raise
-        return self._recorded(sql, outcome, started, client=client, request=request)
+        return self._recorded(
+            sql, outcome, started, client=client, identity=identity, request=request
+        )
 
     def budget_status(self, session_id: str | None = None) -> BudgetStatus:
         """What the session (without one, this Warden's own) has used, against its budget.
@@ -367,13 +385,22 @@ class Warden:
         *,
         dry_run: bool = False,
         client: str | None,
+        identity: str | None,
         request: uuid.UUID,
     ) -> QueryOutcome:
         """The outcome, once its audit record is written; if it can't be, a refusal instead.
 
         request becomes the record's id: the one the database was given as the query's tag."""
         outcome = replace(outcome, decision=self._with_budget(outcome.decision))
-        event = self._event(sql, outcome, started, dry_run=dry_run, client=client, request=request)
+        event = self._event(
+            sql,
+            outcome,
+            started,
+            dry_run=dry_run,
+            client=client,
+            identity=identity,
+            request=request,
+        )
         writing = time.perf_counter()
         try:
             self.audit.record(event)
@@ -400,6 +427,7 @@ class Warden:
         *,
         dry_run: bool,
         client: str | None,
+        identity: str | None,
         request: uuid.UUID,
     ) -> AuditEvent:
         decision, result, error = outcome.decision, outcome.result, outcome.error
@@ -421,6 +449,7 @@ class Warden:
             error=None if error is None else str(error),
             session_id=decision.session_id,
             client=client,
+            identity=identity,
             cost_estimate=None if decision.cost is None else decision.cost.total_cost,
             masked_columns=tuple(masked.column for masked in decision.masked),
             rows_returned=None if result is None else len(result.rows),

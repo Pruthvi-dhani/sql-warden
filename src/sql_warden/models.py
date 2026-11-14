@@ -9,6 +9,15 @@ from sql_warden.sessions import BudgetStatus
 
 
 class RefusalCode(StrEnum):
+    UNAUTHENTICATED = "UNAUTHENTICATED"
+    """An HTTP request without a token, or with one that isn't valid: unknown, expired,
+    signed by someone else, or for another server. Answered 401."""
+    NO_PROFILE = "NO_PROFILE"
+    """A valid token that gives no profile this server has. Answered 403, never with
+    default_profile."""
+    AUTH_UNAVAILABLE = "AUTH_UNAVAILABLE"
+    """The identity provider's keys could not be fetched, so the token could not be
+    checked. Answered 503; worth retrying later."""
     PARSE_ERROR = "PARSE_ERROR"
     QUERY_TOO_COMPLEX = "QUERY_TOO_COMPLEX"
     """Too long, or nested too deeply, to be read safely: reading it could take the checks

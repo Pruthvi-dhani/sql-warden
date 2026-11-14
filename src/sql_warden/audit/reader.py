@@ -36,9 +36,10 @@ class AuditReader:
         profile: str | None = None,
         decision: Decision | None = None,
         session_id: str | None = None,
+        identity: str | None = None,
     ) -> list[AuditEvent]:
         """The last limit events, oldest first, as tail prints them."""
-        where, params = _filters(profile, decision, session_id)
+        where, params = _filters(profile, decision, session_id, identity)
         query = sql.SQL("{} {} ORDER BY ts DESC, id DESC LIMIT %s").format(_SELECT, where)
         return self._events(query, [*params, limit])[::-1]
 
@@ -49,9 +50,10 @@ class AuditReader:
         profile: str | None = None,
         decision: Decision | None = None,
         session_id: str | None = None,
+        identity: str | None = None,
     ) -> list[AuditEvent]:
         """Every event at or after ts, oldest first."""
-        where, params = _filters(profile, decision, session_id, since=ts)
+        where, params = _filters(profile, decision, session_id, identity, since=ts)
         query = sql.SQL("{} {} ORDER BY ts, id").format(_SELECT, where)
         return self._events(query, params)
 
@@ -103,6 +105,7 @@ def _filters(
     profile: str | None,
     decision: Decision | None,
     session_id: str | None = None,
+    identity: str | None = None,
     *,
     since: datetime.datetime | None = None,
 ) -> tuple[sql.Composable, list[Any]]:
@@ -112,6 +115,7 @@ def _filters(
         ("profile", profile),
         ("decision", decision),
         ("session_id", session_id),
+        ("identity", identity),
         ("ts", since),
     )
     for column, value in filters:

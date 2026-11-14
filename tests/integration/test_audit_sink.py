@@ -77,7 +77,57 @@ def test_a_refusal_round_trips(sink: PostgresAuditSink, audit_dsn: str) -> None:
         "masked_columns": [],
         "duration_ms": 1.25,
         "trace": list(TRACE),
+        "identity": None,
     }
+
+
+def test_a_caller_turned_away_has_no_profile(sink: PostgresAuditSink, audit_dsn: str) -> None:
+    sink.record(
+        AuditEvent(
+            profile=None,
+            sql="",
+            decision="refused",
+            duration_ms=0.5,
+            refused_by="auth",
+            code="NO_PROFILE",
+            reason="the token gives a profile this server doesn't have",
+            identity="oidc:ana",
+        )
+    )
+    (row,) = _rows(audit_dsn)
+    assert (row["profile"], row["identity"], row["code"]) == (None, "oidc:ana", "NO_PROFILE")
+
+
+def test_an_audit_database_from_before_auth_is_brought_up_to_date(audit_dsn: str) -> None:
+    # The table as it was made before identity existed: profile still NOT NULL.
+    with psycopg.connect(audit_dsn, autocommit=True) as conn:
+        conn.execute("DROP TABLE IF EXISTS audit_events")
+        conn.execute(
+            """
+            CREATE TABLE audit_events (
+                id uuid PRIMARY KEY, ts timestamptz NOT NULL, session_id text, client text,
+                profile text NOT NULL, dry_run boolean NOT NULL, sql text NOT NULL,
+                executed_sql text, rewrites text[] NOT NULL DEFAULT '{}',
+                decision text NOT NULL, refused_by text, code text, reason text, error text,
+                cost_estimate double precision, rows_returned integer, truncated boolean,
+                masked_columns text[] NOT NULL DEFAULT '{}', duration_ms double precision
+                NOT NULL, trace jsonb NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO audit_events (id, ts, profile, dry_run, sql, decision, duration_ms, "
+            "trace) VALUES (gen_random_uuid(), now(), 'public', false, 'select 1', 'allowed', "
+            "1, '[]')"
+        )
+    sink = PostgresAuditSink(audit_dsn)
+    try:
+        sink.ensure_schema()
+        sink.record(AuditEvent(profile=None, sql="", decision="refused", duration_ms=1, code="X"))
+    finally:
+        sink.close()
+    rows = _rows(audit_dsn)
+    assert [(row["profile"], row["identity"]) for row in rows] == [("public", None), (None, None)]
 
 
 def test_an_allowed_run_round_trips(sink: PostgresAuditSink, audit_dsn: str) -> None:

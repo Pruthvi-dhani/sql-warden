@@ -51,12 +51,31 @@ audit:
   dsn: postgresql://warden_audit:${WARDEN_AUDIT_PASSWORD:-warden_audit}@localhost:5434/audit
   connect_timeout_s: 5
 
-# Where `sql-warden serve --transport http` listens (--host and --port win). Only loopback
-# addresses for now: there is no authentication yet, and whoever can reach the port gets
-# everything the server's profile may read. stdio servers don't use this.
+# Where `sql-warden serve --transport http` listens (--host and --port win). Without an auth
+# section, only loopback addresses: whoever could reach the port would get everything the
+# server's profile may read. With one, any address, given allowed_hosts: the names clients
+# reach the server by (put a proxy that terminates TLS in front of it). stdio doesn't use it.
 server:
   host: 127.0.0.1
   port: 8000
+  # allowed_hosts: [warden.example.com]
+  # allowed_origins: [https://portal.example.com]   # web pages that may call it
+
+# Who may call the server over HTTP. With this section every HTTP request needs
+# `Authorization: Bearer <token>`, and one server serves every profile: each request gets its
+# token's. A token that gives no profile is refused, never given default_profile.
+#
+# auth:
+#   api_keys:                    # `sql-warden auth new-key NAME --profile P` makes one
+#     - name: support-bot        # who holds it, as the audit log records them
+#       profile: support
+#       sha256: <the key's SHA-256, as new-key prints it; never the key>
+#   oidc:                        # JWTs from an identity provider
+#     issuer: https://login.example.com/
+#     audience: sql-warden       # what the token's aud claim must contain
+#     jwks_url: https://login.example.com/.well-known/jwks.json
+#     profile_claim: sql_warden_profile        # the claim naming the profile, or instead
+#     # group_profiles: {analysts: support}    # a profile per group (claim: groups)
 
 shape:
   max_joins: 4                 # JOINs per query, comma joins included

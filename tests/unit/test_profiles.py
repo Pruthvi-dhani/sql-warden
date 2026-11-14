@@ -199,6 +199,7 @@ class TestCli:
         outcome = CliRunner().invoke(cli, ["config", "validate"])
         assert outcome.exit_code == 0, outcome.output
         assert outcome.output.splitlines()[8:] == [
+            "  auth:      none: HTTP needs no token, and is served on loopback only",
             "  profiles:  public (default): connects to db/warehouse as warden_public",
             "               reads public.products (id, name, price_cents)",
             "             admin: connects with warehouse.dsn",

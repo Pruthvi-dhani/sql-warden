@@ -10,6 +10,7 @@ import re
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 import psycopg
 import yaml
@@ -23,6 +24,7 @@ from pydantic import (
     PositiveInt,
     SecretStr,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -301,11 +303,11 @@ def is_loopback(host: str) -> bool:
 
 
 LOOPBACK_ONLY = (
-    "there is no authentication yet, so sql-warden only listens on loopback (127.0.0.1, "
-    "::1 or localhost)"
+    "without an auth section sql-warden only listens on loopback (127.0.0.1, ::1 or "
+    "localhost): whoever could reach the port would get everything its profile may read"
 )
-"""Why HTTP is not served to other machines. Whoever can reach the port gets everything
-the server's profile may read, so it opens up together with authentication, not before."""
+"""Why HTTP is not served to other machines unless callers must authenticate."""
+_HOST_NAME = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
 
 
 class ServerConfig(_Section):
@@ -313,17 +315,182 @@ class ServerConfig(_Section):
 
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    allowed_hosts: tuple[str, ...] = ()
+    """The names clients reach the server by, as their requests' Host header says: needed
+    to listen beyond loopback, e.g. [warden.example.com]. Requests for any other name are
+    refused, which stops DNS rebinding."""
+    allowed_origins: tuple[str, ...] = ()
+    """Web pages that may call the server from a browser, e.g. [https://portal.example.com].
+    Requests from any other page are refused; requests from outside a browser carry no
+    Origin and are not affected."""
 
-    @field_validator("host")
+    @field_validator("allowed_hosts")
     @classmethod
-    def _this_machine_only(cls, host: str) -> str:
-        if not is_loopback(host):
+    def _host_names(cls, names: tuple[str, ...]) -> tuple[str, ...]:
+        for name in names:
+            if not _HOST_NAME.fullmatch(name):
+                raise PydanticCustomError(
+                    "host_name",
+                    "{name} is not a host name: give the name alone, e.g. warden.example.com, "
+                    "without a scheme, port or path",
+                    {"name": name},
+                )
+        return tuple(name.lower() for name in names)
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _origins(cls, origins: tuple[str, ...]) -> tuple[str, ...]:
+        for origin in origins:
+            parts = urlsplit(origin)
+            if parts.scheme not in ("http", "https") or not parts.hostname or parts.path:
+                raise PydanticCustomError(
+                    "origin",
+                    "{origin} is not an origin: give a scheme and host, e.g. "
+                    "https://portal.example.com",
+                    {"origin": origin},
+                )
+        return tuple(origin.lower() for origin in origins)
+
+    @property
+    def local(self) -> bool:
+        return is_loopback(self.host)
+
+
+_KEY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+SIGNING_ALGORITHMS = (
+    "RS256",
+    "RS384",
+    "RS512",
+    "PS256",
+    "PS384",
+    "PS512",
+    "ES256",
+    "ES384",
+    "ES512",
+    "EdDSA",
+)
+"""The ones a token may be signed with: public-key signatures only. A shared-secret one
+(HS256) would let whoever can check a token make one, and `none` signs nothing."""
+
+
+class ApiKeyConfig(_Section):
+    """A key a caller sends as `Authorization: Bearer <key>`. Only its hash is kept here:
+    `sql-warden auth new-key` makes one and prints both."""
+
+    name: str
+    """Who holds the key, e.g. support-bot: the identity the audit log records."""
+    profile: str
+    sha256: str
+    """The SHA-256 of the key, in hex. A key is 256 random bits, so a fast hash is enough:
+    there is nothing to guess."""
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, name: str) -> str:
+        if not _KEY_NAME.fullmatch(name):
             raise PydanticCustomError(
-                "not_loopback",
-                "{host} is not this machine alone: {why}",
-                {"host": host, "why": LOOPBACK_ONLY},
+                "key_name",
+                "a key's name is up to 64 letters, digits, '.', '_', ':', '@' or '-', "
+                "starting with a letter or digit",
             )
-        return host
+        if name.lower().startswith("oidc:"):
+            # Taken: an OIDC caller is oidc:<subject>, and two callers must never share a name.
+            raise PydanticCustomError(
+                "key_name", "a key's name can't start with oidc:, which names OIDC callers"
+            )
+        return name
+
+    @field_validator("sha256")
+    @classmethod
+    def _hex(cls, digest: str) -> str:
+        digest = digest.lower()
+        if not _SHA256.fullmatch(digest):
+            raise PydanticCustomError(
+                "sha256",
+                "must be the key's SHA-256 as 64 hex digits, as `sql-warden auth new-key` "
+                "prints it; never the key itself",
+            )
+        return digest
+
+
+def _https_unless_local(url: str, what: str) -> str:
+    parts = urlsplit(url)
+    local = parts.hostname is not None and is_loopback(parts.hostname)
+    if parts.scheme == "https" or (parts.scheme == "http" and local):
+        return url
+    raise PydanticCustomError(
+        "https", "{what} must be an https:// URL (http:// only on this machine)", {"what": what}
+    )
+
+
+class OidcConfig(_Section):
+    """Tokens from an OpenID Connect provider: JWTs, checked against its published keys."""
+
+    issuer: str
+    """Exactly as the tokens' `iss` claim has it."""
+    audience: str
+    """What the tokens' `aud` claim must contain: this server's name at the provider."""
+    jwks_url: str
+    """Where the provider publishes the keys it signs with."""
+    algorithms: tuple[str, ...] = ("RS256", "ES256")
+    profile_claim: str = "sql_warden_profile"
+    """The claim that names the caller's profile, unless group_profiles is set."""
+    group_claim: str = "groups"
+    group_profiles: dict[str, str] = Field(default_factory=dict)
+    """Group → profile. With it, the caller's profile comes from the groups listed in
+    group_claim instead; groups that give two different profiles are refused."""
+    leeway_s: int = Field(default=30, ge=0, le=300)
+    """How far apart this machine's clock and the provider's may be."""
+
+    @field_validator("issuer", "jwks_url")
+    @classmethod
+    def _secure(cls, url: str, info: ValidationInfo) -> str:
+        return _https_unless_local(url, str(info.field_name))
+
+    @field_validator("algorithms")
+    @classmethod
+    def _public_key_only(cls, algorithms: tuple[str, ...]) -> tuple[str, ...]:
+        if not algorithms:
+            raise PydanticCustomError("no_algorithms", "list at least one")
+        for algorithm in algorithms:
+            if algorithm not in SIGNING_ALGORITHMS:
+                raise PydanticCustomError(
+                    "algorithm",
+                    "{algorithm} is not allowed: only public-key signatures ({allowed})",
+                    {"algorithm": algorithm, "allowed": ", ".join(SIGNING_ALGORITHMS)},
+                )
+        return algorithms
+
+
+class AuthConfig(_Section):
+    """Who may call the server over HTTP, and which profile each gets. With this section,
+    every HTTP request must carry a token, and one server serves every profile: each request
+    is checked against its token's. stdio is not affected: whoever starts the process has
+    already chosen its profile."""
+
+    api_keys: tuple[ApiKeyConfig, ...] = ()
+    oidc: OidcConfig | None = None
+
+    @model_validator(mode="after")
+    def _some_way_in(self) -> Self:
+        if not self.api_keys and self.oidc is None:
+            raise PydanticCustomError(
+                "no_auth", "give api_keys, oidc, or both: otherwise nobody could get in"
+            )
+        for kind, values in (
+            ("name", [key.name for key in self.api_keys]),
+            ("sha256", [key.sha256 for key in self.api_keys]),
+        ):
+            repeated = sorted({value for value in values if values.count(value) > 1})
+            if repeated:
+                what = "names" if kind == "name" else "hashes"
+                raise PydanticCustomError(
+                    "duplicate_key",
+                    "api_keys repeat {what}: {repeated}; each key is one caller's",
+                    {"what": what, "repeated": ", ".join(repeated[:3])},
+                )
+        return self
 
 
 class AuditConfig(_Section):
@@ -502,6 +669,8 @@ class WardenConfig(_Section):
     masking: MaskingConfig = MaskingConfig()
     audit: AuditConfig = AuditConfig()
     server: ServerConfig = ServerConfig()
+    auth: AuthConfig | None = None
+    """None: HTTP needs no token, and is served on loopback only."""
     profiles: dict[str, ProfileConfig] | None = None
     """None: no profiles are defined, and the one profile is the implicit `all`."""
     default_profile: str | None = None
@@ -520,6 +689,48 @@ class WardenConfig(_Section):
         if cost is not None and not isinstance(cost, dict):
             return data  # not a section at all: its own validation says so
         return {**data, "cost": {**(cost or {}), "max_total_cost": SNOWFLAKE_MAX_TOTAL_COST}}
+
+    @model_validator(mode="after")
+    def _auth_gives_real_profiles(self) -> Self:
+        auth = self.auth
+        if auth is None:
+            if not self.server.local:
+                raise PydanticCustomError(
+                    "not_loopback",
+                    "server.host is {host}, which other machines can reach: {why}",
+                    {"host": self.server.host, "why": LOOPBACK_ONLY},
+                )
+            if self.server.allowed_hosts or self.server.allowed_origins:
+                raise PydanticCustomError(
+                    "hosts_without_auth",
+                    "server.allowed_hosts and allowed_origins let callers in from elsewhere, "
+                    "so they come with an auth section",
+                )
+            return self
+        if self.profiles is None:
+            raise PydanticCustomError(
+                "auth_without_profiles",
+                "auth maps callers to profiles, but there is no profiles section: define the "
+                "profiles callers get",
+            )
+        given = [(f"api key {key.name}", key.profile) for key in auth.api_keys]
+        if auth.oidc is not None:
+            given += [(f"oidc group {g}", p) for g, p in auth.oidc.group_profiles.items()]
+        for who, profile in given:
+            if profile not in self.profiles:
+                raise PydanticCustomError(
+                    "unknown_auth_profile",
+                    "auth gives {who} the profile '{profile}', but the config defines {known}",
+                    {"who": who, "profile": profile, "known": ", ".join(self.profiles)},
+                )
+        if not self.server.local and not self.server.allowed_hosts:
+            raise PydanticCustomError(
+                "no_allowed_hosts",
+                "server.host is {host}: list in server.allowed_hosts the names clients reach "
+                "it by, e.g. [warden.example.com]",
+                {"host": self.server.host},
+            )
+        return self
 
     @model_validator(mode="after")
     def _profile_dsns_fit_the_engine(self) -> Self:

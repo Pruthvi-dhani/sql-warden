@@ -13,15 +13,19 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from sql_warden import __version__
 from sql_warden.audit import AuditError, AuditEvent, AuditReader, AuditSink, PostgresAuditSink
+from sql_warden.auth import Authenticator, key_hash, new_api_key
 from sql_warden.config import (
     EVERYTHING,
     IMPLICIT_PROFILE,
+    ApiKeyConfig,
+    AuthConfig,
     BudgetConfig,
     ConfigError,
     ProfileConfig,
     WardenConfig,
     default_config,
     describe_dsn,
+    is_loopback,
     load_config,
 )
 from sql_warden.engines import Engine, EngineError
@@ -484,12 +488,23 @@ def serve(
     profile: str | None,
     audit_dsn: str | None,
 ) -> None:
-    """Serve the MCP tools for one profile, recording every query in the audit database.
+    """Serve the MCP tools, recording every query in the audit database.
 
-    It first asks the warehouse what the profile's role can do, and doesn't start as one that
-    can write. `sql-warden config validate --live` checks every profile's role that way.
+    Over stdio, and over HTTP without an auth section, it serves one profile. Over HTTP with
+    an auth section it serves them all: each request's token says which it gets.
+
+    It first asks the warehouse what each profile's role can do, and doesn't start as one
+    that can write. `sql-warden config validate --live` checks every profile's role that way.
     """
     config = settings(state, dsn, max_rows, timeout_ms, audit_dsn)
+    if transport == "http" and config.auth is not None:
+        if profile is not None:
+            raise click.ClickException(
+                "with an auth section, each request's token says which profile it gets: "
+                "--profile is for stdio, where whoever starts the server picks"
+            )
+        _serve_authenticated(config, config.auth, host, port)
+        return
     warden = build_warden(config, profile, serving=True)
     if transport == "stdio":
         create_server(warden).run("stdio")
@@ -499,10 +514,41 @@ def serve(
         app = create_http_app(warden, host=host)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    _listen(app, host, port, f"profile {warden.profile}")
+
+
+def _serve_authenticated(
+    config: WardenConfig, auth: AuthConfig, host: str | None, port: int | None
+) -> None:
+    profiles = list(config.profiles or {})
+    audit = open_audit(config)  # one audit log for every profile
+    # Every profile is served, so every profile's role must be one that can't write.
+    wardens = {name: build_warden(config, name, audit=audit, serving=True) for name in profiles}
+    host, port = host or config.server.host, port or config.server.port
+    try:
+        app = create_http_app(
+            wardens,
+            host=host,
+            authenticator=Authenticator(auth, profiles),
+            allowed_hosts=config.server.allowed_hosts,
+            allowed_origins=config.server.allowed_origins,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not is_loopback(host):
+        click.echo(
+            f"warning: serving plain HTTP on {host}. Every request carries its token, so put "
+            "a proxy that terminates TLS in front of it, and let clients reach it only "
+            "through the proxy.",
+            err=True,
+        )
+    _listen(app, host, port, f"profiles {', '.join(profiles)}, to callers with a token")
+
+
+def _listen(app: Any, host: str, port: int, serving: str) -> None:
     url_host = f"[{host}]" if ":" in host else host
     click.echo(
-        f"sql-warden MCP server on http://{url_host}:{port}/mcp, profile {warden.profile} "
-        "(Ctrl+C stops it)",
+        f"sql-warden MCP server on http://{url_host}:{port}/mcp, {serving} (Ctrl+C stops it)",
         err=True,
     )
     # No Server header: what it runs on is nobody's business who can reach the port.
@@ -542,6 +588,10 @@ def audit_group() -> None:
     help="Only events of this session: a response's session_id, or a --session name.",
 )
 @click.option(
+    "--identity",
+    help="Only events of this caller: an API key's name, or oidc:<subject>.",
+)
+@click.option(
     "--decision",
     type=click.Choice(["allowed", "refused", "failed"]),
     help="Only events with this outcome.",
@@ -557,6 +607,7 @@ def tail(
     limit: int,
     profile: str | None,
     session_id: str | None,
+    identity: str | None,
     decision: Any,
     follow: bool,
     as_json: bool,
@@ -569,7 +620,12 @@ def tail(
         click.echo(json.dumps(audit_json(event)) if as_json else format_audit_line(event))
 
     try:
-        filters = {"profile": profile, "decision": decision, "session_id": session_id}
+        filters = {
+            "profile": profile,
+            "decision": decision,
+            "session_id": session_id,
+            "identity": identity,
+        }
         events = reader.recent(limit, **filters)
         if not as_json:
             if events or follow:
@@ -626,6 +682,54 @@ def show(state: CliState, event_id: str, as_json: bool, audit_dsn: str | None) -
         )
     (event,) = matches
     click.echo(json.dumps(audit_json(event)) if as_json else format_audit_event(event))
+
+
+@cli.group("auth")
+def auth_group() -> None:
+    """Make API keys for callers of the HTTP server."""
+
+
+@auth_group.command("new-key")
+@click.argument("name")
+@click.option("--profile", "profile", required=True, help="The profile the key's holder gets.")
+@click.pass_obj
+def new_key(state: CliState, name: str, profile: str) -> None:
+    """Make an API key for NAME (who will hold it, e.g. support-bot), and print the entry to
+    add to auth.api_keys. Only the hash goes in the config: the key is shown this once."""
+    config, source = resolve_config(state.config_path)
+    if config.profiles is None:
+        raise click.ClickException(
+            f"{source} defines no profiles: a key gives its holder one, so define them first"
+        )
+    if profile not in config.profiles:
+        raise click.ClickException(
+            f"unknown profile '{profile}': {source} defines {', '.join(config.profiles)}"
+        )
+    taken = {key.name for key in config.auth.api_keys} if config.auth else set()
+    if name in taken:
+        raise click.ClickException(f"{source} already has a key named {name}")
+    key = new_api_key()
+    try:
+        entry = ApiKeyConfig(name=name, profile=profile, sha256=key_hash(key))
+    except ValueError as exc:
+        raise click.ClickException(f"key name {name!r}: {_first_problem(exc)}") from exc
+    click.echo(f"key: {key}")
+    click.echo("")
+    click.echo(f"Give it to {name}: it is shown only this once, and can't be recovered.")
+    click.echo("They send it as `Authorization: Bearer <key>`. Add this under auth.api_keys:")
+    click.echo("")
+    click.echo(f"  - name: {entry.name}")
+    click.echo(f"    profile: {entry.profile}")
+    click.echo(f"    sha256: {entry.sha256}")
+
+
+def _first_problem(exc: ValueError) -> str:
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        found = errors()
+        if found:
+            return str(found[0]["msg"])
+    return str(exc)
 
 
 @cli.group()
@@ -685,8 +789,14 @@ def validate(state: CliState, path: Path | None, live: bool) -> None:
     click.echo(f"  cost:      refused above an estimated {limit}{scanned}")
     click.echo(f"  budgets:   {describe_budget(loaded.budgets)}")
     if "server" in loaded.model_fields_set:
-        host = f"[{loaded.server.host}]" if ":" in loaded.server.host else loaded.server.host
-        click.echo(f"  server:    http on {host}:{loaded.server.port}, this machine only")
+        server = loaded.server
+        host = f"[{server.host}]" if ":" in server.host else server.host
+        reach = "this machine only" if server.local else f"as {', '.join(server.allowed_hosts)}"
+        click.echo(f"  server:    http on {host}:{server.port}, {reach}")
+        if server.allowed_origins:
+            click.echo(f"             from pages at {', '.join(server.allowed_origins)}")
+    for line in describe_auth(loaded.auth):
+        click.echo(line)
     if loaded.masking.key is not None:
         click.echo("  masking:   hmac key set")
     for line in describe_profiles(loaded):
@@ -733,6 +843,29 @@ def describe_roles(config: WardenConfig) -> tuple[list[str], bool]:
             lines.append("               ! but more than the profile allows:")
             lines += [f"                 {line}" for line in listed(check.beyond)]
     return lines, safe
+
+
+def describe_auth(auth: AuthConfig | None) -> list[str]:
+    """Who may call over HTTP, for config validate: never a key or its hash."""
+    if auth is None:
+        return ["  auth:      none: HTTP needs no token, and is served on loopback only"]
+    lines = []
+    if auth.api_keys:
+        keys = ", ".join(f"{key.name} → {key.profile}" for key in auth.api_keys)
+        noun = "key" if len(auth.api_keys) == 1 else "keys"
+        lines.append(f"{len(auth.api_keys)} API {noun}: {keys}")
+    oidc = auth.oidc
+    if oidc is not None:
+        lines.append(f"oidc from {oidc.issuer}, for audience {oidc.audience}")
+        if oidc.group_profiles:
+            groups = ", ".join(f"{g} → {p}" for g, p in oidc.group_profiles.items())
+            lines.append(f"  profile by group ({oidc.group_claim}): {groups}")
+        else:
+            lines.append(f"  profile from the {oidc.profile_claim} claim")
+    return [
+        ("  auth:      " if index == 0 else "             ") + line
+        for index, line in enumerate(lines)
+    ]
 
 
 def describe_budget(budget: BudgetConfig) -> str:
