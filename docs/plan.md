@@ -1108,7 +1108,7 @@ CLI.
   (its agent restarts it); the catalog compared only at startup and reload, not as it
   changes.
 
-**9.6 Hardened audit** ✅ done
+**9.6 Hardened audit** ✅ done (`c40883b`)
 - Deployment SQL for an INSERT-only warden role on `audit_events` (no UPDATE/DELETE) and a
   retention job (`sql-warden audit prune --older-than`, run by a separately privileged role).
   Optional one-way export to Snowflake for analytics. The deployment guide goes in
@@ -1189,6 +1189,100 @@ CLI.
   the warden itself setting the customer id for the transaction.
 - Tests: two customers' tokens never see each other's rows through joins, subqueries, UNIONs,
   aggregates or `OR` tricks; a token without the claim is refused; integration with RLS on.
+
+## Phase 10 — Under load
+Phase 9 made sql-warden a service; this phase is about what it does when the service is busy.
+Two things hold it back today, both about connections to Postgres:
+
+- **The warehouse engine opens a connection for every call.** A query that runs opens two
+  (one for the cost check's `EXPLAIN`, one to run it), and catalog reads and readiness checks
+  open more. Each costs a TCP and TLS handshake, authentication and a new backend process on
+  the server, and under load they churn through the replica's `max_connections`.
+- **The audit sink is one connection behind a lock.** Every request writes one record, so
+  however many requests `server.max_concurrent_requests` allows at once, their records are
+  written one at a time. The budget store is the same, one connection per profile, held
+  through each charge. This is the first wall a busy server hits.
+
+Snowflake is not part of this: its engine already keeps one session per profile open and
+shares it, which is the right shape there (opening a session is a login round trip, and cost
+is bounded by the warehouse and its resource monitor, not by connections). What is open
+about it needs a real account, and is 10.3.
+
+**10.1 A connection pool for the Postgres warehouse**
+- `PostgresEngine` takes its connections from a pool (`psycopg_pool`, a new dependency:
+  `psycopg[binary,pool]`) instead of opening one per call. One pool per engine, so per
+  profile: profiles connect as different roles, and a connection is never handed from one
+  profile to another.
+- A new `warehouse.pool` section: `max_size` (default 10; at most that many connections per
+  profile, so profiles × max_size is what the replica must allow), `max_idle_s` (300: an idle
+  connection is closed, down to none), `max_lifetime_s` (1800: a connection is replaced after
+  this long, which is how a rotated password or a failed-over replica is picked up) and
+  `timeout_s` (5: how long a request waits for a connection). A request that gets none in
+  time is answered as it is today when the warehouse can't be reached (`COST_UNAVAILABLE`,
+  or a failed query), never left waiting.
+- Only servers pool. `query`, `check` and `tables` run one request and exit: there is
+  nothing to reuse, so they keep opening a connection as now.
+- What a connection carries from one request to the next is the thing to get right. Today it
+  is nothing, because each request gets a new one. The engine already keeps its own settings
+  to the transaction (read-only, the timeout and string settings are transaction-local, and
+  it ends in a rollback), and the shape check refuses what would change the session (`SET`,
+  `set_config`, functions it doesn't know, which includes advisory locks). Under that, as
+  defence in depth: a connection is given `DISCARD ALL` when it comes back, psycopg's
+  prepared statements are switched off for pooled connections so nothing of one query is
+  kept for the next, and each is checked as it is borrowed, so one the server closed is
+  replaced rather than failing a request.
+- Closing: the engine gets `close()`, which the Warden already calls when a reload retires it
+  (9.5), so a reload builds new pools and the old ones drain. `serve` closes them on shutdown.
+- Metrics, per profile: connections open, in use, and requests waiting for one, and a count
+  of requests that timed out waiting.
+- A load script (`dev/loadtest.py`): N concurrent callers running a cheap query through the
+  HTTP server against the demo stack, reporting requests per second, latency percentiles and
+  the most connections the warehouse saw. Run before and after, with the numbers recorded
+  here: the point must show what it bought.
+- Tests: unit tests for the config section. On Postgres: 200 queries from 16 threads open no
+  more than `max_size` connections (counted in `pg_stat_activity`) where today they open
+  400; a connection killed on the server (`pg_terminate_backend`) costs no request; state
+  set on a connection as the superuser (a session setting, an advisory lock, a prepared
+  statement) is gone for its next borrower; a pool held full answers the next request with
+  the refusal within `timeout_s`; a reload closes the old pools once their requests finish;
+  the statement timeout still cancels a query on a reused connection; 8.2's adversarial
+  suite on Postgres passes on pooled engines.
+
+**10.2 Pools for the audit log and the budgets**
+- `PostgresAuditSink` writes each record on a connection from a pool, so records are written
+  side by side instead of in a queue behind one lock. `PostgresSessionStore` likewise: the
+  lock in Python goes, and what keeps two charges to one session or one caller in order is
+  what already does across servers (the row lock and the advisory lock, 9.3).
+- Two pools, not one: records in theirs, budgets in theirs (one for all profiles, replacing a
+  connection per profile). A burst of charges waiting on each other's locks must not be able
+  to take every connection and hold up the records, which is why they have separate
+  connections today.
+- A new `audit.pool` section, as `warehouse.pool`, with smaller defaults (`max_size` 5 for
+  each pool): a record is one short insert.
+- Fail-closed stays exactly as it is. A record that can't get a connection in time is a
+  record that couldn't be written: `AUDIT_UNAVAILABLE`, and nothing is returned. A charge
+  that can't is `BUDGET_UNAVAILABLE`. The retry on a broken connection (one fresh one, then
+  give up) stays, and so does its rule that a charge whose commit was lost may count twice,
+  never less.
+- 9.6's roles are untouched: a pooled connection logs in as the same role, and the startup
+  checks (the schema, `append_only`) run on one.
+- Metrics as for the warehouse's pool, for each of the two.
+- Tests: on Postgres, 9.3's two-replica tests unchanged and passing (exactly 30 of 96, exactly
+  25: the property that matters most here); records from 16 threads are all written, each
+  once; with the pool held full, a query is refused `AUDIT_UNAVAILABLE` before it reaches the
+  warehouse; an audit database restarted under load costs at most the requests in flight;
+  9.6's hardened-role tests pass with pools. The load script again, with the numbers.
+
+**10.3 Snowflake's session under load** (waits for an account)
+- Two things nobody can answer without a real account, to be settled with 7.2's live tests
+  the first time they run:
+  - Whether many threads running queries on one session at once is sound and fast enough, or
+    whether the engine should keep a few sessions per profile.
+  - What an expired session looks like (sessions end after a time idle). The engine
+    reconnects once on errors it knows as a lost connection; an expired token may arrive as
+    an ordinary query error instead, and would then fail every request until a restart.
+- A live test for each, written with this point and skipped like the others without
+  `SNOWFLAKE_DSN`; whatever they show is fixed here.
 
 ## Verification
 - After each point, run `uv run ruff check . && uv run mypy && uv run pytest -m "not snowflake"`.
