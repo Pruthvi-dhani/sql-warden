@@ -33,7 +33,7 @@ Whether an HTTP client connects depends on the MCP version it speaks. Before 202
 client opens a connection with a handshake and sends its `Mcp-Session-Id` with every request.
 From 2026-07-28 on there are no connections over HTTP: each request stands alone, and nothing
 on it says which other requests came from the same caller, except its token. With
-[authentication](reference.md#authentication) each caller has a session of their own, kept while the
+[authentication](mcp-server.md#authentication) each caller has a session of their own, kept while the
 server runs: the same caller is the same session from any client, and a restarted server
 starts everyone afresh. Without it those requests are all one session, the server's own: a
 limit then holds for the server as a whole, so it can't be got around, but one caller can use
@@ -133,7 +133,7 @@ session budget: 2 of 25 queries, 0.12 of 50,000 cost, 6 of 500 rows, 0 of 10 ref
 ### Budgets per caller
 
 A session's budget starts afresh with every connection. A caller with a
-[token](reference.md#authentication) can also be held to a budget of their own, over a rolling window,
+[token](mcp-server.md#authentication) can also be held to a budget of their own, over a rolling window,
 across all their sessions: connecting again doesn't give them more.
 
 ```yaml

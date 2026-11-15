@@ -280,7 +280,7 @@ their sessions. Both budgets are checked in one step, and the refusal says which
 | `AUTH_UNAVAILABLE`            | HTTP    | the identity provider's keys couldn't be fetched; answered `503`     |
 
 The three HTTP codes come before any check: the request is turned away unread. See
-[Authentication](reference.md#authentication).
+[Authentication](mcp-server.md#authentication).
 
 ### Which are worth retrying
 

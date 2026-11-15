@@ -55,8 +55,8 @@ optional except `version`.
 | `identity_budgets` | what one caller with a token may use over a rolling window           | [Budgets per caller](budgets.md#budgets-per-caller) |
 | `masking`          | the key for `hmac` masks                                             | [Masked columns](masking.md)     |
 | `audit`            | the audit database                                                   | [below](#audit), [The audit log](audit.md) |
-| `server`           | where the HTTP server listens, and its limits                        | [below](#server), [Over HTTP](reference.md#over-http) |
-| `auth`             | API keys and OIDC tokens for HTTP callers                            | [Authentication](reference.md#authentication)     |
+| `server`           | where the HTTP server listens, and its limits                        | [below](#server), [Over HTTP](mcp-server.md#over-http) |
+| `auth`             | API keys and OIDC tokens for HTTP callers                            | [Authentication](mcp-server.md#authentication)     |
 | `profiles`, `default_profile` | the rules for each kind of caller                         | [Profiles](#profiles)                             |
 
 ### warehouse
@@ -114,7 +114,7 @@ optional except `version`.
 A profile is who a server serves: say `public` for an agent released to customers, and `admin`
 for internal admins. Each server is tied to one profile when it starts, and nothing an agent
 sends can change it (the tools take only SQL). Over HTTP with
-[authentication](reference.md#authentication), one server serves every profile, and each
+[authentication](mcp-server.md#authentication), one server serves every profile, and each
 caller's token decides which they get.
 
 ```yaml

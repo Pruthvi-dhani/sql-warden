@@ -5,7 +5,7 @@ sql-warden holds credentials for the databases behind it. This guide covers the 
 roles, secrets, Kubernetes and ECS, the network, and keeping the audit log.
 
 What it assumes: you have read about [profiles](policy.md#profiles),
-[defence in depth](reference.md#defence-in-depth), [authentication](reference.md#authentication)
+[defence in depth](reference.md#defence-in-depth), [authentication](mcp-server.md#authentication)
 and [running it as a service](reference.md#running-it-as-a-service).
 
 ```
