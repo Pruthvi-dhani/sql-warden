@@ -1,9 +1,7 @@
 # sql-warden reference
 
-The detail on the topics that don't have pages of their own yet: the audit log, sessions,
-the MCP server, the policy file, budgets, masking and Snowflake. The [docs home](index.md)
-lists every page. Installing and first queries are in [Getting started](getting-started.md),
-and each check and refusal code is in [The checks](checks.md).
+The detail on the topics that don't have pages of their own yet. The [docs home](index.md)
+lists every page.
 
 ## The audit log
 
@@ -295,73 +293,6 @@ agent that started the server restarts it.
 
 In Kubernetes, mount the policy from a ConfigMap as a directory, not with `subPath` (a file
 mounted with `subPath` is never updated), and send `SIGHUP` once the new file is in place.
-
-## Configuration
-
-sql-warden reads its policy from `warden.yaml`. Start from the example:
-
-```bash
-cp warden.example.yaml warden.yaml
-uv run sql-warden config validate          # checks the file without connecting
-uv run sql-warden config validate --live   # then connects as each profile's role and checks it
-```
-
-Which config is used, highest priority first:
-
-1. command-line flags (`--dsn`, `--max-rows`, `--timeout-ms`, `--profile`, `--audit-dsn`) and
-   `SQL_WARDEN_DSN`, `SQL_WARDEN_PROFILE`, `SQL_WARDEN_AUDIT_DSN`
-2. the file given by `--config PATH` or `SQL_WARDEN_CONFIG`
-3. `./warden.yaml`, if it exists
-4. built-in defaults for the local demo stack
-
-Values can reference environment variables as `${NAME}` or `${NAME:-default}`, so passwords can
-stay out of the file. Unknown keys are errors: a section appears in the file once sql-warden
-enforces it. Today that is `warehouse` (connection, timeout, row cap), `audit` (the audit
-database), `shape` (joins, nesting, LIMIT policy, function allow and deny lists, allowed
-types), `cost` (`max_total_cost`), `budgets` (what one session may use), `identity_budgets`
-(what one caller may use), `masking` (the hmac key), `server` (HTTP), `auth` (tokens) and
-`profiles`;
-[warden.example.yaml](../warden.example.yaml) documents every key.
-
-### Profiles
-
-A profile is who a server serves: say `public` for an agent released to customers, and `admin`
-for internal admins. Each server is tied to one profile when it starts, and nothing an agent
-sends can change it (the tools take only SQL):
-
-```yaml
-default_profile: public
-profiles:
-  public:      # an agent released to customers
-    dsn: postgresql://warden_public:${WARDEN_PUBLIC_PASSWORD:-warden_public}@localhost:5433/warehouse
-    tables:
-      public.products: [id, name, price_cents]
-    max_rows: 50                 # its own row cap
-    cost:
-      max_total_cost: 10000      # and a tighter cost limit
-  admin:       # internal admins: connects with warehouse.dsn
-    tables: "*"
-    max_rows: 1000
-```
-
-```bash
-cp warden.example.yaml warden.yaml                                                   # ships these two profiles
-uv run sql-warden query "select count(*) from employee_salaries"                    # public: TABLE_NOT_ALLOWED
-uv run sql-warden query "select count(*) from employee_salaries" --profile admin    # admin: 50
-uv run sql-warden serve --profile public                                             # an MCP server for customers
-```
-
-`tables` is what a profile may query: `"*"` for every table its role can read, or
-`schema.table` → `"*"` (every column, including ones added later) or a list of columns. A
-profile that lists no tables can read nothing. `SELECT *` (and a whole-row reference like
-`row_to_json(p)`) needs `"*"` for the table, since it would read columns the list leaves out.
-
-The profile comes from `--profile`, else `SQL_WARDEN_PROFILE`, else `default_profile`. An
-unknown name is an error, never a fallback. A profile's own `dsn` wins over `--dsn` and
-`SQL_WARDEN_DSN`, so a flag can't widen what it reads. Its own `max_rows` wins over
-`--max-rows` in the same way. Its `cost` limits replace the top-level ones it names, and the
-rest come from the `cost` section. Every decision names its profile: the CLI prints it, and
-`--json` and the MCP results carry `profile`.
 
 ### Defence in depth
 
@@ -688,21 +619,3 @@ queries filter, join, group and sort on it; what is computed from it still comes
 The hmac key is a secret: whoever has it can check a guess against a token. sql-warden has no
 built-in key and won't start if a profile uses `hmac` without one. The example config's
 default after `:-` is for the local demo stack only.
-
-`list_tables`, `describe_table` and `sql-warden tables` show only what the profile may query,
-so an agent never learns that the other tables exist. Each table says `all_columns`: whether
-`SELECT *` works on it.
-
-```bash
-uv run sql-warden tables                     # public.products  id, name, price_cents  (some columns)
-uv run sql-warden tables products --json     # the same payload describe_table returns
-```
-
-Give a profile its own `dsn` as a role with matching grants, and Postgres enforces the same
-rules underneath (the demo's `warden_public` can read only those three product columns). The
-access check reads the catalog to resolve names, so with profiles even `check` connects to the
-database (to read the catalog, never to run the query); if it can't, the query is refused with
-`CATALOG_UNAVAILABLE`. Without a `profiles` section there is one implicit profile, `all`, with
-no table rules, and `config validate` says so. The demo database's `warden_public` role was
-added with profiles: if your demo stack is older, reseed it with
-`docker compose -f dev/docker-compose.yml down -v && docker compose -f dev/docker-compose.yml up -d`.

@@ -106,7 +106,7 @@ even where no profile limits tables:
 
 ## Access
 
-A query may use only the tables and columns its [profile](reference.md#profiles) allows.
+A query may use only the tables and columns its [profile](policy.md#profiles) allows.
 That holds wherever the query uses them: selected, filtered, joined, grouped or sorted on,
 in subqueries and in CTEs. With the example's `public` profile, which may read three columns
 of `products`:

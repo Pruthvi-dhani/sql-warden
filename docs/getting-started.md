@@ -250,5 +250,5 @@ docker compose -f dev/docker-compose.yml down -v     # and delete their data, au
 
 - [How it works](how-it-works.md): what happens to a request, and why it is built this way.
 - [The checks](checks.md): everything that can be refused.
-- [Configuration](reference.md#configuration): writing your own policy.
+- [Configuration](policy.md): writing your own policy.
 - [Deploying](deploy.md): running sql-warden as a service for many agents.
