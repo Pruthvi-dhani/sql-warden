@@ -2,7 +2,7 @@
 
 Everything sql-warden enforces comes from one file, `warden.yaml`. This page covers where
 the policy is read from, what its sections are, how profiles work, and how to check a policy
-before you serve it. [warden.example.yaml](../warden.example.yaml) is a complete policy with
+before you serve it. [warden.example.yaml](https://github.com/Pruthvi-dhani/sql-warden/blob/main/warden.example.yaml) is a complete policy with
 a comment on every key.
 
 ## Starting one

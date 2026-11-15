@@ -2,7 +2,7 @@
 
 sql-warden is a governed SQL gateway: an AI agent sends SQL over MCP, sql-warden checks it
 against a policy, runs it only if every check passes, and records the request in a separate
-audit database. The [README](../README.md) is the two-minute version.
+audit database. The [README](https://github.com/Pruthvi-dhani/sql-warden/blob/main/README.md) is the two-minute version.
 
 ## Start here
 
@@ -39,7 +39,7 @@ audit database. The [README](../README.md) is the two-minute version.
 
 ## For contributors
 
-- [plan.md](plan.md): the roadmap, and what was built at each step and why.
-- [tests/portal/README.md](../tests/portal/README.md): the browser test page.
-- The README's [Working on it](../README.md#working-on-it) section: the lint, type and test
+- [plan.md](https://github.com/Pruthvi-dhani/sql-warden/blob/main/docs/plan.md): the roadmap, and what was built at each step and why.
+- [tests/portal/README.md](https://github.com/Pruthvi-dhani/sql-warden/blob/main/tests/portal/README.md): the browser test page.
+- The README's [Working on it](https://github.com/Pruthvi-dhani/sql-warden/blob/main/README.md#working-on-it) section: the lint, type and test
   commands, and a map of the source tree.

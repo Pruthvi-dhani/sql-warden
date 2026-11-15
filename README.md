@@ -141,7 +141,20 @@ Integration tests start their own throwaway Postgres containers, so they don't n
 stack and never touch it. The Snowflake engine has two more suites, run on their own; see
 [Snowflake](docs/snowflake.md).
 
-Where things are:
+### The docs
+
+The pages in [docs/](docs/index.md) read fine on GitHub, and also build into a site with
+search and navigation. To read it locally:
+
+```bash
+uvx --with mkdocs-material mkdocs serve            # http://127.0.0.1:8001/, rebuilt as you edit
+uvx --with mkdocs-material mkdocs build --strict   # or build it once into site/, failing on a broken link
+```
+
+`uvx` fetches MkDocs for that run only, so nothing is added to the project's dependencies.
+The site's layout is in [mkdocs.yml](mkdocs.yml).
+
+### Where things are
 
 ```
 src/sql_warden/
@@ -161,6 +174,7 @@ tests/
   portal/          the browser test page
 dev/               the demo stack, its seed data, and a load test
 deploy/, docs/     deployment SQL and the guides
+mkdocs.yml         the docs site's layout
 ```
 
 ## Status

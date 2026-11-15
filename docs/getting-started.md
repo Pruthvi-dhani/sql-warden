@@ -23,7 +23,7 @@ docker compose -f dev/docker-compose.yml up -d
 | `warehouse` | 5433 | `warehouse` | the data agents query, seeded on first start    |
 | `audit`     | 5434 | `audit`     | sql-warden's audit log, on a separate instance  |
 
-The warehouse is seeded from [dev/warehouse_seed.sql](../dev/warehouse_seed.sql) with
+The warehouse is seeded from [dev/warehouse_seed.sql](https://github.com/Pruthvi-dhani/sql-warden/blob/main/dev/warehouse_seed.sql) with
 deterministic demo data:
 
 | Table               | Rows      | Why it's there                                        |
@@ -185,7 +185,7 @@ profile, and **Compare** shows what every profile would decide about the same qu
 side. **Examples** has a query for each kind of refusal.
 
 The portal only listens on 127.0.0.1. It is a testing tool, so it lives in `tests/` and is
-not part of the package. More in [tests/portal/README.md](../tests/portal/README.md).
+not part of the package. More in [tests/portal/README.md](https://github.com/Pruthvi-dhani/sql-warden/blob/main/tests/portal/README.md).
 
 ## 7. Connect an agent
 

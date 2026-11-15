@@ -162,7 +162,7 @@ sql-warden audit init [--owner ROLE]
 ```
 
 Creates or updates the audit tables, and grants the roles from
-[deploy/audit_roles.sql](../deploy/audit_roles.sql) what each may do. A server whose role
+[deploy/audit_roles.sql](https://github.com/Pruthvi-dhani/sql-warden/blob/main/deploy/audit_roles.sql) what each may do. A server whose role
 owns the tables does this itself as it starts. A server whose role may only add records
 can't, so the tables' owner runs this first, and again after an upgrade.
 
@@ -248,5 +248,5 @@ Two tools in the repository are not part of the installed package:
 
 | Command                            | What it does                                                    |
 |------------------------------------|-----------------------------------------------------------------|
-| `uv run python -m tests.portal`    | the browser test page; see [tests/portal/README.md](../tests/portal/README.md) |
+| `uv run python -m tests.portal`    | the browser test page; see [tests/portal/README.md](https://github.com/Pruthvi-dhani/sql-warden/blob/main/tests/portal/README.md) |
 | `uv run python dev/loadtest.py`    | measures a server under many callers at once, against throwaway databases of its own. `--callers`, `--requests`, `--sql` and `--pool-size` shape the run |

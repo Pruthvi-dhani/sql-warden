@@ -61,7 +61,7 @@ uv run sql-warden audit tail --identity support-bot      # everything one caller
 
 In production the server's audit role should be able to add records and never change or
 remove one. [Deploying](deploy.md#2-the-audit-databases-roles) sets that up with
-[deploy/audit_roles.sql](../deploy/audit_roles.sql), and `audit.append_only: true` makes a
+[deploy/audit_roles.sql](https://github.com/Pruthvi-dhani/sql-warden/blob/main/deploy/audit_roles.sql), and `audit.append_only: true` makes a
 server refuse to start otherwise (it warns either way, as the demo stack's superuser gets).
 Three more commands are for that setup, each run as a role of its own:
 

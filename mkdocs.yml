@@ -1,0 +1,72 @@
+# The docs site, built from docs/. To read it on http://127.0.0.1:8001/ as you edit:
+#
+#   uvx --with mkdocs-material mkdocs serve
+#
+# and to build it into site/ (git-ignored):
+#
+#   uvx --with mkdocs-material mkdocs build --strict
+
+site_name: sql-warden
+site_description: A governed SQL gateway that lets AI agents query real databases with server-enforced rules.
+repo_url: https://github.com/Pruthvi-dhani/sql-warden
+repo_name: Pruthvi-dhani/sql-warden
+edit_uri: edit/main/docs/
+
+# Pages are written out as page.html, not page/index.html, so the relative image paths in
+# the pages' own HTML work in the site as they do on GitHub.
+use_directory_urls: false
+
+# The plan is a working document for the repository, read on GitHub, not a page of the site.
+exclude_docs: |
+  plan.md
+
+# Not 8000, which is where `sql-warden serve --transport http` listens.
+dev_addr: 127.0.0.1:8001
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - tables
+  - attr_list
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Start here:
+      - Getting started: getting-started.md
+      - How it works: how-it-works.md
+      - The checks: checks.md
+  - Writing a policy:
+      - The policy file: policy.md
+      - Masking: masking.md
+      - Sessions and budgets: budgets.md
+  - Running a server:
+      - The MCP server: mcp-server.md
+      - Operating a server: operations.md
+      - Deploying: deploy.md
+      - The audit log: audit.md
+      - Defence in depth: defence-in-depth.md
+  - Reference:
+      - Command reference: cli.md
+      - Snowflake: snowflake.md

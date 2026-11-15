@@ -58,7 +58,7 @@ ALTER WAREHOUSE sql_warden_wh SET RESOURCE_MONITOR = sql_warden_monitor;
 
 An audit log the server can rewrite records nothing an intruder in the server couldn't
 erase. So the server's role may add records and read them back (budgets are read from
-them), and nothing more. [`deploy/audit_roles.sql`](../deploy/audit_roles.sql) makes four
+them), and nothing more. [`deploy/audit_roles.sql`](https://github.com/Pruthvi-dhani/sql-warden/blob/main/deploy/audit_roles.sql) makes four
 group roles:
 
 | Role                | Who uses it           | What it may do                                                            |

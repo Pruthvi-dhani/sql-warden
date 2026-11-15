@@ -205,4 +205,4 @@ a fake engine with no database at all.
 ## Where next
 
 - [The checks](checks.md): what each one refuses, and every refusal code.
-- [plan.md](plan.md): what was built at each step, with the reasoning and the trade-offs.
+- [plan.md](https://github.com/Pruthvi-dhani/sql-warden/blob/main/docs/plan.md): what was built at each step, with the reasoning and the trade-offs.
