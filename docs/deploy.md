@@ -4,9 +4,9 @@ How to run sql-warden as a central service: agents connect over HTTPS with a tok
 sql-warden holds credentials for the databases behind it. This guide covers the databases'
 roles, secrets, Kubernetes and ECS, the network, and keeping the audit log.
 
-What it assumes: you have read the README's sections on [profiles](../README.md#profiles),
-[defence in depth](../README.md#defence-in-depth), [authentication](../README.md#authentication)
-and [running it as a service](../README.md#running-it-as-a-service).
+What it assumes: you have read the reference's sections on [profiles](reference.md#profiles),
+[defence in depth](reference.md#defence-in-depth), [authentication](reference.md#authentication)
+and [running it as a service](reference.md#running-it-as-a-service).
 
 ```
   agents ──HTTPS──▶ proxy (TLS) ──HTTP──▶ sql-warden ×N ──▶ warehouse (read replica, or Snowflake)
