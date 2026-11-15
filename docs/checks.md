@@ -243,7 +243,7 @@ through. If the session's usage can't be read, the query is refused with
 
 A caller with a token can also have a budget of their own over a rolling window, across all
 their sessions. Both budgets are checked in one step, and the refusal says which ran out.
-[Session budgets](reference.md#session-budgets) has how each limit is counted.
+[Session budgets](budgets.md#session-budgets) has how each limit is counted.
 
 ## Every refusal code
 
