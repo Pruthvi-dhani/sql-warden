@@ -54,7 +54,7 @@ optional except `version`.
 | `budgets`          | what one session may use in total                                    | [Session budgets](budgets.md#session-budgets)   |
 | `identity_budgets` | what one caller with a token may use over a rolling window           | [Budgets per caller](budgets.md#budgets-per-caller) |
 | `masking`          | the key for `hmac` masks                                             | [Masked columns](masking.md)     |
-| `audit`            | the audit database                                                   | [below](#audit), [The audit log](reference.md#the-audit-log) |
+| `audit`            | the audit database                                                   | [below](#audit), [The audit log](audit.md) |
 | `server`           | where the HTTP server listens, and its limits                        | [below](#server), [Over HTTP](reference.md#over-http) |
 | `auth`             | API keys and OIDC tokens for HTTP callers                            | [Authentication](reference.md#authentication)     |
 | `profiles`, `default_profile` | the rules for each kind of caller                         | [Profiles](#profiles)                             |

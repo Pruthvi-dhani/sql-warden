@@ -14,6 +14,7 @@ audit database. The [README](../README.md) is the two-minute version.
 | [The policy file](policy.md)          | where the policy is read from, every section and key, profiles, and checking a policy |
 | [Masking](masking.md) | hiding a column's values from a profile: the strategies, the hmac key, and what a query may do with a masked column |
 | [Sessions and budgets](budgets.md) | what a session is, the four limits and how each is counted, budgets across restarts and replicas, and budgets per caller |
+| [The audit log](audit.md) | what each record holds, failing closed, reading the log with `sql-warden audit`, and the append-only setup for production |
 | [Deploying](deploy.md)                | sql-warden as a central service: database roles, secrets, Kubernetes and ECS, the network, keeping the audit log |
 
 ## Still in the reference
@@ -23,7 +24,6 @@ These topics don't have pages of their own yet. Until they do, they are sections
 
 | Topic                 | Section                                                                            |
 |-----------------------|------------------------------------------------------------------------------------|
-| The audit log         | [The audit log](reference.md#the-audit-log)                                        |
 | The MCP server        | [MCP server](reference.md#mcp-server), [Over HTTP](reference.md#over-http), [Authentication](reference.md#authentication) |
 | Operating a server    | [Running it as a service](reference.md#running-it-as-a-service), [Reloading the policy](reference.md#reloading-the-policy) |
 | What the database enforces | [Defence in depth](reference.md#defence-in-depth)                             |

@@ -163,7 +163,7 @@ ID        TIME                 KIND   PROFILE   CLIENT            RESULT        
 ```
 
 `sql-warden audit show 65857eab` prints one record in full, and `audit tail -f` follows the
-log as an agent works. More in [The audit log](reference.md#the-audit-log).
+log as an agent works. More in [The audit log](audit.md).
 
 ## 6. Try the test portal
 
