@@ -1,7 +1,10 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from sql_warden import cli as cli_module
 from sql_warden.audit import AuditError, AuditEvent, MemoryAuditSink
@@ -90,6 +93,33 @@ def isolated_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     for name in ("SQL_WARDEN_CONFIG", "SQL_WARDEN_DSN", "SQL_WARDEN_AUDIT_DSN"):
         monkeypatch.delenv(name, raising=False)
     return tmp_path
+
+
+DEMO_PORTS = {"5433", "5434"}
+"""Where dev/docker-compose.yml's warehouse and audit database listen, and so where the
+built-in defaults point."""
+
+
+@pytest.fixture(autouse=True)
+def no_demo_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the demo stack unreachable to every test, as it is on CI. On a machine running
+    it, a test that falls through to the defaults would quietly connect and pass, and fail
+    everywhere else. Here it fails the same way it would there, saying why: stand in for
+    what it needs instead (the engines and audit_sinks fixtures)."""
+    connect = psycopg.Connection.connect.__func__  # type: ignore[attr-defined]
+
+    def guarded(cls: Any, /, conninfo: str = "", **kwargs: Any) -> Any:
+        port = str(conninfo_to_dict(conninfo, **kwargs).get("port") or "5432")
+        if DEMO_PORTS & set(port.split(",")):
+            raise psycopg.OperationalError(
+                f"connection refused: tests never reach port {port}, the demo stack's, as "
+                "they couldn't on CI. Use the engines or audit_sinks fixture."
+            )
+        return connect(cls, conninfo, **kwargs)
+
+    monkeypatch.setattr(psycopg.Connection, "connect", classmethod(guarded))
+    # psycopg.connect is the same method, bound when psycopg was imported.
+    monkeypatch.setattr(psycopg, "connect", psycopg.Connection.connect)
 
 
 @pytest.fixture

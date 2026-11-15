@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from psycopg.conninfo import make_conninfo
 
 from sql_warden import cli as cli_module
+from sql_warden.audit import PostgresAuditSink
 from sql_warden.cli import ONLY_APPENDS, ONLY_READERS, cli
 from sql_warden.engines import RoleReport
 from sql_warden.engines.postgres import PostgresEngine
@@ -215,6 +216,11 @@ class TestServe:
 
 @pytest.fixture
 def policy(warehouse: Warehouse, audit_dsn: str, tmp_path: Path) -> Path:
+    # The audit tables made, whichever test ran first: validate --live reports on its role
+    # only once there is a table for it to change.
+    sink = PostgresAuditSink(audit_dsn)
+    sink.ensure_schema()
+    sink.close()
     path = tmp_path / "warden.yaml"
     path.write_text(
         f"version: 1\nwarehouse:\n  dsn: {warehouse.reader_dsn}\n"

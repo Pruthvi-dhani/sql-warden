@@ -422,7 +422,9 @@ class TestProfiles:
 
 class TestLauncherProfiles:
     @pytest.fixture
-    def served(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    def served(self, monkeypatch: pytest.MonkeyPatch, engines: list[FakeEngine]) -> list[Any]:
+        # The launcher looks at each profile's role before it serves, as `serve` does: the
+        # stand-in engine answers, so no test here depends on a warehouse being up.
         apps: list[Any] = []
         monkeypatch.setattr(uvicorn, "run", lambda app, **_: apps.append(app))
         return apps

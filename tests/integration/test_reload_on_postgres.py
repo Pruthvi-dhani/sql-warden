@@ -57,11 +57,14 @@ def drift_schema(warehouse: Warehouse) -> Iterator[Callable[[str], None]]:
         admin(TEARDOWN)
 
 
-def _drift_policy(warehouse: Warehouse, path: Path) -> str:
+def _drift_policy(warehouse: Warehouse, audit_dsn: str, path: Path) -> str:
     dsn = make_conninfo(warehouse.reader_dsn, user="dr_reader", password="dr_reader")
     path.write_text(
         "version: 1\n"
         f"warehouse:\n  dsn: {warehouse.reader_dsn}\n"
+        # validate --live reads the file alone: without this it would look for the default
+        # audit database, which only a machine running the demo stack has.
+        f"audit:\n  dsn: '{audit_dsn}'\n"
         "default_profile: support\n"
         "profiles:\n"
         "  support:\n"
@@ -75,18 +78,26 @@ def _drift_policy(warehouse: Warehouse, path: Path) -> str:
     return str(path)
 
 
+def _live(output: str) -> list[str]:
+    """The profiles' part of `validate --live`: from its first line to the audit line, which
+    is the shared test audit database's business, not this test's."""
+    lines = output.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("  live:"))
+    end = next(i for i, line in enumerate(lines) if line.startswith("  audit:     ") and i > start)
+    return lines[start:end]
+
+
 def test_catalog_drift(
-    warehouse: Warehouse, drift_schema: Callable[[str], None], tmp_path: Path
+    warehouse: Warehouse, audit_dsn: str, drift_schema: Callable[[str], None], tmp_path: Path
 ) -> None:
-    policy = _drift_policy(warehouse, tmp_path / "warden.yaml")
+    policy = _drift_policy(warehouse, audit_dsn, tmp_path / "warden.yaml")
 
     def validate() -> Any:
         return CliRunner().invoke(cli, ["config", "validate", policy, "--live"])
 
     fits = validate()
     assert fits.exit_code == 0, fits.output
-    # The last two lines are the test audit database's superuser, which isn't this test's.
-    assert fits.output.splitlines()[-3] == "  live:      support: role dr_reader can only read"
+    assert _live(fits.output) == ["  live:      support: role dr_reader can only read"]
 
     # A migration renames the masked column, drops one the profile lists, and the role loses
     # a grant.
@@ -96,16 +107,14 @@ def test_catalog_drift(
     )
     columns_gone = validate()
     assert columns_gone.exit_code == 1
-    assert columns_gone.output.splitlines()[-8:] == [
+    assert _live(columns_gone.output) == [
         "  live:      support: role dr_reader can only read",
         "               ✗ the profile allows what the role can't see:",
         "                 column body of drift_test.notes",
         "               ✗ the profile masks columns the role can't see:",
         "                 drift_test.accounts.ssn",
-        "  audit:     ! its role can change or remove records:",
-        "               it is a superuser",
-        f"Error: {DRIFTED}",
     ]
+    assert columns_gone.output.splitlines()[-1] == f"Error: {DRIFTED}"
     # Which is why: the column under its new name is read unmasked.
     ran = CliRunner().invoke(
         cli,

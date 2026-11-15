@@ -6,6 +6,12 @@ import pytest
 from psycopg.conninfo import make_conninfo
 from testcontainers.community.postgres import PostgresContainer
 
+# Every database here is a Testcontainer on a port of its own: a test that reaches the demo
+# stack's ports is falling through to the defaults, and would fail on CI.
+from tests.unit.conftest import no_demo_stack
+
+__all__ = ["no_demo_stack"]
+
 POSTGRES_IMAGE = "postgres:16-alpine"
 WAREHOUSE_SEED = Path(__file__).parents[2] / "dev" / "warehouse_seed.sql"
 
