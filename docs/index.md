@@ -18,6 +18,7 @@ audit database. The [README](../README.md) is the two-minute version.
 | [The MCP server](mcp-server.md) | the five tools and what they return, serving over HTTP, and authentication with API keys and OIDC tokens |
 | [Operating a server](operations.md) | the container image, health checks, metrics, shutdown, the connection pool, and reloading the policy on `SIGHUP` |
 | [Snowflake](snowflake.md) | Snowflake as the warehouse: setup, what differs from Postgres, and how far it is tested |
+| [Command reference](cli.md) | every `sql-warden` command, its options, exit codes and environment variables |
 | [Deploying](deploy.md)                | sql-warden as a central service: database roles, secrets, Kubernetes and ECS, the network, keeping the audit log |
 
 ## Still in the reference
