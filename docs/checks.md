@@ -143,7 +143,7 @@ no access check.
 
 ## Masking
 
-A profile can see a column [masked](reference.md#masked-columns). A masked column may only
+A profile can see a column [masked](masking.md). A masked column may only
 be selected as it is, in which case its values come back masked, or counted. Anything else
 could reveal what the mask hides. With the example's `support` profile, which sees `ssn`,
 `phone` and `email` masked:

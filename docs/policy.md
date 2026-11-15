@@ -53,7 +53,7 @@ optional except `version`.
 | `cost`             | the most a query may cost, by the planner's estimate                 | [below](#cost), [the cost check](checks.md#cost)  |
 | `budgets`          | what one session may use in total                                    | [Session budgets](reference.md#session-budgets)   |
 | `identity_budgets` | what one caller with a token may use over a rolling window           | [Budgets per caller](reference.md#budgets-per-caller) |
-| `masking`          | the key for `hmac` masks                                             | [Masked columns](reference.md#masked-columns)     |
+| `masking`          | the key for `hmac` masks                                             | [Masked columns](masking.md)     |
 | `audit`            | the audit database                                                   | [below](#audit), [The audit log](reference.md#the-audit-log) |
 | `server`           | where the HTTP server listens, and its limits                        | [below](#server), [Over HTTP](reference.md#over-http) |
 | `auth`             | API keys and OIDC tokens for HTTP callers                            | [Authentication](reference.md#authentication)     |
