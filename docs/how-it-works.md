@@ -119,7 +119,7 @@ independently, so one wrong check is not enough to change or leak data:
 
 The first row depends on the role, so a server looks before it serves: it asks the database
 what its role can do, and refuses to start as one that can write.
-[Defence in depth](reference.md#defence-in-depth) has the details, and what this doesn't
+[Defence in depth](defence-in-depth.md) has the details, and what this doesn't
 cover.
 
 ### One audit database, separate from the warehouse

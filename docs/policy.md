@@ -214,7 +214,7 @@ as each profile's role, as a server does before it starts, and exits 1 if:
   never granted.
 
 Run it in a deploy pipeline to check a policy against the real roles before it is served.
-[Defence in depth](reference.md#defence-in-depth) explains what it looks for.
+[Defence in depth](defence-in-depth.md) explains what it looks for.
 
 ## Changing a policy
 

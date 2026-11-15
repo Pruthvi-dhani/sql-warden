@@ -75,7 +75,7 @@ Three details for whoever writes a client:
 
 Before it serves anything, `serve` asks the warehouse what its role can do, and doesn't start
 as one that can write, or while the warehouse can't be asked: see
-[Defence in depth](reference.md#defence-in-depth).
+[Defence in depth](defence-in-depth.md).
 
 ## Over HTTP
 
@@ -156,7 +156,7 @@ can't make a token. The keys are fetched when first needed and kept for an hour;
 signed with a key not seen yet fetches them again, at most once a minute.
 
 Serving every profile means every profile's role must pass the [startup
-check](reference.md#defence-in-depth): `serve` doesn't start if any of them can write.
+check](defence-in-depth.md): `serve` doesn't start if any of them can write.
 
 ### Listening beyond loopback
 

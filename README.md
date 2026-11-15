@@ -179,7 +179,9 @@ The documentation starts at [docs/index.md](docs/index.md):
   the code
 - [The checks](docs/checks.md): what each check refuses, and every refusal code
 - [Deploying](docs/deploy.md): running it as a service
-- every other topic (the policy file, masking, budgets, the audit log, the MCP server,
-  Snowflake) is listed on the [docs home](docs/index.md)
+- [The policy file](docs/policy.md): every section and key, and profiles
+- [Command reference](docs/cli.md): every command and option
+- masking, budgets, the audit log, the MCP server, operating a server and Snowflake each
+  have a page too, listed on the [docs home](docs/index.md)
 
 MIT licensed.

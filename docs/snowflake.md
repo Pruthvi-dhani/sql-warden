@@ -54,7 +54,7 @@ percent-encoded. A profile's own `dsn` works as for Postgres: usually another ro
 - **Read-only is the role's job.** Snowflake has no read-only session to ask for, so connect
   as a role granted only `USAGE` and `SELECT`. The checks refuse everything but a `SELECT`
   either way; the role is what holds if a check is wrong. A server
-  [looks at it before it starts](reference.md#defence-in-depth): it doesn't serve as a role that holds
+  [looks at it before it starts](defence-in-depth.md): it doesn't serve as a role that holds
   `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `OWNERSHIP` or any `CREATE` in the connection's
   database, itself or through a role granted to it (or `PUBLIC`), or that holds
   `ACCOUNTADMIN`, `SECURITYADMIN`, `SYSADMIN`, `USERADMIN` or `ORGADMIN`. Each session also
