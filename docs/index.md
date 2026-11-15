@@ -16,6 +16,7 @@ audit database. The [README](../README.md) is the two-minute version.
 | [Sessions and budgets](budgets.md) | what a session is, the four limits and how each is counted, budgets across restarts and replicas, and budgets per caller |
 | [The audit log](audit.md) | what each record holds, failing closed, reading the log with `sql-warden audit`, and the append-only setup for production |
 | [The MCP server](mcp-server.md) | the five tools and what they return, serving over HTTP, and authentication with API keys and OIDC tokens |
+| [Operating a server](operations.md) | the container image, health checks, metrics, shutdown, the connection pool, and reloading the policy on `SIGHUP` |
 | [Deploying](deploy.md)                | sql-warden as a central service: database roles, secrets, Kubernetes and ECS, the network, keeping the audit log |
 
 ## Still in the reference
@@ -25,7 +26,6 @@ These topics don't have pages of their own yet. Until they do, they are sections
 
 | Topic                 | Section                                                                            |
 |-----------------------|------------------------------------------------------------------------------------|
-| Operating a server    | [Running it as a service](reference.md#running-it-as-a-service), [Reloading the policy](reference.md#reloading-the-policy) |
 | What the database enforces | [Defence in depth](reference.md#defence-in-depth)                             |
 | Snowflake             | [Snowflake](reference.md#snowflake)                                                |
 

@@ -6,7 +6,7 @@ roles, secrets, Kubernetes and ECS, the network, and keeping the audit log.
 
 What it assumes: you have read about [profiles](policy.md#profiles),
 [defence in depth](reference.md#defence-in-depth), [authentication](mcp-server.md#authentication)
-and [running it as a service](reference.md#running-it-as-a-service).
+and [running it as a service](operations.md).
 
 ```
   agents ──HTTPS──▶ proxy (TLS) ──HTTP──▶ sql-warden ×N ──▶ warehouse (read replica, or Snowflake)

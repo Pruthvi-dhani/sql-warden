@@ -220,4 +220,4 @@ Run it in a deploy pipeline to check a policy against the real roles before it i
 
 Over stdio, a policy change takes effect when the server restarts. An HTTP server reads its
 policy again on `SIGHUP`, and serves the new one only if all of it loads. See
-[Reloading the policy](reference.md#reloading-the-policy).
+[Reloading the policy](operations.md#reloading-the-policy).

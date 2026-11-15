@@ -176,7 +176,7 @@ server:
 
 ## Where next
 
-- [Operating a server](reference.md#running-it-as-a-service): the container image, health
+- [Operating a server](operations.md): the container image, health
   checks, metrics and reloading the policy.
 - [Deploying](deploy.md): a whole deployment behind a TLS proxy.
 - [Sessions and budgets](budgets.md): what a session is for each kind of client.
