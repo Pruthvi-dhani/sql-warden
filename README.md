@@ -172,9 +172,14 @@ was built at each step.
 
 ## More
 
-- [docs/reference.md](docs/reference.md): every command, check, refusal code and config
-  section, in detail
-- [docs/deploy.md](docs/deploy.md): running it as a service
-- [tests/portal/README.md](tests/portal/README.md): the test portal
+The documentation starts at [docs/index.md](docs/index.md):
+
+- [Getting started](docs/getting-started.md): the walkthrough above, in full
+- [How it works](docs/how-it-works.md): a request's path, the design decisions, and a map of
+  the code
+- [The checks](docs/checks.md): what each check refuses, and every refusal code
+- [Deploying](docs/deploy.md): running it as a service
+- [Reference](docs/reference.md): the policy file, masking, budgets, the audit log, the MCP
+  server and Snowflake, in detail
 
 MIT licensed.

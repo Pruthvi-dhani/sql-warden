@@ -1,99 +1,11 @@
 # sql-warden reference
 
-Everything sql-warden does, in detail: the commands, each check and what it refuses, the MCP
-server, the policy file, and what is different on Snowflake. The [README](../README.md) is
-the introduction; [deploy.md](deploy.md) covers running it as a service.
+The detail on the topics that don't have pages of their own yet: the audit log, sessions,
+the MCP server, the policy file, budgets, masking and Snowflake. The [docs home](index.md)
+lists every page. Installing and first queries are in [Getting started](getting-started.md),
+and each check and refusal code is in [The checks](checks.md).
 
-## Development
-
-Requires [uv](https://docs.astral.sh/uv/) and Docker.
-
-```bash
-uv sync                                   # create .venv with Python 3.12 + dev tools
-uv run ruff check . && uv run ruff format --check .
-uv run mypy                               # strict
-uv run pytest                             # unit + integration tests
-uv run pytest -m "not integration"        # skip tests that need Docker
-```
-
-The Snowflake engine has two more sets of tests, each run on its own (see
-[Snowflake](#snowflake)): `tests/fakesnow` on an emulator, and `tests/snowflake` against a
-real account.
-
-### Demo stack
-
-```bash
-docker compose -f dev/docker-compose.yml up -d
-```
-
-| Service     | Port | Database    | Purpose                                         |
-|-------------|------|-------------|-------------------------------------------------|
-| `warehouse` | 5433 | `warehouse` | the data agents query, seeded on first start    |
-| `audit`     | 5434 | `audit`     | sql-warden's audit log, on a separate instance  |
-
-The warehouse is seeded from [dev/warehouse_seed.sql](../dev/warehouse_seed.sql) with deterministic
-demo data: `products` (200), `customers` (10k, with `email`, `phone` and `ssn`), `orders` (1M) and
-`employee_salaries` (50, meant to stay off-limits). sql-warden connects as `warden_reader`, which
-can only `SELECT`.
-
-```bash
-psql postgresql://warden_reader:warden_reader@localhost:5433/warehouse
-```
-
-Integration tests start their own throwaway containers from the same seed, so they don't need
-this stack running.
-
-### Try it
-
-```bash
-uv run sql-warden check "select id, name from products"          # dry run: one line per check
-uv run sql-warden check "select (1"                              # ✗ parse  PARSE_ERROR: Expecting ) ...
-uv run sql-warden query "select id, name, price_cents from products order by id" --max-rows 5
-uv run sql-warden check "select count(*) from orders a cross join orders b"  # ✗ cost  COST_TOO_HIGH ...
-```
-
-`check` runs the checks and executes nothing: the database only plans the query, for the cost
-check. `query` runs the same checks and, if they all pass, executes the SQL. Every query runs
-in a read-only transaction with a statement timeout and a row cap.
-
-What runs is the query as sql-warden parsed and checked it, regenerated from that tree, not
-the text that was sent. Comments are dropped, so nothing the parser skipped over can reach the
-database. A database error points into that SQL. Postgres finds many while it plans a query,
-which the cost check has it do first, so they come back as a refusal before anything runs:
-
-```text
-$ uv run sql-warden query "select nope from products"
-✓ parse  0.2 ms
-✓ shape  0.1 ms
-✗ cost   PLAN_FAILED: the database rejected the query while planning it: column "nope" does not exist
-  SELECT nope FROM products LIMIT 101
-         ^
-HINT: Perhaps you meant to reference the column "products.name".
-→ refused by cost (profile all)
-```
-
-An error only found while running, such as a division by zero on some row, is reported as
-the database gave it (`Error: division by zero`, exit 1).
-
-#### In scripts
-
-`check` and `query` exit with a status a script can act on:
-
-| Exit | Meaning                                                                      |
-|------|------------------------------------------------------------------------------|
-| `0`  | allowed: `check` would run it, `query` ran it                                |
-| `2`  | refused by a check (nothing else exits 2)                                    |
-| `1`  | anything else: the database failed, it was unreachable, a bad config or flag |
-
-`--json` prints one line of JSON instead of text, the same payload the MCP tools return (see
-[MCP server](#mcp-server)), including the `error` when the database fails:
-
-```bash
-uv run sql-warden query "select count(*) as n from orders" --json | jq '.result.rows'
-if ! uv run sql-warden check "$SQL" --json > decision.json; then jq -r .reason decision.json; fi
-```
-
-#### The audit log
+## The audit log
 
 Every `check` and `query`, from the CLI or an agent, is recorded in the audit database before
 anything comes back: allowed, refused, failed or timed out, with the SQL as sent and as run,
@@ -145,7 +57,7 @@ sql-warden audit prune --older-than 90d [--dry-run]      # remove old records; e
 sql-warden audit export --since 2026-11-13 --until 2026-11-14 > day.jsonl   # JSON Lines, for analytics
 ```
 
-#### Sessions
+## Sessions
 
 Every request belongs to a session, and its record in the audit log says which
 (`session_id`, also in `--json` and the MCP results). A session is one caller's run of
@@ -181,120 +93,7 @@ it up for the others.
 
 Sessions are what [budgets](#session-budgets) count against.
 
-#### The checks so far
-
-- **parse**: the SQL must parse (`PARSE_ERROR` otherwise, with line and column). Before
-  that it must be safe to read at all. The parser goes back and tries again when it guessed
-  wrong, and a query built for that (`date(date(date(...` thirty levels deep) would keep it
-  busy for hours, so a query over 20,000 characters, with brackets nested more than 32 deep,
-  or with more than 4 nested type names followed by a bracket (`date(`, `array[`) is turned
-  away unread, as `QUERY_TOO_COMPLEX`.
-- **shape**: one read-only `SELECT` within the structural rules in `warden.yaml`:
-
-  | Try                                                           | Refused with           |
-  |---------------------------------------------------------------|------------------------|
-  | `select 1; select 2`                                          | `MULTIPLE_STATEMENTS`  |
-  | `delete from orders`, `drop table orders`, `do $$ ... $$`     | `NOT_A_SELECT`         |
-  | `with x as (delete from orders returning *) select * from x`  | `NOT_READ_ONLY`        |
-  | `select * into copy from customers`, `... for update`         | `NOT_READ_ONLY`        |
-  | `select pg_sleep(60)`, `pg_read_file(...)`, `dblink(...)`     | `FUNCTION_NOT_ALLOWED` |
-  | `select age(created_at) from customers` (unknown function)    | `FUNCTION_NOT_ALLOWED` |
-  | `select 'secrets'::regclass`, `select (null::secrets).*`      | `TYPE_NOT_ALLOWED`     |
-  | more than `max_joins` joins, or `max_subquery_depth` nesting  | `TOO_MANY_JOINS`, `SUBQUERY_TOO_DEEP` |
-  | `select 1 limit all`                                          | `INVALID_LIMIT`        |
-
-  Functions sqlglot doesn't recognise as standard SQL are refused unless they are listed in
-  `shape.allowed_functions`. Built-in dangerous ones (`pg_sleep*`, `pg_read_file`, `lo_*`,
-  `dblink*`, `set_config`, `query_to_xml`, ...) are refused even if listed.
-
-  Casts work the same way. In Postgres every table is also a type, and some types look a
-  name up in the catalog, so `'secrets'::regclass` or `(null::secrets).*` would tell which
-  tables exist and what their columns are called, whatever the profile may read. A cast to a
-  type that isn't standard SQL is refused unless the type is listed in `shape.allowed_types`
-  (an enum, a domain, an extension's type); `regclass`, `regrole` and the rest of that
-  family are refused even if listed.
-
-  The checks read a query in its warehouse's dialect, Postgres or Snowflake, and each has its
-  own list of those functions (Snowflake's: `system$*`, `result_scan`, `get_ddl`,
-  `query_history*`, ...). Read as Snowflake, a query must also name outright everything it
-  reads, so these are refused too, even where no profile limits tables:
-
-  | Try                                                   | Refused with           |
-  |-------------------------------------------------------|------------------------|
-  | `select * from identifier('secrets')`, `table('secrets')`, `table($t)` | `FUNCTION_NOT_ALLOWED` |
-  | `select $1 from @my_stage/file.csv` (a stage's files)  | `TABLE_NOT_ALLOWED`    |
-  | `select $3 from products` (a column by position), `$variable` | `COLUMN_NOT_ALLOWED` |
-  | `select my_sequence.nextval`                           | `NOT_READ_ONLY`        |
-
-  `select top 5000 ...` is a LIMIT like any other: it is lowered to the row cap.
-- **access**: only the tables and columns the server's [profile](#profiles) allows, wherever
-  the query uses them (selected, filtered, joined, grouped or sorted on, in subqueries and
-  CTEs). With the example config's `public` profile:
-
-  | Try                                                           | Refused with           |
-  |---------------------------------------------------------------|------------------------|
-  | `select count(*) from employee_salaries`, `... from nosuch`   | `TABLE_NOT_ALLOWED`    |
-  | `select email from customers`, `select category from products`| `TABLE_NOT_ALLOWED`, `COLUMN_NOT_ALLOWED` |
-  | `select id from products order by category`                   | `COLUMN_NOT_ALLOWED`   |
-  | `select * from products`, `select row_to_json(p) from products p` | `STAR_NOT_ALLOWED` (lists the allowed columns) |
-  | `select 1 from information_schema.tables`                     | `TABLE_NOT_ALLOWED`    |
-
-  A table that doesn't exist gets the same answer as one the profile may not read, and so does
-  a column, so a profile can't probe for names. Allowed queries run with each table pinned to
-  its schema (`products` → `public.products`), so the database reads the table that was
-  checked. Without profiles there is no access check (the implicit profile `all`).
-
-  With `shape.limit: inject` (the default), a query without a LIMIT gets one, and a LIMIT above
-  the row cap is lowered. The new LIMIT is the row cap plus one, so the result can still say
-  it was truncated. With `limit: require`, such queries are refused (`LIMIT_REQUIRED`,
-  `LIMIT_TOO_HIGH`). `check` shows the rewrite and the SQL that would run:
-
-  ```text
-  $ uv run sql-warden check "select id from orders"
-  ✓ parse  0.3 ms
-  ✓ shape  0.1 ms
-  ✓ cost   1.4 ms
-  → allowed (profile all; dry run, nothing was executed)
-    cost: 1.85 of 1,000,000 allowed (most of it: Seq Scan on orders)
-    note: added LIMIT 101 (row cap 100 + 1 to detect truncation)
-    would run: SELECT id FROM orders LIMIT 101
-  ```
-- **masking**: for a profile with [masked columns](#masked-columns), a masked column may
-  only be selected as it is (then its values come back masked) or counted. Anything else could
-  reveal what the mask hides, and is refused:
-
-  | Try (as the example's `support` profile)                      | Refused with                  |
-  |---------------------------------------------------------------|-------------------------------|
-  | `select id from customers where ssn like '123%'`              | `MASKED_COLUMN_IN_PREDICATE`  |
-  | `... join ... on c.email = ...`, `group by email`, `order by phone`, `distinct ssn` | `MASKED_COLUMN_IN_PREDICATE` |
-  | `select upper(email)`, `split_part(email, '@', 2)`, `max(ssn)` | `MASKED_COLUMN_IN_EXPRESSION` |
-  | `select count(distinct ssn) from customers`                   | allowed                       |
-
-  The column is followed through aliases, CTEs, subqueries and unions, so renaming it changes
-  nothing.
-- **budget**: for a profile with a [session budget](#session-budgets). A session that has
-  reached a limit is refused before any other check looks at its query
-  (`BUDGET_EXHAUSTED`); otherwise the budget comes last, once the cost is known, and refuses
-  a query that costs more than the session has left (`COST_OVER_BUDGET`).
-- **cost**: the database planner's estimate for the SQL that would run, from `EXPLAIN`, which
-  plans a query without running it (never `EXPLAIN ANALYZE`). A query estimated above
-  `cost.max_total_cost` (1,000,000 by default; a profile can set its own) is refused before it
-  runs, and the reason names the step that costs the most. The estimate is in the response
-  (`cost`) and the audit record. On the demo data:
-
-  | Try                                                           | Estimate        | Result                  |
-  |---------------------------------------------------------------|-----------------|-------------------------|
-  | `select * from orders where id = 42`                          | about 8         | allowed                 |
-  | `select sum(quantity) from orders` (a full scan)              | about 15,000    | allowed                 |
-  | `select count(*) from orders a cross join orders b`           | about 10^10     | `COST_TOO_HIGH` (Nested Loop) |
-  | `select 1 / 0`                                                | none: Postgres fails it while planning | `PLAN_FAILED` |
-
-  A LIMIT is priced in: `select * from orders a cross join orders b` with the added
-  `LIMIT 101` stops after 101 rows, and the planner knows it (cost about 2). If the database
-  can't be reached to plan the query, it's refused with `COST_UNAVAILABLE`: a query whose cost
-  is unknown doesn't run.
-
-### MCP server
+## MCP server
 
 ```bash
 uv run sql-warden serve                      # stdio: for an agent that launches sql-warden itself
@@ -327,7 +126,7 @@ Before it serves anything, `serve` asks the warehouse what its role can do, and 
 as one that can write, or while the warehouse can't be asked: see
 [Defence in depth](#defence-in-depth).
 
-#### Over HTTP
+### Over HTTP
 
 Without an [`auth` section](#authentication) HTTP serves one profile, needs no token, and
 only listens on loopback (`127.0.0.1`, `::1`, `localhost`). It rejects requests whose `Host`
@@ -349,7 +148,7 @@ server up:
 The connection limits are for clients that connect; see [Sessions](#sessions) for the ones
 that don't.
 
-#### Authentication
+### Authentication
 
 With an `auth` section, every HTTP request must carry `Authorization: Bearer <token>`, and
 one server serves every profile: the token says who the caller is and which profile their
@@ -414,7 +213,7 @@ server:
   allowed_hosts: [warden.example.com]
 ```
 
-#### Running it as a service
+### Running it as a service
 
 The repository's `Dockerfile` builds an image of the HTTP server: two stages, so the image
 holds the installed package and its dependencies but not uv or the source tree, running as
@@ -471,7 +270,7 @@ leaves on it reaches the next. A request that finds every connection in use wait
 one session per profile open instead. `dev/loadtest.py` measures a server under many callers
 at once, against throwaway databases of its own.
 
-#### Reloading the policy
+### Reloading the policy
 
 On `SIGHUP` the HTTP server reads its policy file again (`docker kill --signal HUP`, or
 `kill -HUP` on its process), so keys can be revoked and issued, and profiles added or
@@ -496,76 +295,6 @@ agent that started the server restarts it.
 
 In Kubernetes, mount the policy from a ConfigMap as a directory, not with `subPath` (a file
 mounted with `subPath` is never updated), and send `SIGHUP` once the new file is in place.
-
-### Claude Code
-
-Claude Code can use sql-warden as a tool. It starts `sql-warden serve` itself over stdio, so
-there is no port and nothing to keep running; only the demo stack needs to be up. Pick one:
-
-```bash
-# Just for you, in this project (saved in ~/.claude.json). Run it from the repo root.
-claude mcp add sql-warden -- uv run --quiet --directory "$PWD" sql-warden serve
-
-# Or as a project file. .mcp.json is git-ignored; Claude Code asks you to approve it once.
-cp .mcp.json.example .mcp.json
-```
-
-Start `claude` in the repo and run `/mcp`: sql-warden should be listed as connected, with
-`run_query`, `check_query`, `list_tables`, `describe_table` and `budget_status`
-(`claude mcp list` checks it
-from the shell).
-Then ask in plain language and watch which tools Claude calls and what comes back:
-
-| Ask Claude                                              | What you should see                             |
-|---------------------------------------------------------|-------------------------------------------------|
-| "What are the five best-selling products?"              | `list_tables`, then a join over `orders`        |
-| "How many customers signed up each month?"              | rows, and a note that a LIMIT was added         |
-| "Run `delete from orders` through sql-warden"           | refused, `NOT_A_SELECT`, with the reason        |
-| "Run `select pg_sleep(60)` through sql-warden"          | refused, `FUNCTION_NOT_ALLOWED`                 |
-| "Count every pair of rows in orders with a cross join"  | passes the checks, cancelled at the timeout     |
-
-The server reads `./warden.yaml` from the repo, like the CLI. To use another policy, set
-`SQL_WARDEN_CONFIG` for it: `-e SQL_WARDEN_CONFIG=/path/to/warden.yaml` with `claude mcp add`,
-or an `"env"` entry in `.mcp.json`. Keep passwords out of both: put them in `warden.yaml` as
-`${VAR}` references. A policy change takes effect when the server restarts (reconnect it from
-`/mcp`).
-
-Without a `warden.yaml` there is one implicit profile with no table rules, so Claude can read
-every table `warden_reader` can, including `employee_salaries`. Copy the example config to
-give it the `public` profile instead (see [Profiles](#profiles)).
-
-### Test portal
-
-A browser page for trying sql-warden by hand. It is a real MCP client of the same server agents
-use, so a query it allows or refuses is allowed or refused for an agent too.
-
-```bash
-docker compose -f dev/docker-compose.yml up -d              # the demo warehouse, if it isn't running
-uv run python -m tests.portal                               # opens http://127.0.0.1:8765/
-uv run python -m tests.portal --config warden.example.yaml  # with the public and admin profiles
-```
-
-With profiles, a picker in the header switches between them, and **Compare** shows what every
-profile would decide about the query, side by side.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="images/portal-allowed-dark.png">
-  <img alt="The test portal running a join: both checks pass, LIMIT 101 is added, and the rows are shown" src="images/portal-allowed-light.png">
-</picture>
-
-For each query it shows:
-
-- the verdict, and one line per check with its code, reason and time;
-- any rewrites (such as an added LIMIT) and the exact SQL that ran or would run;
-- the rows, with a note when the row cap cut them off;
-- every JSON-RPC request and response, in the console.
-
-The sidebar lists the tables the warehouse role can read (click one to query it) and your
-history. **Examples** has a query for each kind of refusal, and `?sql=...&tool=run` in the URL
-runs a query on load, so a test case can be bookmarked. The portal only listens on 127.0.0.1 and
-takes the same options as `sql-warden` (`--config`, `--dsn`, `--max-rows`, `--timeout-ms`), plus
-`--port` and `--no-open`. It is a testing tool, so it lives in `tests/` and is not part of the
-package. More in [tests/portal/README.md](../tests/portal/README.md).
 
 ## Configuration
 
@@ -952,7 +681,7 @@ NULL stays NULL under the first three. A column made from more than one masked c
 prints `masked: email (hmac)`, `list_tables` marks masked columns with `mask`, and the audit
 record lists them too.
 
-A masked column can be selected or counted, nothing more (see the **masking** check). For a
+A masked column can be selected or counted, nothing more (see the [masking check](checks.md#masking)). For a
 column that is hidden but not secret, `{strategy: hmac, allow_in_predicates: true}` lets
 queries filter, join, group and sort on it; what is computed from it still comes back hidden.
 
