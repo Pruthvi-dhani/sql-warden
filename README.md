@@ -139,7 +139,7 @@ uv run pytest -m "not integration"         # the unit tests alone
 
 Integration tests start their own throwaway Postgres containers, so they don't need the demo
 stack and never touch it. The Snowflake engine has two more suites, run on their own; see
-[Snowflake](docs/reference.md#snowflake).
+[Snowflake](docs/snowflake.md).
 
 Where things are:
 
