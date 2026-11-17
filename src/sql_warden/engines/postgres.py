@@ -17,7 +17,7 @@ from sql_warden.engines.base import (
     RoleReport,
     Table,
 )
-from sql_warden.pools import PoolSettings, PoolStats, Reach, open_pool, stats
+from sql_warden.pools import PoolSettings, PoolStats, Reach, open_pool, stats, why_none
 
 # information_schema lists only what the connecting role has privileges on.
 _TABLES_SQL = """
@@ -358,16 +358,8 @@ class PostgresEngine:
         with ExitStack() as returned:  # the connection goes back to the pool as this ends
             try:
                 conn = returned.enter_context(self._pool.connection())
-            except PoolTimeout as exc:
-                failure = self._reach.failure
-                if failure is not None:  # its last try to connect failed: not merely busy
-                    raise EngineUnavailable(
-                        f"could not connect to the database: {failure}"
-                    ) from exc
+            except (PoolTimeout, PoolClosed) as exc:
                 raise EngineUnavailable(
-                    f"no connection to the database was free within "
-                    f"{self._pool_timeout_s:g} s: every one is in use"
+                    why_none(exc, self._reach, self._pool_timeout_s, "the database")
                 ) from exc
-            except PoolClosed as exc:
-                raise EngineUnavailable("the server is shutting down") from exc
             yield conn

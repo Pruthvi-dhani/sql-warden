@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 
 @dataclass(frozen=True)
@@ -105,6 +105,16 @@ def open_pool(
         open=True,
     )
     return pool, reach
+
+
+def why_none(exc: PoolTimeout | PoolClosed, reach: Reach, timeout_s: float, what: str) -> str:
+    """Why a borrower got no connection to what (the database, the audit database), in
+    words that are safe to show."""
+    if isinstance(exc, PoolClosed):
+        return "the server is shutting down"
+    if reach.failure is not None:  # its last try to connect failed: not merely busy
+        return f"could not connect to {what}: {reach.failure}"
+    return f"no connection to {what} was free within {timeout_s:g} s: every one is in use"
 
 
 def stats(pool: ConnectionPool[Any]) -> PoolStats:
