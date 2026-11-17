@@ -97,6 +97,10 @@ optional except `version`.
 | `dsn`               | the demo stack's | the audit database: always Postgres, on its own instance          |
 | `connect_timeout_s` | `5`              | how long to wait for a connection                                 |
 | `append_only`       | `false`          | `true`: refuse to serve unless the role can only add records      |
+| `pool.max_size`     | `5`              | connections a server keeps open for records, and as many again for budgets |
+| `pool.max_idle_s`   | `300`            | an idle connection is closed after this                           |
+| `pool.max_lifetime_s` | `1800`         | any connection is replaced after this                             |
+| `pool.timeout_s`    | `5`              | how long a request waits for one; a record that gets none is `AUDIT_UNAVAILABLE`, a charge `BUDGET_UNAVAILABLE` |
 
 ### server
 

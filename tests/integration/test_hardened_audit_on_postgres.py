@@ -15,6 +15,7 @@ from psycopg.conninfo import make_conninfo
 from sql_warden.audit import AuditError, AuditEvent, PostgresAuditSink
 from sql_warden.cli import cli
 from sql_warden.config import BudgetConfig
+from sql_warden.pools import PoolSettings
 from sql_warden.sessions import Usage
 
 pytestmark = pytest.mark.integration
@@ -126,19 +127,28 @@ class TestTheTables:
             conn.execute("CREATE TABLE public.audit_events_2 (id int)")
 
 
-class TestTheWriter:
-    """The server's role."""
+POOLS = pytest.mark.parametrize(
+    "pool", [None, PoolSettings(max_size=2)], ids=["one connection", "pooled"]
+)
 
-    def test_starts_without_changing_the_schema(self, audit: Audit) -> None:
-        sink = PostgresAuditSink(audit.dsn("hw_warden"))
+
+class TestTheWriter:
+    """The server's role: on pooled connections, as a server has them, the same."""
+
+    @POOLS
+    def test_starts_without_changing_the_schema(
+        self, audit: Audit, pool: PoolSettings | None
+    ) -> None:
+        sink = PostgresAuditSink(audit.dsn("hw_warden"), pool=pool)
         try:
             sink.ensure_schema()  # checks rather than applies: it may not
             assert sink.tampering() == ()
         finally:
             sink.close()
 
-    def test_records_and_keeps_budgets(self, empty: Audit) -> None:
-        sink = PostgresAuditSink(empty.dsn("hw_warden"))
+    @POOLS
+    def test_records_and_keeps_budgets(self, empty: Audit, pool: PoolSettings | None) -> None:
+        sink = PostgresAuditSink(empty.dsn("hw_warden"), pool=pool)
         store = sink.session_store("support")
         try:
             sink.record(_event(session_id="s1"))
@@ -160,8 +170,11 @@ class TestTheWriter:
             "DELETE FROM audit_prunes",
         ],
     )
-    def test_cant_change_or_remove_a_record(self, empty: Audit, statement: str) -> None:
-        sink = PostgresAuditSink(empty.dsn("hw_warden"))
+    @POOLS
+    def test_cant_change_or_remove_a_record(
+        self, empty: Audit, statement: str, pool: PoolSettings | None
+    ) -> None:
+        sink = PostgresAuditSink(empty.dsn("hw_warden"), pool=pool)
         sink.record(_event(decision="refused", code="TABLE_NOT_ALLOWED"))
         sink.close()
         with (

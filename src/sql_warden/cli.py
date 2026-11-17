@@ -38,7 +38,7 @@ from sql_warden.engines.snowflake import BYTES, SnowflakeEngine
 from sql_warden.metrics import Metrics
 from sql_warden.pipeline.budget import window
 from sql_warden.pipeline.cost import format_amount, format_cost
-from sql_warden.pools import PoolSettings
+from sql_warden.pools import PoolSettings, PoolStats
 from sql_warden.profiles import (
     Profile,
     ProfileError,
@@ -153,17 +153,45 @@ def settings(
     return config.model_copy(update={"warehouse": warehouse, "audit": audit})
 
 
-def open_audit(config: WardenConfig) -> PostgresAuditSink:
-    """The audit log, with its table set up. sql-warden doesn't start without one."""
-    sink = PostgresAuditSink(config.audit.dsn, connect_timeout_s=config.audit.connect_timeout_s)
+def open_audit(config: WardenConfig, *, pooled: bool = False) -> PostgresAuditSink:
+    """The audit log, with its table set up. sql-warden doesn't start without one. pooled is
+    for a server: records and budgets are then written on connections from two pools
+    (audit.pool) rather than on one connection each.
+
+    The tables are set up on a connection of its own either way, before any pool opens: a
+    database that can't be reached is then reported at once, as it is found, rather than
+    after a pool has spent its timeout trying in the background."""
+    dsn, connect_timeout_s = config.audit.dsn, config.audit.connect_timeout_s
+    sink = PostgresAuditSink(dsn, connect_timeout_s=connect_timeout_s)
     try:
         sink.ensure_schema()
     except AuditError as exc:
         raise click.ClickException(
-            f"audit database at {describe_dsn(config.audit.dsn)}: {exc}\n"
+            f"audit database at {describe_dsn(dsn)}: {exc}\n"
             "sql-warden records every request and won't run without its audit database."
         ) from exc
-    return sink
+    finally:
+        if pooled:
+            sink.close()
+    if not pooled:
+        return sink
+    pool = PoolSettings(**config.audit.pool.model_dump())
+    return PostgresAuditSink(dsn, connect_timeout_s=connect_timeout_s, pool=pool)
+
+
+def watch_audit_pools(metrics: Metrics, audit: AuditSink) -> None:
+    """Report the audit database's pools on /metrics, if the sink has any. Once: a reload
+    can't change the audit section, so they last as long as the server."""
+    pool_stats = getattr(audit, "pool_stats", None)
+    if not callable(pool_stats):
+        return
+    for name in pool_stats():
+
+        def stats_of(name: str = name) -> PoolStats | None:
+            now: dict[str, PoolStats | None] = pool_stats()
+            return now.get(name)
+
+        metrics.watch_pool(name, "", stats_of)
 
 
 ONLY_APPENDS = (
@@ -594,8 +622,33 @@ def serve(
     it loads and every role in it passes the same look; otherwise the old one still is.
     """
     config = settings(state, dsn, max_rows, timeout_ms, audit_dsn)
+
+    def reread() -> WardenConfig:
+        return settings(state, dsn, max_rows, timeout_ms, audit_dsn)
+
+    if transport == "http" and config.auth is not None and profile is not None:
+        raise click.ClickException(
+            "with an auth section, each request's token says which profile it gets: "
+            "--profile is for stdio, where whoever starts the server picks"
+        )
+    audit = open_audit(config, pooled=True)  # one audit log for every profile and reload
+    try:
+        _serve(state, config, reread, transport, host, port, profile, audit)
+    finally:
+        audit.close()  # last: until then, a request finishing still writes its record
+
+
+def _serve(
+    state: CliState,
+    config: WardenConfig,
+    reread: Callable[[], WardenConfig],
+    transport: str,
+    host: str | None,
+    port: int | None,
+    profile: str | None,
+    audit: PostgresAuditSink,
+) -> None:
     if transport == "stdio":
-        audit = open_audit(config)
         vet_audit(audit, config)
         warden = build_warden(config, profile, audit=audit, serving=True)
         try:
@@ -603,14 +656,9 @@ def serve(
         finally:
             warden.close()
         return
-    if config.auth is not None and profile is not None:
-        raise click.ClickException(
-            "with an auth section, each request's token says which profile it gets: "
-            "--profile is for stdio, where whoever starts the server picks"
-        )
-    audit = open_audit(config)  # one audit log for every profile, and for every reload
     vet_audit(audit, config)
     metrics = Metrics()
+    watch_audit_pools(metrics, audit)
     live = LivePolicy(_policy(config, profile, audit=audit, metrics=metrics))
     host, port = host or config.server.host, port or config.server.port
     try:
@@ -632,9 +680,6 @@ def serve(
             "through the proxy.",
             err=True,
         )
-
-    def reread() -> WardenConfig:
-        return settings(state, dsn, max_rows, timeout_ms, audit_dsn)
 
     reloader = Reloader(
         live,

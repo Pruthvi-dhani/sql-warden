@@ -71,7 +71,8 @@ def main(
                 ) from exc
             raise click.ClickException(str(exc)) from exc
     start = profile or config.default_profile or names[0]
-    audit = open_audit(config)  # one audit log for every profile, as separate servers would share
+    # One audit log for every profile, as separate servers would share, pooled as theirs.
+    audit = open_audit(config, pooled=True)
     # As a server does before it starts: no profile is served as a role that can write.
     wardens = {name: build_warden(sources[name], name, audit=audit, serving=True) for name in names}
     url = f"http://127.0.0.1:{port}/"

@@ -205,7 +205,7 @@ class Watcher:
 
 
 def run(setup: Setup, *, callers: int, requests: int, sql: str) -> dict[str, Any]:
-    audit = open_audit(setup.config)
+    audit = open_audit(setup.config, pooled=True)  # as a server does
     warden = build_warden(setup.config, setup.profile, audit=audit, serving=True)
     latencies: list[float] = []
     failed = 0

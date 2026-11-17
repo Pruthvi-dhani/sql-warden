@@ -171,6 +171,17 @@ class PoolConfig(_Section):
     answered as if the database couldn't be reached."""
 
 
+class AuditPoolConfig(PoolConfig):
+    """How a server keeps its connections to the audit database: two pools of this size, one
+    for records and one for every profile's budgets, so charges waiting on each other's
+    locks can't hold up the records."""
+
+    max_size: int = Field(default=5, ge=1, le=1000)
+    """The most connections each pool has open at once: the audit database must allow twice
+    this many, on each server. A record is one short insert, so it needs fewer than a
+    warehouse's queries."""
+
+
 class WarehouseConfig(_Section):
     engine: Literal["postgres", "snowflake"] = "postgres"
     dsn: str = DEFAULT_DSN
@@ -561,6 +572,8 @@ class AuditConfig(_Section):
     append_only: bool = False
     """Refuse to serve unless the audit role can only add records: it can't change or remove
     one, nor own the table. Without it a server that could only warns."""
+    pool: AuditPoolConfig = AuditPoolConfig()
+    """When serving. Commands run by hand use one connection."""
 
 
 EVERYTHING: Literal["*"] = "*"

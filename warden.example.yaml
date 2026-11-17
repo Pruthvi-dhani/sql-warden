@@ -74,6 +74,14 @@ audit:
   # true: refuse to serve unless this role can only add records, not change or remove one
   # (docs/deploy.md). The demo's role is the audit database's superuser, so a server warns.
   append_only: false
+  # A server writes records on connections from one pool and budgets on another, of up to
+  # max_size each, so the audit database must allow servers x 2 x max_size. The rest as
+  # warehouse.pool. Commands run by hand use one connection.
+  pool:
+    max_size: 5
+    max_idle_s: 300
+    max_lifetime_s: 1800
+    timeout_s: 5               # a record that gets no connection in time is AUDIT_UNAVAILABLE
 
 # Where `sql-warden serve --transport http` listens (--host and --port win). Without an auth
 # section, only loopback addresses: whoever could reach the port would get everything the

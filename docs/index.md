@@ -25,7 +25,7 @@ audit database. The [README](https://github.com/Pruthvi-dhani/sql-warden/blob/ma
 | Page                                  | What it covers                                                          |
 |---------------------------------------|-------------------------------------------------------------------------|
 | [The MCP server](mcp-server.md)       | the five tools and what they return, serving over HTTP, and authentication with API keys and OIDC tokens |
-| [Operating a server](operations.md)   | the container image, health checks, metrics, shutdown, the connection pool, and reloading the policy on `SIGHUP` |
+| [Operating a server](operations.md)   | the container image, health checks, metrics, shutdown, the connection pools, and reloading the policy on `SIGHUP` |
 | [Deploying](deploy.md)                | sql-warden as a central service: database roles, secrets, Kubernetes and ECS, the network, keeping the audit log |
 | [The audit log](audit.md)             | what each record holds, failing closed, reading the log with `sql-warden audit`, and the append-only setup for production |
 | [Defence in depth](defence-in-depth.md) | what the database enforces under each check, the role check a server makes before it starts, and what that doesn't cover |

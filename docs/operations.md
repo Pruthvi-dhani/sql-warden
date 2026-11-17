@@ -1,7 +1,7 @@
 # Operating a server
 
 This page is for whoever runs sql-warden as an HTTP service: the container image, the
-health and metrics endpoints, shutdown, the connection pool, and changing the policy
+health and metrics endpoints, shutdown, the connection pools, and changing the policy
 without a restart. [Deploying](deploy.md) has a whole deployment, end to end: the databases'
 roles, secrets, Kubernetes and ECS, the network, and keeping the audit log.
 
@@ -48,10 +48,10 @@ Route only `/mcp` through the public proxy: these three are for the cluster.
 | `sql_warden_requests_in_flight`          | requests being answered right now                                 |
 | `sql_warden_config_reloads_total`        | reloads of the policy on `SIGHUP`, by `outcome` (applied, failed) |
 | `sql_warden_config_last_reload_successful` | `0` while the policy file as it is now failed to load, else `1` |
-| `sql_warden_pool_connections`            | connections a pool has open, by `pool` (warehouse) and `profile`  |
+| `sql_warden_pool_connections`            | connections a pool has open, by `pool`: `warehouse` (with `profile`), `audit` or `budgets` |
 | `sql_warden_pool_connections_in_use`     | connections lent out right now                                    |
 | `sql_warden_pool_requests_waiting`       | requests waiting for a connection, because every one is in use    |
-| `sql_warden_pool_timeouts_total`         | requests that got none within `warehouse.pool.timeout_s`          |
+| `sql_warden_pool_timeouts_total`         | requests that got none within the pool's `timeout_s`              |
 
 No label holds anything a caller chooses (an identity, say), so no caller can make the set
 grow.
@@ -62,7 +62,7 @@ Three are worth an alert:
 |--------------------------------------------------------|------------------------------------------------------|
 | `sql_warden_audit_write_failures_total` rises          | requests are being refused: the audit database is unreachable |
 | `sql_warden_config_last_reload_successful` is `0`      | the policy file and what is served differ            |
-| `sql_warden_pool_timeouts_total` rises                 | requests are waiting too long for a warehouse connection |
+| `sql_warden_pool_timeouts_total` rises                 | requests are waiting too long for a connection (`pool` says to which database) |
 
 ## Shutdown and concurrency
 
@@ -70,7 +70,7 @@ On `SIGTERM` the server stops taking connections and gives the requests it has
 `server.shutdown_grace_s` (30) seconds to finish. `server.max_concurrent_requests` (32) is how
 many requests it answers at once; the rest wait.
 
-## The connection pool
+## The connection pools
 
 A server keeps its connections to a Postgres warehouse in a pool, one per profile
 (`warehouse.pool`: up to `max_size`, 10, each), instead of opening one for every request;
@@ -79,6 +79,15 @@ checked as it is lent and reset with `DISCARD ALL` as it comes back, so nothing 
 leaves on it reaches the next. A request that finds every connection in use waits up to
 `timeout_s` (5) and is then answered as when the warehouse can't be reached. Snowflake keeps
 one session per profile open instead.
+
+The audit database gets two pools of its own (`audit.pool`: up to `max_size`, 5, each): one
+for records and one for every profile's budgets, so the audit database must allow servers ×
+2 × `max_size`. They are kept apart so that charges waiting on each other's locks can't take
+the connections the records need. Only sql-warden's own statements run on them, so they are
+checked as they are lent but not reset. Fail-closed is as before: a record that gets no
+connection within `timeout_s` is a record that couldn't be written, and the request is
+refused `AUDIT_UNAVAILABLE` before the warehouse is asked; a charge that gets none is
+`BUDGET_UNAVAILABLE`.
 
 `dev/loadtest.py` measures a server under many callers at once, against throwaway databases
 of its own.
@@ -113,4 +122,4 @@ mounted with `subPath` is never updated), and send `SIGHUP` once the new file is
 
 - [Deploying](deploy.md): the manifests, roles and secrets for a real deployment.
 - [The MCP server](mcp-server.md): the tools, HTTP limits and authentication.
-- [The policy file](policy.md): the `server` and `warehouse.pool` settings.
+- [The policy file](policy.md): the `server`, `warehouse.pool` and `audit.pool` settings.

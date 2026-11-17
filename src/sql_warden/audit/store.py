@@ -66,8 +66,11 @@ def _usage(row: Any) -> Usage:
 
 class PostgresSessionStore:
     """A SessionStore for one profile, in the audit database (its tables come with the audit
-    schema). One connection, shared by threads and replaced once if it breaks, as the audit
-    sink's is.
+    schema). On connections, a pool a server's stores share (and that outlives each), or by
+    default one connection of its own; either way replaced once if one breaks, as the audit
+    sink's are. Nothing in Python keeps two charges in order: each is one transaction, and
+    the session's row lock and the caller's advisory lock order them, as they do across
+    servers.
 
     not_counted are the refusal codes a session's budget doesn't count, for reading a
     session's earlier usage out of the audit log."""
@@ -79,10 +82,16 @@ class PostgresSessionStore:
         profile: str,
         not_counted: Collection[str] = (),
         connect_timeout_s: int = 5,
+        connections: Connections | None = None,
     ) -> None:
         self._profile = profile
         self._not_counted = [str(code) for code in not_counted]
-        self._connections: Connections = OneConnection(dsn, connect_timeout_s=connect_timeout_s)
+        self._owned = connections is None
+        self._connections: Connections = (
+            OneConnection(dsn, connect_timeout_s=connect_timeout_s)
+            if connections is None
+            else connections
+        )
 
     def usage(self, session_id: str) -> Usage:
         params = self._params(session_id)
@@ -156,7 +165,9 @@ class PostgresSessionStore:
         return self._attempt(charge, "could not charge the session's budget")
 
     def close(self) -> None:
-        self._connections.close()
+        """Close its connection, if it is its own; a shared pool is closed by its sink."""
+        if self._owned:
+            self._connections.close()
 
     def _params(self, session_id: str | None = None) -> dict[str, Any]:
         return {

@@ -1304,7 +1304,7 @@ about it needs a real account, and is 10.3.
   retired Warden's pool closed and off /metrics), and 8.2's 72 adversarial tests on Postgres
   now run twice, once with pooled engines.
 
-**10.2 Pools for the audit log and the budgets**
+**10.2 Pools for the audit log and the budgets** ✅ done
 - `PostgresAuditSink` writes each record on a connection from a pool, so records are written
   side by side instead of in a queue behind one lock. `PostgresSessionStore` likewise: the
   lock in Python goes, and what keeps two charges to one session or one caller in order is
@@ -1328,6 +1328,78 @@ about it needs a real account, and is 10.3.
   once; with the pool held full, a query is refused `AUDIT_UNAVAILABLE` before it reaches the
   warehouse; an audit database restarted under load costs at most the requests in flight;
   9.6's hardened-role tests pass with pools. The load script again, with the numbers.
+- As built, what it bought, measured with `dev/loadtest.py` on a laptop against local
+  containers (2,000 queries, 300 for one caller), before and after in one batch. On one
+  machine, the audit database a fraction of a millisecond away:
+
+  | Callers | Budgets | Before: requests/s | median | After: requests/s | median |
+  |--------:|:-------:|-------------------:|-------:|------------------:|-------:|
+  | 1       | no      | 291                | 3.2 ms | 321               | 3.0 ms |
+  | 16      | no      | 399                | 39 ms  | 370               | 43 ms  |
+  | 32      | no      | 386                | 82 ms  | 353               | 90 ms  |
+  | 1       | yes     | 208                | 4.4 ms | 241               | 3.9 ms |
+  | 16      | yes     | 298                | 53 ms  | 259               | 59 ms  |
+  | 32      | yes     | 307                | 103 ms | 256               | 120 ms |
+
+  With `--audit-latency-ms 0.5` (each way, through a proxy in a process of its own), as an
+  audit database in another account or zone would be:
+
+  | Callers | Budgets | Before: requests/s | median | After: requests/s | median |
+  |--------:|:-------:|-------------------:|-------:|------------------:|-------:|
+  | 1       | no      | 131                | 7.2 ms | 123               | 7.4 ms |
+  | 16      | no      | 291                | 54 ms  | 359               | 44 ms  |
+  | 32      | no      | 287                | 108 ms | 365               | 87 ms  |
+  | 1       | yes     | 33                 | 29 ms  | 32                | 31 ms  |
+  | 16      | yes     | 49                 | 327 ms | 233               | 68 ms  |
+  | 32      | yes     | 48                 | 666 ms | 232               | 137 ms |
+
+  10.1's guess was wrong for one machine: the audit log's one connection was not the queue
+  there. With the records kept in memory and no audit database at all, 16 callers ran 383 a
+  second, no more than on one connection (400). The limit is the server process: about
+  2.5 ms of CPU per request, one core's worth under the GIL. There the pools cost 7 to 16%
+  at 16 and 32 callers (more threads in psycopg at once, contending for that core) and gain
+  for one. The queue 10.2 removes is the one a farther audit database makes: a request's
+  records and charges are several round trips each, and on one connection every request
+  waited for all of everyone else's. With budgets, that held 16 callers to 49 a second; on
+  pools they run 233, within sight of the 359 without. The audit database is meant to be
+  on an instance of its own, so this is the case that matters.
+- As built, against the plan: the audit database's pools are neither reset nor checked as
+  a connection is lent, as the warehouse's are. The reset: nothing runs on them but
+  sql-warden's own statements, and what each sets or locks is its transaction's (`SET
+  LOCAL`, `pg_advisory_xact_lock`), so there is nothing to clear, and their prepared
+  statements are kept. The check: it is a round trip more for each record and charge,
+  which are a round trip or two themselves. Instead an action whose connection broke has
+  the pool check every idle one (after a restart they are all broken) before its one
+  retry. In the test that drops every connection three times under load, that lost no
+  request in five runs, where the check as lent lost up to 2 of 320.
+- As built, against the plan: `open_audit` sets up the tables on a connection of its own
+  before the pools open, not on a pooled one. An audit database that can't be reached at
+  startup is then reported at once, as before, rather than after `timeout_s` with
+  psycopg_pool's own warnings ahead of the error. The `append_only` look runs on the pool.
+- As built: `audit/connections.py` holds both ways of reaching the audit database
+  (`OneConnection`, for commands run by hand, and `PooledConnections`), and the sink and
+  the store each take one. A pooled sink's stores share its budgets pool, which their
+  `close()` leaves open, since a reload retires Wardens and not the audit log; the sink
+  closes both pools, the last thing `serve` does. A stdio server and the test portal pool
+  too. On `/metrics` they are `pool="audit"` and `pool="budgets"`, with no `profile`
+  label. The message for a borrower that got nothing (`why_none` in `pools.py`) is now the
+  warehouse's and the audit database's both. `dev/loadtest.py` gained `--budgets` and
+  `--audit-latency-ms`.
+- Tests: 18 unit (`test_audit_pools.py`: the `audit.pool` section and what it refuses,
+  a Snowflake warehouse included; that a server's sink pools, its tables set up first on a
+  connection of its own, and closes as it exits, while `query`, `check` and `tables`
+  don't pool; both pools on /metrics without a profile; an unreachable audit database
+  answered within the timeout with its reason and no password, a charge as
+  `BUDGET_UNAVAILABLE` with the records' pool untouched; stores sharing one pool that
+  closing a store leaves open; a closed sink). 7 on Postgres
+  (`test_audit_pools_on_postgres.py`: 400 records from 16 threads all written, each once,
+  on at most 4 connections; a record written while another holds a connection; a full
+  records pool refusing `AUDIT_UNAVAILABLE` within its timeout with nothing sent to the
+  warehouse; a full budgets pool refusing `BUDGET_UNAVAILABLE` with the refusal still
+  recorded; idle connections dropped costing no request; every connection dropped three
+  times under load from 8 threads costing at most the requests in flight, and everything
+  answered on the record once; a closed sink leaving nothing open). 9.3's tests run again
+  on pools, unchanged (exactly 30 of 96, exactly 25), and 9.6's writer tests too.
 
 **10.3 Snowflake's session under load** (waits for an account)
 - Two things nobody can answer without a real account, to be settled with 7.2's live tests

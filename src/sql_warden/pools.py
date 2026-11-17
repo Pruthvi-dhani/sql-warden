@@ -1,4 +1,5 @@
-"""Connection pools for the Postgres databases a server talks to.
+"""Connection pools for the Postgres databases a server talks to: the warehouse (one pool
+per profile), and the audit database (one for records and one for budgets).
 
 A server answers many requests; opening a connection for each costs a handshake,
 authentication and a new backend process on the database, every time. A pool keeps a few
@@ -85,10 +86,15 @@ def open_pool(
     name: str,
     connect_timeout_s: int,
     autocommit: bool = False,
+    resets: bool = True,
+    checks: bool = True,
 ) -> tuple[ConnectionPool[psycopg.Connection[Any]], Reach]:
     """A pool that starts empty and opens connections as they are needed, up to max_size,
-    and how its attempts to connect are going. Each connection is checked as it is lent
-    (one the server closed is replaced, not handed out) and reset as it comes back."""
+    and how its attempts to connect are going. If checks, each connection is checked as it
+    is lent (one the server closed is replaced, not handed out); if resets, reset as it
+    comes back. Only a pool whose connections run nothing but sql-warden's own statements,
+    which leave nothing behind them, may do without the reset; one whose borrowers try
+    again on a broken connection, without the check."""
     reach = Reach()
     pool = ConnectionPool(
         dsn,
@@ -99,8 +105,8 @@ def open_pool(
         max_idle=settings.max_idle_s,
         max_lifetime=settings.max_lifetime_s,
         timeout=settings.timeout_s,
-        check=ConnectionPool.check_connection,
-        reset=reset,
+        check=ConnectionPool.check_connection if checks else None,
+        reset=reset if resets else None,
         name=name,
         open=True,
     )

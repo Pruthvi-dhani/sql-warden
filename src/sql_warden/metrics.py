@@ -245,7 +245,8 @@ class Metrics:
 
     def watch_pool(self, pool: str, profile: str, stats_of: Callable[[], PoolStats | None]) -> None:
         """Report a connection pool, read as /metrics is scraped: pool is what it connects
-        to (warehouse), profile whose it is. A pool watched again under the same names
+        to (warehouse, audit, budgets), profile whose it is, or "" for the audit database's
+        pools, which every profile shares. A pool watched again under the same names
         replaces the last: after a reload, the new one is reported."""
         with self._pools_lock:
             self._pools[(pool, profile)] = stats_of
@@ -275,7 +276,12 @@ class Metrics:
             lines += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
             for names, stats in found:
                 if stats is not None:
-                    labels = _labels(("pool", "profile"), names)
+                    pool, profile = names
+                    labels = (
+                        _labels(("pool", "profile"), names)
+                        if profile
+                        else _labels(("pool",), (pool,))
+                    )
                     lines.append(f"{name}{labels} {_number(value(stats))}")
         return lines
 

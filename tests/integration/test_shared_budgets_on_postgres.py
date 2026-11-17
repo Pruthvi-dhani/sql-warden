@@ -2,7 +2,9 @@
 
 Each "replica" here is a Warden with its own audit sink and session store, so its own
 connections, as two processes behind a load balancer would have. They charge the same
-session, and the same caller, from many threads at once.
+session, and the same caller, from many threads at once: on a connection each, as a command
+does, and on pools, as a server does, where nothing in Python keeps one replica's charges in
+order and only the database's locks do.
 """
 
 import threading
@@ -17,6 +19,7 @@ from sql_warden.cli import EXIT_REFUSED, cli
 from sql_warden.config import BudgetConfig, IdentityBudgetConfig
 from sql_warden.engines import CostEstimate
 from sql_warden.models import RefusalCode
+from sql_warden.pools import PoolSettings
 from sql_warden.sessions import CallerCharge, Usage
 from sql_warden.warden import NOT_COUNTED, Warden
 from tests.integration.conftest import Warehouse
@@ -25,6 +28,9 @@ from tests.unit.conftest import FakeEngine
 pytestmark = pytest.mark.integration
 
 SQL = "select id from products"
+POOLS = pytest.mark.parametrize(
+    "pool", [None, PoolSettings(max_size=3)], ids=["one connection", "pooled"]
+)
 
 
 @pytest.fixture
@@ -45,8 +51,9 @@ class Replica:
         budget: BudgetConfig | None = None,
         identity_budget: IdentityBudgetConfig | None = None,
         engine: FakeEngine | None = None,
+        pool: PoolSettings | None = None,
     ) -> None:
-        self.audit = PostgresAuditSink(audit_dsn)
+        self.audit = PostgresAuditSink(audit_dsn, pool=pool)
         self.store = self.audit.session_store("support", not_counted=NOT_COUNTED)
         self.warden = Warden(
             engine or FakeEngine(),
@@ -98,8 +105,11 @@ def _scalar(audit_dsn: str, sql: str) -> object:
     return row[0]
 
 
-def test_two_replicas_never_overspend_one_session(fresh: None, audit_dsn: str) -> None:
-    replicas = [Replica(audit_dsn, BudgetConfig(max_queries=30)) for _ in range(2)]
+@POOLS
+def test_two_replicas_never_overspend_one_session(
+    fresh: None, audit_dsn: str, pool: PoolSettings | None
+) -> None:
+    replicas = [Replica(audit_dsn, BudgetConfig(max_queries=30), pool=pool) for _ in range(2)]
     try:
         ran = _hammer(replicas, threads=6, each=8, session="shared", identity=None)
     finally:
@@ -111,9 +121,12 @@ def test_two_replicas_never_overspend_one_session(fresh: None, audit_dsn: str) -
     assert _scalar(audit_dsn, allowed) == 30
 
 
-def test_nor_one_caller_across_sessions(fresh: None, audit_dsn: str) -> None:
+@POOLS
+def test_nor_one_caller_across_sessions(
+    fresh: None, audit_dsn: str, pool: PoolSettings | None
+) -> None:
     caller = IdentityBudgetConfig(max_queries=25)
-    replicas = [Replica(audit_dsn, identity_budget=caller) for _ in range(2)]
+    replicas = [Replica(audit_dsn, identity_budget=caller, pool=pool) for _ in range(2)]
     try:
         # Every query in a session of its own: only the caller's budget holds them.
         ran = _hammer(replicas, threads=5, each=8, session=None, identity="web-agent")
@@ -127,9 +140,12 @@ def test_nor_one_caller_across_sessions(fresh: None, audit_dsn: str) -> None:
     assert _scalar(audit_dsn, counted) == 25
 
 
-def test_a_charge_that_doesnt_fit_changes_nothing(fresh: None, audit_dsn: str) -> None:
+@POOLS
+def test_a_charge_that_doesnt_fit_changes_nothing(
+    fresh: None, audit_dsn: str, pool: PoolSettings | None
+) -> None:
     costly = FakeEngine(estimate=CostEstimate(40, est_rows=1, top_node="Seq Scan"))
-    replica = Replica(audit_dsn, BudgetConfig(max_total_cost=100), engine=costly)
+    replica = Replica(audit_dsn, BudgetConfig(max_total_cost=100), engine=costly, pool=pool)
     try:
         for _ in range(2):
             replica.warden.run(SQL, session_id="s")

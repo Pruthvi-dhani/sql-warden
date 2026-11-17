@@ -41,7 +41,8 @@ each profile, so the replica's `max_connections` must allow replicas × profiles
 requests that wait often want a bigger pool, or more replicas. A connection is replaced
 after `max_lifetime_s` (30 minutes), so a replica that failed over to a new address behind
 the same name is reached without a restart. A rotated password is not: new connections still
-use the one the process started with (see Secrets).
+use the one the process started with (see Secrets). The audit database likewise needs
+replicas × 2 × `audit.pool.max_size` (5): one pool for records, one for budgets.
 
 On Snowflake, give sql-warden a warehouse of its own (an XS one is plenty) with a resource
 monitor, so no query, however it gets past the cost check, can spend more than you set (as

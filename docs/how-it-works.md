@@ -164,7 +164,7 @@ Everything is under `src/sql_warden/`:
 | `auth.py`              | API keys and OIDC tokens                                                      |
 | `startup.py`           | the role check a server makes before it serves                                |
 | `reload.py`            | reloading the policy on `SIGHUP`                                              |
-| `pools.py`             | the Postgres connection pool                                                  |
+| `pools.py`             | the Postgres connection pools: the warehouse's, and the audit database's (with `audit/connections.py`) |
 | `metrics.py`           | the Prometheus metrics                                                        |
 | `cli.py`, `render.py`  | the `sql-warden` command and its text output                                  |
 

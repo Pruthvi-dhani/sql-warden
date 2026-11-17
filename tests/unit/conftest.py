@@ -148,11 +148,21 @@ class FakeAuditSink(MemoryAuditSink):
     """What the CLI gets instead of PostgresAuditSink: events in a list, which every sink
     built in one test shares, as CLI calls share one audit database."""
 
-    def __init__(self, dsn: str, *, connect_timeout_s: int, database: list[AuditEvent]) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        connect_timeout_s: int,
+        database: list[AuditEvent],
+        pool: PoolSettings | None = None,
+    ) -> None:
         super().__init__()
         self._events = database
         self.dsn = dsn
         self.connect_timeout_s = connect_timeout_s
+        self.pool = pool
+        """The pools the CLI asked for: a server's sink has them, a command's doesn't."""
+        self.closed = False
         self.schema_applied = False
         self.can_tamper: tuple[str, ...] | None = ()
         """What tampering() answers: by default, a role that can only add records."""
@@ -166,7 +176,7 @@ class FakeAuditSink(MemoryAuditSink):
         return self.can_tamper
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 @dataclass
@@ -190,8 +200,12 @@ def audit_sinks(monkeypatch: pytest.MonkeyPatch) -> AuditSinks:
     """Replace PostgresAuditSink in the CLI, so no unit test needs an audit database."""
     sinks = AuditSinks()
 
-    def factory(dsn: str, *, connect_timeout_s: int) -> FakeAuditSink:
-        sink = FakeAuditSink(dsn, connect_timeout_s=connect_timeout_s, database=sinks.database)
+    def factory(
+        dsn: str, *, connect_timeout_s: int, pool: PoolSettings | None = None
+    ) -> FakeAuditSink:
+        sink = FakeAuditSink(
+            dsn, connect_timeout_s=connect_timeout_s, database=sinks.database, pool=pool
+        )
         sink.fail_with = sinks.fail_with
         sink.can_tamper = sinks.can_tamper
         sinks.built.append(sink)

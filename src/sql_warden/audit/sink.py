@@ -13,7 +13,8 @@ import psycopg
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
-from sql_warden.audit.connections import Connections, OneConnection
+from sql_warden.audit.connections import Connections, OneConnection, PooledConnections
+from sql_warden.pools import PoolSettings, PoolStats
 from sql_warden.sessions import Usage
 
 if TYPE_CHECKING:
@@ -158,14 +159,30 @@ _INSERT = """
 class PostgresAuditSink:
     """Writes each event as one row of audit_events, committed before record() returns.
 
-    One connection, reused and shared by threads; if it breaks (the database restarted, say),
-    the next action opens a new one and tries once more before giving up.
+    Without pool, on one connection, shared by threads one at a time. With pool, a server's:
+    records on connections from one pool, so they are written side by side, and budgets
+    (session_store) on connections from another, so a burst of charges waiting on each
+    other's locks can't take every connection and hold up the records. Either way, a
+    connection that broke (the database restarted, say) is replaced and the action tried
+    once more before giving up.
     """
 
-    def __init__(self, dsn: str, *, connect_timeout_s: int = 5) -> None:
+    def __init__(
+        self, dsn: str, *, connect_timeout_s: int = 5, pool: PoolSettings | None = None
+    ) -> None:
         self._dsn = dsn
         self._connect_timeout_s = connect_timeout_s
-        self._records: Connections = OneConnection(dsn, connect_timeout_s=connect_timeout_s)
+        self._records: Connections
+        self._budgets: PooledConnections | None = None
+        if pool is None:
+            self._records = OneConnection(dsn, connect_timeout_s=connect_timeout_s)
+        else:
+            self._records = PooledConnections(
+                dsn, pool, name="audit", connect_timeout_s=connect_timeout_s
+            )
+            self._budgets = PooledConnections(
+                dsn, pool, name="budgets", connect_timeout_s=connect_timeout_s
+            )
 
     def ensure_schema(self) -> None:
         """Make sure the audit tables are there and current. Safe to call from every start.
@@ -244,8 +261,9 @@ class PostgresAuditSink:
         self, profile: str, *, not_counted: Collection[str] = ()
     ) -> "PostgresSessionStore":
         """A store for the profile's budgets in this audit database, where every server
-        recording here shares them. On its own connection: a charge waiting for another
-        server's must not hold up the audit records."""
+        recording here shares them. Never on the records' connections: a charge waiting for
+        another's must not hold up the audit records. A pooled sink's stores share its
+        budgets' pool, which outlives them; otherwise each has a connection of its own."""
         from sql_warden.audit.store import PostgresSessionStore
 
         return PostgresSessionStore(
@@ -253,10 +271,20 @@ class PostgresAuditSink:
             profile=profile,
             not_counted=not_counted,
             connect_timeout_s=self._connect_timeout_s,
+            connections=self._budgets,
         )
 
+    def pool_stats(self) -> dict[str, PoolStats | None]:
+        """What each pool is doing, by name (audit, budgets), for /metrics; none unpooled."""
+        if self._budgets is None:
+            return {}
+        return {"audit": self._records.stats(), "budgets": self._budgets.stats()}
+
     def close(self) -> None:
+        """Close the connection, or both pools: connections in use close as they come back."""
         self._records.close()
+        if self._budgets is not None:
+            self._budgets.close()
 
     def _ensure(self, conn: psycopg.Connection[Any]) -> None:
         owned = conn.execute(_OWNED).fetchone()
