@@ -13,6 +13,7 @@ import psycopg
 from psycopg import sql as psql
 from psycopg.types.json import Jsonb
 
+from sql_warden.audit.connections import Connections, OneConnection
 from sql_warden.sessions import Usage
 
 if TYPE_CHECKING:
@@ -158,14 +159,13 @@ class PostgresAuditSink:
     """Writes each event as one row of audit_events, committed before record() returns.
 
     One connection, reused and shared by threads; if it breaks (the database restarted, say),
-    the next record() opens a new one and tries once more before giving up.
+    the next action opens a new one and tries once more before giving up.
     """
 
     def __init__(self, dsn: str, *, connect_timeout_s: int = 5) -> None:
         self._dsn = dsn
         self._connect_timeout_s = connect_timeout_s
-        self._conn: psycopg.Connection[Any] | None = None
-        self._lock = threading.Lock()
+        self._records: Connections = OneConnection(dsn, connect_timeout_s=connect_timeout_s)
 
     def ensure_schema(self) -> None:
         """Make sure the audit tables are there and current. Safe to call from every start.
@@ -174,29 +174,26 @@ class PostgresAuditSink:
         stack's does. One that doesn't, the deployed writer that may only add records,
         can't run DDL and must not: it checks the tables are current and that it can add
         records, and otherwise says to run `sql-warden audit init` as their owner."""
-        with self._lock:
-            self._attempt(self._ensure, "could not set up the audit tables")
+        self._attempt(self._ensure, "could not set up the audit tables")
 
     def apply_schema(self, owner: str | None = None) -> None:
         """Create or update the audit tables, and grant the deploy roles what they may do:
         `sql-warden audit init`. As owner (a role this one is a member of, which then owns
         the tables) if given."""
-        with self._lock:
-            self._attempt(
-                lambda conn: self._apply_schema(conn, owner=owner),
-                "could not set up the audit tables",
-            )
+        self._attempt(
+            lambda conn: self._apply_schema(conn, owner=owner),
+            "could not set up the audit tables",
+        )
 
     def tampering(self) -> tuple[str, ...] | None:
         """Every way this role can change or remove what is already recorded, in words
         ("can UPDATE, DELETE on audit_events"); none for a role that can only add records,
         and None while there is no audit table. Asked for every role it is a member of,
         since SET ROLE would give it theirs."""
-        with self._lock:
-            row = self._attempt(
-                lambda conn: conn.execute(_TAMPERING).fetchone(),
-                "could not check what the audit role can do",
-            )
+        row = self._attempt(
+            lambda conn: conn.execute(_TAMPERING).fetchone(),
+            "could not check what the audit role can do",
+        )
         if row is None:
             return None  # no table yet: nothing recorded to change
         superuser, owner, privileges = row
@@ -216,10 +213,7 @@ class PostgresAuditSink:
         return tuple(found)
 
     def ping(self) -> None:
-        with self._lock:
-            self._attempt(
-                lambda conn: conn.execute("SELECT 1"), "the audit database is unavailable"
-            )
+        self._attempt(lambda conn: conn.execute("SELECT 1"), "the audit database is unavailable")
 
     def record(self, event: AuditEvent) -> None:
         params = {
@@ -228,10 +222,9 @@ class PostgresAuditSink:
             "masked_columns": list(event.masked_columns),
             "trace": Jsonb(list(event.trace), dumps=json.dumps),
         }
-        with self._lock:
-            self._attempt(
-                lambda conn: conn.execute(_INSERT, params), "could not record the audit event"
-            )
+        self._attempt(
+            lambda conn: conn.execute(_INSERT, params), "could not record the audit event"
+        )
 
     def usage(self, session_id: str, profile: str, *, not_counted: Collection[str] = ()) -> Usage:
         params = {
@@ -239,11 +232,10 @@ class PostgresAuditSink:
             "profile": profile,
             "not_counted": [str(code) for code in not_counted],
         }
-        with self._lock:
-            row = self._attempt(
-                lambda conn: conn.execute(_USAGE, params).fetchone(),
-                "could not read the session's usage from the audit log",
-            )
+        row = self._attempt(
+            lambda conn: conn.execute(_USAGE, params).fetchone(),
+            "could not read the session's usage from the audit log",
+        )
         assert row is not None  # an aggregate without GROUP BY always returns one row
         queries, total_cost, rows_returned, refusals = row
         return Usage(int(queries), float(total_cost), int(rows_returned), int(refusals))
@@ -264,10 +256,7 @@ class PostgresAuditSink:
         )
 
     def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+        self._records.close()
 
     def _ensure(self, conn: psycopg.Connection[Any]) -> None:
         owned = conn.execute(_OWNED).fetchone()
@@ -296,30 +285,7 @@ class PostgresAuditSink:
             conn.execute(SCHEMA.read_text())
 
     def _attempt[T](self, action: Callable[[psycopg.Connection[Any]], T], what: str) -> T:
-        # Two tries: a connection that broke since last time gets one fresh replacement.
-        try:
-            return action(self._connection())
-        except psycopg.OperationalError:
-            self._drop()
-        except psycopg.Error as exc:
-            raise AuditError(f"{what}: {str(exc).strip()}") from exc
-        try:
-            return action(self._connection())
-        except psycopg.Error as exc:
-            self._drop()
-            raise AuditError(f"{what}: {str(exc).strip()}") from exc
-
-    def _connection(self) -> psycopg.Connection[Any]:
-        if self._conn is None or self._conn.closed:
-            self._conn = psycopg.connect(
-                self._dsn, autocommit=True, connect_timeout=self._connect_timeout_s
-            )
-        return self._conn
-
-    def _drop(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        return self._records.attempt(action, what, AuditError)
 
 
 # Whether this role owns audit_events (has its owner's privileges), if it exists.

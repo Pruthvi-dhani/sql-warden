@@ -7,12 +7,12 @@ locked, and the caller's charges by an advisory lock, before anything is checked
 servers can each spend the same last query.
 """
 
-import threading
 from collections.abc import Callable, Collection
 from typing import Any
 
 import psycopg
 
+from sql_warden.audit.connections import Connections, OneConnection
 from sql_warden.audit.sink import _USAGE
 from sql_warden.config import BudgetConfig
 from sql_warden.sessions import CallerCharge, Charge, SessionStoreError, Usage, over
@@ -80,12 +80,9 @@ class PostgresSessionStore:
         not_counted: Collection[str] = (),
         connect_timeout_s: int = 5,
     ) -> None:
-        self._dsn = dsn
         self._profile = profile
         self._not_counted = [str(code) for code in not_counted]
-        self._connect_timeout_s = connect_timeout_s
-        self._conn: psycopg.Connection[Any] | None = None
-        self._lock = threading.Lock()
+        self._connections: Connections = OneConnection(dsn, connect_timeout_s=connect_timeout_s)
 
     def usage(self, session_id: str) -> Usage:
         params = self._params(session_id)
@@ -159,8 +156,7 @@ class PostgresSessionStore:
         return self._attempt(charge, "could not charge the session's budget")
 
     def close(self) -> None:
-        with self._lock:
-            self._drop()
+        self._connections.close()
 
     def _params(self, session_id: str | None = None) -> dict[str, Any]:
         return {
@@ -170,30 +166,7 @@ class PostgresSessionStore:
         }
 
     def _attempt[T](self, action: Callable[[psycopg.Connection[Any]], T], what: str) -> T:
-        # Two tries, as the audit sink makes: a connection that broke since last time gets
-        # one fresh replacement. A charge whose commit was lost may then be counted twice,
-        # which errs the safe way: usage only ever reads high.
-        with self._lock:
-            try:
-                return action(self._connection())
-            except psycopg.OperationalError:
-                self._drop()
-            except psycopg.Error as exc:
-                raise SessionStoreError(f"{what}: {str(exc).strip()}") from exc
-            try:
-                return action(self._connection())
-            except psycopg.Error as exc:
-                self._drop()
-                raise SessionStoreError(f"{what}: {str(exc).strip()}") from exc
-
-    def _connection(self) -> psycopg.Connection[Any]:
-        if self._conn is None or self._conn.closed:
-            self._conn = psycopg.connect(
-                self._dsn, autocommit=True, connect_timeout=self._connect_timeout_s
-            )
-        return self._conn
-
-    def _drop(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        # Two tries, as the audit sink makes: a connection that broke gets one fresh
+        # replacement. A charge whose commit was lost may then be counted twice, which errs
+        # the safe way: usage only ever reads high.
+        return self._connections.attempt(action, what, SessionStoreError)
