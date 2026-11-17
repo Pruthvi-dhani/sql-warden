@@ -6,6 +6,8 @@ how many it opened over the run, and the most it had open at once.
 
     uv run python dev/loadtest.py                         # throwaway containers, seeded as the demo
     uv run python dev/loadtest.py --callers 32 --requests 4000
+    uv run python dev/loadtest.py --budgets               # each query also charged to a budget
+    uv run python dev/loadtest.py --audit-latency-ms 0.5  # as if the audit database were farther
     uv run python dev/loadtest.py --config warden.yaml --profile public \\
         --watch-dsn postgresql://warehouse_admin:...@localhost:5433/warehouse
 
@@ -14,21 +16,30 @@ tests' image and the demo seed) and removes them after, so nothing is recorded a
 lasts. Given --config, it runs against that setup instead and every request is recorded in
 its audit database, as any request would be. --watch-dsn is a role there that can read
 pg_stat_activity, for the connection counts.
+
+On one machine the audit database is a fraction of a millisecond away, where a managed one
+in another account is more. --audit-latency-ms puts a proxy of its own (a process of its
+own, so it takes no time from the server's) between them that holds everything sent either
+way for that long.
 """
 
 import argparse
+import asyncio
+import multiprocessing
+import socket
 import statistics
 import sys
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -49,9 +60,67 @@ class Setup:
     """The role whose connections are counted."""
 
 
+def _delay(listen: socket.socket, host: str, port: int, delay_s: float) -> None:
+    """Forward every connection made to listen to host:port, each chunk either way sent on
+    delay_s after it arrived, in order."""
+
+    async def forward(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held: asyncio.Queue[tuple[float, bytes]] = asyncio.Queue()
+
+        async def send() -> None:
+            while True:
+                due, data = await held.get()
+                await asyncio.sleep(max(due - time.monotonic(), 0))
+                if not data:
+                    writer.close()
+                    return
+                writer.write(data)
+                await writer.drain()
+
+        sender = asyncio.ensure_future(send())
+        while data := await reader.read(65536):
+            await held.put((time.monotonic() + delay_s, data))
+        await held.put((time.monotonic() + delay_s, b""))
+        await sender
+
+    async def connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        server_reader, server_writer = await asyncio.open_connection(host, port)
+        await asyncio.gather(
+            forward(reader, server_writer), forward(server_reader, writer), return_exceptions=True
+        )
+
+    async def serve() -> None:
+        async with await asyncio.start_server(connected, sock=listen) as server:
+            await server.serve_forever()
+
+    asyncio.run(serve())
+
+
 @contextmanager
-def throwaway(pool_size: int | None = None) -> Iterator[Setup]:
-    """A warehouse and an audit database of its own, gone when the run ends."""
+def delayed(dsn: str, latency_ms: float) -> Iterator[str]:
+    """dsn, reached through a proxy that adds latency_ms each way."""
+    target = conninfo_to_dict(dsn)
+    listen = socket.create_server(("127.0.0.1", 0))
+    proxy = multiprocessing.Process(
+        target=_delay,
+        args=(listen, str(target["host"]), int(str(target["port"])), latency_ms / 1000),
+        daemon=True,
+    )
+    proxy.start()
+    try:
+        yield make_conninfo(dsn, host="127.0.0.1", port=listen.getsockname()[1])
+    finally:
+        proxy.terminate()
+        listen.close()
+
+
+@contextmanager
+def throwaway(
+    pool_size: int | None = None, *, budgets: bool = False, audit_latency_ms: float = 0
+) -> Iterator[Setup]:
+    """A warehouse and an audit database of its own, gone when the run ends. With budgets,
+    the profile has a session budget too large to run out, so every query is also charged
+    to it in the audit database, as a profile with budgets is."""
     from testcontainers.community.postgres import PostgresContainer
 
     image = "postgres:16-alpine"  # the integration tests' (tests/integration/conftest.py)
@@ -66,7 +135,12 @@ def throwaway(pool_size: int | None = None) -> Iterator[Setup]:
     audit = PostgresContainer(
         image, username="warden_audit", password="warden_audit", dbname="audit", driver=None
     )
-    with warehouse, audit:
+    with ExitStack() as running:
+        running.enter_context(warehouse)
+        running.enter_context(audit)
+        audit_dsn = audit.get_connection_url()
+        if audit_latency_ms:
+            audit_dsn = running.enter_context(delayed(audit_dsn, audit_latency_ms))
         host = warehouse.get_container_host_ip()
         port = warehouse.get_exposed_port(5432)
         reader = f"postgresql://warden_reader:warden_reader@{host}:{port}/warehouse"
@@ -77,9 +151,12 @@ def throwaway(pool_size: int | None = None) -> Iterator[Setup]:
                     "dsn": reader,
                     **({"pool": {"max_size": pool_size}} if pool_size else {}),
                 },
-                "audit": {"dsn": audit.get_connection_url()},
+                "audit": {"dsn": audit_dsn},
                 "profiles": {
-                    "public": {"tables": {"public.products": ["id", "name", "price_cents"]}}
+                    "public": {
+                        "tables": {"public.products": ["id", "name", "price_cents"]},
+                        **({"budgets": {"max_queries": 10**9}} if budgets else {}),
+                    }
                 },
                 "default_profile": "public",
             }
@@ -187,6 +264,15 @@ def main() -> None:
     parser.add_argument(
         "--pool-size", type=int, help="throwaway only: warehouse.pool.max_size (its default)"
     )
+    parser.add_argument(
+        "--budgets", action="store_true", help="throwaway only: charge each query to a budget"
+    )
+    parser.add_argument(
+        "--audit-latency-ms",
+        type=float,
+        default=0,
+        help="throwaway only: added each way between the server and its audit database",
+    )
     parser.add_argument("--config", type=Path, help="run against this setup, not throwaway ones")
     parser.add_argument("--profile", help="with --config: the profile to run as")
     parser.add_argument(
@@ -196,7 +282,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.config is None:
-        with throwaway(args.pool_size) as setup:
+        with throwaway(
+            args.pool_size, budgets=args.budgets, audit_latency_ms=args.audit_latency_ms
+        ) as setup:
             report = run(setup, callers=args.callers, requests=args.requests, sql=args.sql)
     else:
         setup = Setup(load_config(args.config), args.profile, args.watch_dsn, args.watch_role)

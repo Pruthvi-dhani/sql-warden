@@ -249,4 +249,4 @@ Two tools in the repository are not part of the installed package:
 | Command                            | What it does                                                    |
 |------------------------------------|-----------------------------------------------------------------|
 | `uv run python -m tests.portal`    | the browser test page; see [tests/portal/README.md](https://github.com/Pruthvi-dhani/sql-warden/blob/main/tests/portal/README.md) |
-| `uv run python dev/loadtest.py`    | measures a server under many callers at once, against throwaway databases of its own. `--callers`, `--requests`, `--sql` and `--pool-size` shape the run |
+| `uv run python dev/loadtest.py`    | measures a server under many callers at once, against throwaway databases of its own. `--callers`, `--requests`, `--sql`, `--pool-size` and `--budgets` shape the run, and `--audit-latency-ms` puts the audit database farther away |
