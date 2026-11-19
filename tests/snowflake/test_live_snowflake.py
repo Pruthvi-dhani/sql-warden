@@ -94,7 +94,7 @@ def test_through_the_warden(engine: SnowflakeEngine) -> None:
     )
     outcome = warden.run("select 1 as one")
     assert outcome.decision.allowed, outcome.decision.refused_by
-    assert outcome.decision.sql == "SELECT 1 AS ONE LIMIT 6"
+    assert outcome.decision.sql == "SELECT 1 AS one LIMIT 6"  # Snowflake reads ONE either way
     assert outcome.result is not None
     assert outcome.result.rows == ((1,),)
     refused = warden.run("select system$wait(1)")
