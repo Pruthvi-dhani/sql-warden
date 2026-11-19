@@ -45,8 +45,8 @@ use the one the process started with (see Secrets). The audit database likewise 
 replicas × 2 × `audit.pool.max_size` (5): one pool for records, one for budgets.
 
 On Snowflake, give sql-warden a warehouse of its own (an XS one is plenty) with a resource
-monitor, so no query, however it gets past the cost check, can spend more than you set (as
-with all of sql-warden's Snowflake support, this has not been run against a real account):
+monitor, so no query, however it gets past the cost check, can spend more than you set (a
+server has not yet been run on a real account):
 
 ```sql
 CREATE WAREHOUSE sql_warden_wh WAREHOUSE_SIZE = XSMALL AUTO_SUSPEND = 60;

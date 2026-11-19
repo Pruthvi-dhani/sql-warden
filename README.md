@@ -180,9 +180,9 @@ mkdocs.yml         the docs site's layout
 ## Status
 
 On Postgres, everything above works and is tested, up to running as a service behind
-tokens. The Snowflake engine is tested on an emulator and on saved query plans, and **has
-not yet run against a real account**. [docs/plan.md](docs/plan.md) has the roadmap and what
-was built at each step.
+tokens. The Snowflake engine is tested on an emulator, on saved query plans and by live
+tests against a real account, but **a server has not yet run on one**.
+[docs/plan.md](docs/plan.md) has the roadmap and what was built at each step.
 
 ## More
 

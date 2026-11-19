@@ -5,8 +5,8 @@ policy file, masking, budgets and the audit log all work the same way. The audit
 stays Postgres either way. This page covers the setup, what differs from Postgres, and how
 far the Snowflake engine has been tested.
 
-> **Not yet run against a real account.** The engine is tested on an emulator and on saved
-> query plans. See [How far it is tested](#how-far-it-is-tested) before relying on it.
+> **Only the engine's live tests have run against a real account.** A server has not yet
+> been run on one. See [How far it is tested](#how-far-it-is-tested) before relying on it.
 
 ## Setting it up
 
@@ -79,8 +79,10 @@ percent-encoded. A profile's own `dsn` works as for Postgres: usually another ro
 The engine is tested against a stand-in for the connector (every `pytest`), and on
 [fakesnow](https://github.com/tekumara/fakesnow), which runs Snowflake SQL on DuckDB. fakesnow
 has no planner, so the cost check is tested on saved plans, one from Snowflake's documentation
-and the rest written in its shape. **It has not yet run against a real account.** The tests
-for that are written and only read:
+and the rest written in its shape. The live tests have also passed against a real trial
+account. They connect, run a query, keep to the row cap and the statement timeout, explain,
+read the catalog, refuse a second statement and report the role, and they only read. **A
+server has not yet been run on a real account.**
 
 ```bash
 uv run --with 'fakesnow==0.12.1' --with 'snowflake-connector-python<5' pytest tests/fakesnow

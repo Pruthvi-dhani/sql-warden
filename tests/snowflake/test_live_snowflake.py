@@ -6,8 +6,8 @@ Skipped unless SNOWFLAKE_DSN is set, to a connection string as in warden.yaml:
         uv run pytest -m snowflake
 
 Everything here only reads: it creates, changes and drops nothing, and needs no particular
-tables. It costs a few seconds of the warehouse. These have not yet been run against an
-account; when they first are, expect to adjust the engine to what Snowflake really returns.
+tables. It costs a few seconds of the warehouse. First run against a trial account in
+November 2026, where all of it passed.
 """
 
 import os
