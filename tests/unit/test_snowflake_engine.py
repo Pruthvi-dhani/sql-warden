@@ -61,6 +61,9 @@ EXPIRED = errors.DatabaseError(
     errno=390114,
     sqlstate="08001",
 )
+ENDED = errors.ProgrammingError(  # as a real account gave it, for a session ended on its side
+    msg="Session no longer exists.  New login required to access the service.", errno=390111
+)
 
 
 def _plan(name: str) -> dict[str, Any]:
@@ -613,7 +616,9 @@ class TestErrors:
         assert excinfo.value.sqlstate == "42S02"
         assert len(snow.connections) == 1  # its fault, not the session's: no reconnect
 
-    @pytest.mark.parametrize("lost", [LOST, EXPIRED], ids=["connection", "session"])
+    @pytest.mark.parametrize(
+        "lost", [LOST, EXPIRED, ENDED], ids=["connection", "token", "ended on snowflake's side"]
+    )
     def test_a_lost_session_is_replaced_once(self, lost: BaseException) -> None:
         snow = FakeSnowflake(answers=[lost])
         result = _engine(snow).execute("SELECT ID FROM T")
@@ -625,6 +630,26 @@ class TestErrors:
         snow = FakeSnowflake(answers=[LOST, LOST])
         with pytest.raises(EngineUnavailable, match="could not reach Snowflake: Connection reset"):
             _engine(snow).execute("SELECT 1")
+        assert len(snow.connections) == 2
+
+    def test_a_session_that_ends_again_says_so(self) -> None:
+        snow = FakeSnowflake(answers=[ENDED, ENDED])
+        with pytest.raises(EngineUnavailable, match="the Snowflake session ended: Session no"):
+            _engine(snow).execute("SELECT 1")
+
+    def test_a_thread_late_to_a_lost_session_leaves_its_replacement_open(self) -> None:
+        # Every thread on a session that ended fails at once. The first replaces it; one
+        # that gets there after must not close the new session under the others' queries.
+        snow = FakeSnowflake()
+        engine = _engine(snow)
+        engine.execute("SELECT 1")
+        ended = snow.connections[0]
+        snow.answers.append(ENDED)
+        engine.execute("SELECT 1")  # the first thread: fails, replaces, runs again
+        replacement = snow.connections[1]
+        engine._discard(ended)  # a second thread that failed on the same session
+        assert (ended.closed, replacement.closed) == (True, False)
+        engine.execute("SELECT 1")
         assert len(snow.connections) == 2
 
     def test_a_bug_is_not_dressed_up_as_snowflakes(self) -> None:

@@ -1401,7 +1401,7 @@ about it needs a real account, and is 10.3.
   answered on the record once; a closed sink leaving nothing open). 9.3's tests run again
   on pools, unchanged (exactly 30 of 96, exactly 25), and 9.6's writer tests too.
 
-**10.3 Snowflake's session under load** (waits for an account)
+**10.3 Snowflake's session under load** ✅ done
 - Two things nobody can answer without a real account, to be settled with 7.2's live tests
   the first time they run:
   - Whether many threads running queries on one session at once is sound and fast enough, or
@@ -1411,6 +1411,36 @@ about it needs a real account, and is 10.3.
     an ordinary query error instead, and would then fail every request until a restart.
 - A live test for each, written with this point and skipped like the others without
   `SNOWFLAKE_DSN`; whatever they show is fixed here.
+- As built: first run against a trial account, where 7.2's live tests passed but for one
+  test's guess at the casing of the SQL that runs (`AS one`, which Snowflake reads as `ONE`).
+- **One session holds.** Read-only queries on the demo table, from threads on one engine
+  against an engine per thread, from one machine:
+
+  | Threads | One session | A session each |
+  |---|---|---|
+  | 4 | 27.7/s | 36.7/s |
+  | 8 | 54.8/s | 40.9/s |
+  | 16 | 120.3/s | 100.1/s |
+
+  No answer reached the wrong thread, so the engine keeps one session per profile.
+- **An ended session did fail every request.** A session ended on Snowflake's side
+  (`SYSTEM$ABORT_SESSION`, as an idle one ends) comes back as a `ProgrammingError` with
+  errno 390111 and no SQLSTATE. The engine read that as the query's own failure and never
+  reconnected. Now 390111–390115 (an ended session, an expired or missing token) are a lost
+  session: replaced once, and the request asked again.
+- **And a lost session was replaced too often.** Every thread on a session that ends fails
+  at once, and each dropped whatever session was current, so a late thread closed the
+  replacement and the queries just started on it. Now a thread drops the session only if it
+  is still the one that failed.
+- Tests: unit, the error as the account gave it is replaced once and says so if it ends
+  again, and a thread late to a lost session leaves its replacement open. Live, 80 queries
+  from 16 threads each get their own answer on one session, and a session ended on
+  Snowflake's side is replaced (11 live tests now).
+- Found and left open, for a decision: the startup role check would not let a server start
+  on that account. Its privileges query took 5–7 s there, over the default 5 s statement
+  timeout. And it counts a `CREATE SCHEMA` on another database (`SNOWFLAKE_LEARNING_DB`,
+  through a role a trial account grants `PUBLIC`) against the role, where the docs say it
+  looks at the connection's database only.
 
 ## Verification
 - After each point, run `uv run ruff check . && uv run mypy && uv run pytest -m "not snowflake"`.

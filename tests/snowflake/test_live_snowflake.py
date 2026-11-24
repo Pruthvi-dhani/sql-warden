@@ -5,12 +5,13 @@ Skipped unless SNOWFLAKE_DSN is set, to a connection string as in warden.yaml:
     SNOWFLAKE_DSN='snowflake://USER:PASSWORD@ACCOUNT/DATABASE/SCHEMA?warehouse=WH&role=ROLE' \\
         uv run pytest -m snowflake
 
-Everything here only reads: it creates, changes and drops nothing, and needs no particular
-tables. It costs a few seconds of the warehouse. First run against a trial account in
-November 2026, where all of it passed.
+Everything here only reads: it creates, changes and drops nothing but a session of its own,
+which one test ends, and needs no particular tables. It costs a few seconds of the
+warehouse. First run against a trial account in November 2026, where all of it passed.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -99,3 +100,28 @@ def test_through_the_warden(engine: SnowflakeEngine) -> None:
     assert outcome.result.rows == ((1,),)
     refused = warden.run("select system$wait(1)")
     assert refused.result is None
+
+
+def test_many_threads_share_one_session(engine: SnowflakeEngine) -> None:
+    # As a server's worker threads do: each gets its own answer, all on the one session.
+    def ask(n: int) -> tuple[object, ...]:
+        return engine.execute(f"SELECT CURRENT_SESSION() AS S, {n} AS N").rows[0]
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        answers = list(pool.map(ask, range(80)))
+    assert [n for _, n in answers] == list(range(80))
+    assert len({session for session, _ in answers}) == 1
+
+
+def test_a_session_ended_on_snowflakes_side_is_replaced() -> None:
+    # Sessions end on Snowflake's side when idle too long; ending one at once is the same to
+    # the engine. It used to take the error for the query's and fail until a restart.
+    assert DSN is not None
+    ended, other = SnowflakeEngine(DSN), SnowflakeEngine(DSN)
+    try:
+        session = ended.execute("SELECT CURRENT_SESSION()").rows[0][0]
+        other.execute(f"SELECT SYSTEM$ABORT_SESSION({int(str(session))})")
+        assert ended.execute("SELECT CURRENT_SESSION()").rows[0][0] != session
+    finally:
+        ended.close()
+        other.close()

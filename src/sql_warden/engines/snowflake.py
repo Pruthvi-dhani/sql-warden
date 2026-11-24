@@ -65,6 +65,11 @@ _WRITES_SQL = """
 _ADMIN_ROLES = ("ACCOUNTADMIN", "SECURITYADMIN", "SYSADMIN", "USERADMIN", "ORGADMIN")
 _CANCELLED = "57014"
 """The SQLSTATE of a statement Snowflake cancelled: its timeout, most often."""
+_SESSION_ENDED = frozenset({"390111", "390112", "390113", "390114", "390115"})
+"""Snowflake's error numbers for a session that has ended, or whose token expired or is
+gone. Each needs a new login and says nothing about the query. 390111 is what a real account
+gave for a session ended on its side, as a ProgrammingError with no SQLSTATE; the rest are
+the older Python connector's names for expired and missing tokens."""
 
 
 class _Cursor(Protocol):
@@ -268,7 +273,8 @@ def _message(exc: BaseException) -> str:
 
 class SnowflakeEngine:
     """Runs queries over one Snowflake session, opened on first use and reopened if it is
-    lost. Threads share it: the connector lets them.
+    lost. Threads share it: the connector lets them, and on a real account 16 threads on one
+    session ran as fast as 16 sessions did, each getting its own answers.
 
     The session's statement timeout covers every statement, the catalog and EXPLAIN included,
     and its MULTI_STATEMENT_COUNT of 1 makes Snowflake refuse a second statement. Each query
@@ -389,16 +395,17 @@ class SnowflakeEngine:
     def _attempt[T](self, action: Callable[[_Connection], T]) -> T:
         # Two tries: a session that was lost since last time (they expire when idle) gets
         # one fresh replacement. Everything here only reads, so trying again is safe.
+        conn: _Connection | None = None
         try:
-            return action(self._connection())
+            conn = self._connection()
+            return action(conn)
         except Exception as exc:
             error = self._translated(exc)
             if error is None:
                 raise
             if not isinstance(error, EngineUnavailable):
                 raise error from exc
-            with self._lock:
-                self._drop()
+            self._discard(conn)
         try:
             return action(self._connection())
         except Exception as exc:
@@ -451,6 +458,14 @@ class SnowflakeEngine:
     def _reason(self, exc: BaseException) -> str:
         return _message(exc) if self._is_connector_error(exc) else type(exc).__name__
 
+    def _discard(self, conn: _Connection | None) -> None:
+        """Drops conn if it is still the session in use. Every thread on a session that
+        ended fails at once, and the first to get here replaces it: the rest must not close
+        that replacement, and the queries already running on it, for theirs."""
+        with self._lock:
+            if conn is not None and self._conn is conn:
+                self._drop()
+
     def _drop(self) -> None:
         conn, self._conn = self._conn, None
         if conn is not None:
@@ -474,6 +489,8 @@ class SnowflakeEngine:
         errors = _connector().errors
         sqlstate = getattr(exc, "sqlstate", None)
         message = _message(exc)
+        if str(getattr(exc, "errno", "")) in _SESSION_ENDED:
+            return EngineUnavailable(f"the Snowflake session ended: {message}")
         if sqlstate == _CANCELLED:
             return QueryTimeout(
                 f"query cancelled (the statement timeout is {self.statement_timeout_s} s): "
